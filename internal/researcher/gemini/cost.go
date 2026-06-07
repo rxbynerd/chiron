@@ -1,5 +1,7 @@
 package gemini
 
+import "github.com/rxbynerd/chiron/internal/interactions"
+
 // Planning cost estimates. Google publishes a per-tier cost envelope in
 // USD (docs/INTERACTIONS-API.md §7, last_verified 2026-06-07):
 //
@@ -31,6 +33,23 @@ func estimatedCostGBP(tier string) float64 {
 		return estimateUSDDeepResearch * usdToGBPPlanningRate
 	case TierDeepResearchMax:
 		return estimateUSDDeepResearchMax * usdToGBPPlanningRate
+	default:
+		return 0
+	}
+}
+
+// estimateForAgentID maps a wire agent identifier back to its tier
+// estimate — for resumed interactions (chiron get), where the tier is
+// read off the interaction itself rather than configured. Follow-up
+// interactions carry a model id instead and estimate zero: model-priced
+// Q&A is outside the tier table, and inventing a figure for it would
+// put a fabricated cost in the report's front matter.
+func estimateForAgentID(agentID string) float64 {
+	switch agentID {
+	case interactions.AgentDeepResearch:
+		return estimatedCostGBP(TierDeepResearch)
+	case interactions.AgentDeepResearchMax:
+		return estimatedCostGBP(TierDeepResearchMax)
 	default:
 		return 0
 	}

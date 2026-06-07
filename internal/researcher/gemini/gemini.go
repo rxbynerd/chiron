@@ -88,6 +88,7 @@ type Researcher struct {
 	poll   *interactions.Client
 
 	agentID   string
+	model     string // follow-up Q&A mode: create with model, not agent
 	cfg       *interactions.AgentConfig
 	tools     []interactions.Tool
 	toolNames []string
@@ -98,6 +99,7 @@ type Researcher struct {
 
 	pollCount atomic.Int64
 	mu        sync.Mutex
+	started   bool // Start ran: lastQuery and toolNames describe the interaction
 	lastQuery string
 }
 
@@ -120,21 +122,9 @@ func New(opts Options) (*Researcher, error) {
 		return nil, err
 	}
 
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	}
-	common := []interactions.Option{interactions.WithHTTPClient(httpClient)}
-	if opts.BaseURL != "" {
-		common = append(common, interactions.WithBaseURL(opts.BaseURL))
-	}
-	create, err := interactions.New(opts.APIKey, append(common, interactions.WithMaxRetries(0))...)
+	create, poll, err := newClients(opts)
 	if err != nil {
-		return nil, fmt.Errorf("gemini: %w", err)
-	}
-	poll, err := interactions.New(opts.APIKey, common...)
-	if err != nil {
-		return nil, fmt.Errorf("gemini: %w", err)
+		return nil, err
 	}
 
 	return &Researcher{
@@ -153,6 +143,37 @@ func New(opts Options) (*Researcher, error) {
 		},
 	}, nil
 }
+
+// newClients builds the create/poll client pair every adapter entry
+// point shares: the create client with automatic retries disabled (a
+// retried POST /interactions after an ambiguous 5xx could start — and
+// pay for — a second task), the poll client with the default retries,
+// because GET is idempotent.
+func newClients(opts Options) (create, poll *interactions.Client, err error) {
+	httpClient := opts.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	common := []interactions.Option{interactions.WithHTTPClient(httpClient)}
+	if opts.BaseURL != "" {
+		common = append(common, interactions.WithBaseURL(opts.BaseURL))
+	}
+	create, err = interactions.New(opts.APIKey, append(common, interactions.WithMaxRetries(0))...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gemini: %w", err)
+	}
+	poll, err = interactions.New(opts.APIKey, common...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gemini: %w", err)
+	}
+	return create, poll, nil
+}
+
+// EstimatedCostGBP returns the planning cost estimate for one task of
+// this researcher's binding — the figure the CLI budget gate compares
+// against the cap before any create. Zero in follow-up mode: model-
+// priced Q&A is outside the tier table (see cost.go).
+func (r *Researcher) EstimatedCostGBP() float64 { return r.estimate }
 
 // tierAgent maps a tier name to its wire agent identifier and planning
 // cost estimate. An unknown tier is rejected here, before a request is
@@ -244,30 +265,50 @@ func assembleTools(opts Options) ([]interactions.Tool, []string, error) {
 // Start implements researcher.Researcher: it renders the prompt, builds
 // the create request, and starts the background interaction
 // (background and store both true — §3's mandatory pairing for deep
-// research).
+// research). In follow-up mode (NewFollowUp) the request carries model
+// rather than agent, no agent_config and no tools, and the query
+// travels verbatim — a follow-up is a question about an existing
+// report, not a new research task, so the report template does not
+// apply.
 func (r *Researcher) Start(ctx context.Context, task researcher.Task) (string, error) {
 	if task.Query == "" {
 		return "", errors.New("gemini: query must not be empty")
 	}
-	prompt, err := r.prompt.render(task.Query)
-	if err != nil {
-		return "", err
-	}
-	input, err := buildInput(prompt, r.inputs)
-	if err != nil {
-		return "", err
+
+	var req *interactions.CreateRequest
+	if r.model != "" {
+		if task.PreviousInteractionID == "" {
+			return "", errors.New("gemini: a follow-up needs the interaction id it follows up on")
+		}
+		req = &interactions.CreateRequest{
+			Model:                 r.model,
+			Input:                 task.Query,
+			Background:            true,
+			Store:                 true,
+			Stream:                false,
+			PreviousInteractionID: task.PreviousInteractionID,
+		}
+	} else {
+		prompt, err := r.prompt.render(task.Query)
+		if err != nil {
+			return "", err
+		}
+		input, err := buildInput(prompt, r.inputs)
+		if err != nil {
+			return "", err
+		}
+		req = &interactions.CreateRequest{
+			Agent:                 r.agentID,
+			Input:                 input,
+			AgentConfig:           r.cfg,
+			Tools:                 r.tools,
+			Background:            true,
+			Store:                 true,
+			Stream:                false,
+			PreviousInteractionID: task.PreviousInteractionID,
+		}
 	}
 
-	req := &interactions.CreateRequest{
-		Agent:                 r.agentID,
-		Input:                 input,
-		AgentConfig:           r.cfg,
-		Tools:                 r.tools,
-		Background:            true,
-		Store:                 true,
-		Stream:                false,
-		PreviousInteractionID: task.PreviousInteractionID,
-	}
 	in, err := r.create.Create(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("gemini: creating interaction: %w", err)
@@ -277,6 +318,7 @@ func (r *Researcher) Start(ctx context.Context, task researcher.Task) (string, e
 	}
 
 	r.mu.Lock()
+	r.started = true
 	r.lastQuery = task.Query
 	r.mu.Unlock()
 	r.pollCount.Store(0)
@@ -312,6 +354,13 @@ func (r *Researcher) Result(ctx context.Context, id string) (*types.Interaction,
 // Citations, the usage block flattens into cost signals, and the
 // adapter contributes what the wire cannot — the original query, the
 // resolved tool set, the poll count, and the planning cost estimate.
+//
+// Query and tool set are recorded only for interactions this adapter
+// started: a resumed interaction (chiron get) ran with whatever was
+// requested at its creation, which the API does not echo back, and the
+// recorded set must be the used set — so it stays absent rather than
+// guessed. The estimate likewise falls back to the wire agent id for
+// resumed interactions.
 func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 	out := &types.Interaction{
 		ID:           in.ID,
@@ -319,14 +368,26 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 		Status:       types.Status(in.Status),
 		StatusDetail: statusDetail(in.Status),
 		CreatedAt:    in.Created,
-		Tools:        r.toolNames,
 	}
 	if out.Agent == "" {
-		out.Agent = r.agentID
+		// Follow-up interactions carry model, not agent (§3).
+		out.Agent = in.Model
 	}
+
 	r.mu.Lock()
-	out.Query = r.lastQuery
+	started, query := r.started, r.lastQuery
 	r.mu.Unlock()
+
+	estimate := r.estimate
+	if started {
+		out.Query = query
+		out.Tools = r.toolNames
+		if out.Agent == "" {
+			out.Agent = r.agentID
+		}
+	} else {
+		estimate = estimateForAgentID(in.Agent)
+	}
 	if in.Status.Terminal() {
 		out.CompletedAt = in.Updated
 	}
@@ -354,7 +415,7 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 		ThoughtTokens:    in.Usage.TotalThoughtTokens,
 		SearchCount:      searchCount(in.Usage.GroundingToolCount),
 		PollCount:        int(r.pollCount.Load()),
-		EstimatedCostGBP: r.estimate,
+		EstimatedCostGBP: estimate,
 	}
 	return out
 }

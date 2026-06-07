@@ -243,6 +243,39 @@ func TestEndToEndCompletedMapsWireToDomain(t *testing.T) {
 	}
 }
 
+func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
+	// chiron get resumes an interaction this adapter never started: the
+	// query and tool set of the original create are unknowable (the API
+	// does not echo them), so the domain model must not claim them —
+	// the recorded set must be the used set. The estimate falls back to
+	// the wire agent id, here the max tier despite the adapter being
+	// configured for the default tier.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(`{
+			"id": "v1_resumed",
+			"agent": "deep-research-max-preview-04-2026",
+			"status": "completed",
+			"steps": [{"type": "model_output", "content": [{"type": "text", "text": "# Report"}]}]
+		}`))
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server)
+	in, err := r.Result(context.Background(), "v1_resumed")
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if in.Tools != nil {
+		t.Errorf("tools = %v, want none recorded for a resumed interaction", in.Tools)
+	}
+	if in.Query != "" {
+		t.Errorf("query = %q, want empty for a resumed interaction", in.Query)
+	}
+	if want := estimatedCostGBP(TierDeepResearchMax); in.Usage.EstimatedCostGBP != want {
+		t.Errorf("estimate = %v, want %v derived from the wire agent id", in.Usage.EstimatedCostGBP, want)
+	}
+}
+
 func TestFailedInteractionCarriesDetail(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Write([]byte(`{"id":"v1_fail","status":"failed","created":"2026-06-07T12:00:00Z","updated":"2026-06-07T12:05:00Z"}`))
