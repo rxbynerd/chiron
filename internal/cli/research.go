@@ -92,7 +92,7 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 
 		var previousID string
 		if cfg.Plan {
-			previousID, err = reviewPlan(ctx, cmd, cfg, opts)
+			previousID, err = reviewPlan(ctx, cmd, cfg, opts, deps.Tracer)
 			if err != nil {
 				return err
 			}
@@ -240,7 +240,19 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 		Text string `json:"text"`
 	}
 	opts.OnThought = func(text string) {
-		payload, err := json.Marshal(deltaPayload{Type: "thought_summary", Text: text})
+		// Scrubbed like every other output path: --input documents may
+		// contain credentials the agent quotes back in its thinking.
+		payload, err := json.Marshal(deltaPayload{Type: "thought_summary", Text: secret.Scrub(text)})
+		if err != nil {
+			return
+		}
+		_ = tr.Emit(ctx, transport.Event{Kind: transport.KindDelta, Payload: payload})
+	}
+	opts.OnStreamDegraded = func() {
+		// The in-flight signal that streaming gave up and the await
+		// degraded to polling — without it, an operator watching the
+		// event stream cannot tell a connectivity failure from --quiet.
+		payload, err := json.Marshal(deltaPayload{Type: "stream_degraded", Text: "streaming failed repeatedly; awaiting by polling"})
 		if err != nil {
 			return
 		}
@@ -307,7 +319,7 @@ func gateBudget(cfg config.ResearchConfig, estimateGBP float64) error {
 // stderr: stdout belongs to the report. Without a terminal on stdin
 // there is no one to approve the spend, so the run aborts unless
 // --accept-plan says otherwise.
-func reviewPlan(ctx context.Context, cmd *cobra.Command, cfg config.ResearchConfig, opts gemini.Options) (string, error) {
+func reviewPlan(ctx context.Context, cmd *cobra.Command, cfg config.ResearchConfig, opts gemini.Options, tracer trace.Tracer) (string, error) {
 	if !stdinIsTerminal(cmd.InOrStdin()) && !cfg.AcceptPlan {
 		return "", errors.New("research --plan: stdin is not a terminal, so the plan cannot be reviewed interactively — pass --accept-plan to approve the first plan unattended")
 	}
@@ -322,7 +334,17 @@ func reviewPlan(ctx context.Context, cmd *cobra.Command, cfg config.ResearchConf
 		Out:        cmd.ErrOrStderr(),
 		AutoAccept: cfg.AcceptPlan,
 	}
-	id, err := session.Run(ctx, cfg.Query)
+	// The plan phase can spend minutes and several API round-trips;
+	// the span makes it visible to trace backends rather than a gap
+	// before the research root span. It necessarily precedes that root
+	// span — planning happens before run.Run — so it traces as its own
+	// root rather than a child.
+	planCtx, span := tracer.StartSpan(ctx, trace.SpanPlan)
+	id, err := session.Run(planCtx, cfg.Query)
+	if id != "" {
+		span.SetAttr("interaction_id", id)
+	}
+	span.End(err)
 	if errors.Is(err, planner.ErrAborted) {
 		// Declining the plan blocks the run before any research spend —
 		// the same contract as the budget gate.

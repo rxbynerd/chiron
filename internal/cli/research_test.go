@@ -34,7 +34,9 @@ func newInteractionsServer(t *testing.T, finalStatus string) *httptest.Server {
 		if r.URL.Query().Get("stream") == "true" {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Write([]byte("id: e1\nevent: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary_delta\",\"text\":\"weighing sources\"}}\n\n"))
+			flush(w)
 			w.Write([]byte("id: e2\nevent: interaction.status_update\ndata: {\"interaction_id\":\"v1_smoke\",\"status\":\"" + finalStatus + "\"}\n\n"))
+			flush(w)
 			return
 		}
 		w.Write([]byte(`{
@@ -124,6 +126,16 @@ func TestResearchEndToEndText(t *testing.T) {
 func sseStatus(w http.ResponseWriter, id, status string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Write([]byte("id: e1\nevent: interaction.status_update\ndata: {\"interaction_id\":\"" + id + "\",\"status\":\"" + status + "\"}\n\n"))
+	flush(w)
+}
+
+// flush pushes buffered SSE frames to the client, so a handler that
+// keeps the connection open after writing cannot leave the scanner
+// blocked (matches the gemini package's sseWrite helper).
+func flush(w http.ResponseWriter) {
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 // eventKinds parses the NDJSON event stream from stderr into its kinds.
@@ -182,7 +194,7 @@ func TestResearchQuietPolls(t *testing.T) {
 }
 
 func TestStreamTogglesThinkingSummaries(t *testing.T) {
-	for _, tc := range []struct {
+	for _, tt := range []struct {
 		name string
 		args []string
 		want string
@@ -190,7 +202,7 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 		{"stream default", nil, "auto"},
 		{"quiet", []string{"--quiet"}, "none"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var (
 				mu     sync.Mutex
 				bodies []map[string]any
@@ -218,7 +230,7 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 			t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 			t.Setenv("GEMINI_API_KEY", "test-key")
 
-			args := append([]string{"research", "--query", "q", "-o", "none"}, tc.args...)
+			args := append([]string{"research", "--query", "q", "-o", "none"}, tt.args...)
 			if _, stderr, err := execute(t, args...); err != nil {
 				t.Fatalf("research: %v\nstderr: %s", err, stderr)
 			}
@@ -232,8 +244,8 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 			if cfg == nil {
 				t.Fatal("create request missing agent_config")
 			}
-			if got := cfg["thinking_summaries"]; got != tc.want {
-				t.Errorf("thinking_summaries = %v, want %q — cfg.Stream must toggle the API request", got, tc.want)
+			if got := cfg["thinking_summaries"]; got != tt.want {
+				t.Errorf("thinking_summaries = %v, want %q — cfg.Stream must toggle the API request", got, tt.want)
 			}
 		})
 	}
@@ -371,5 +383,43 @@ func TestResearchUnresolvableSecret(t *testing.T) {
 	}
 	if _, ok := errors.AsType[*ExitError](err); ok {
 		t.Error("secret failures are usage errors, not research outcomes")
+	}
+}
+
+// TestThoughtSummariesAreScrubbed pins C2-SEC-1: --input documents may
+// contain credentials the agent quotes back in its thinking, so thought
+// deltas pass through secret.Scrub before reaching stderr — the same
+// structural guarantee every other output path carries.
+func TestThoughtSummariesAreScrubbed(t *testing.T) {
+	// A Google-API-key-shaped credential (AIza + 35 key characters).
+	const leaked = "AIzaSyA1234567890abcdefghijklmnopqrstuv"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"id":"v1_scrub","status":"in_progress"}`))
+			return
+		}
+		if r.URL.Query().Get("stream") == "true" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("id: e1\nevent: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary_delta\",\"text\":\"the key " + leaked + " appears in the document\"}}\n\n"))
+			flush(w)
+			w.Write([]byte("id: e2\nevent: interaction.status_update\ndata: {\"interaction_id\":\"v1_scrub\",\"status\":\"completed\"}\n\n"))
+			flush(w)
+			return
+		}
+		w.Write([]byte(`{"id":"v1_scrub","status":"completed"}`))
+	}))
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	_, stderr, err := execute(t, "research", "--query", "q", "-o", "none")
+	if err != nil {
+		t.Fatalf("research: %v\nstderr: %s", err, stderr)
+	}
+	if strings.Contains(stderr, leaked) {
+		t.Errorf("the credential reached stderr unscrubbed:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "[REDACTED:google-api-key]") {
+		t.Errorf("stderr must carry the redaction marker where the credential was:\n%s", stderr)
 	}
 }

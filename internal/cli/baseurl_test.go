@@ -23,9 +23,9 @@ func TestBaseURLOverrideRejectedBeforeAnyRequest(t *testing.T) {
 		{"bare string no host", "not-a-url"},
 		{"https without host", "https://"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("CHIRON_GEMINI_BASE_URL", tc.url)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CHIRON_GEMINI_BASE_URL", tt.url)
 			t.Setenv("GEMINI_API_KEY", "test-key")
 			_, _, err := execute(t, "research", "--query", "q", "-o", "none")
 			if err == nil || !strings.Contains(err.Error(), "must be an absolute https:// URL") {
