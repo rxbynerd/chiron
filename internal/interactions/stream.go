@@ -185,6 +185,12 @@ func (s *Stream) Next() (*Event, error) {
 				}
 				data = append(data, value...)
 				haveData = true
+				// The scanner bounds individual lines; this bounds the
+				// payload accumulated across multiple data: lines of one
+				// event, so fragmenting cannot bypass maxEventBytes.
+				if int64(len(data)) > s.maxEventBytes {
+					return nil, fmt.Errorf("interactions: SSE event data exceeds %d-byte bound", s.maxEventBytes)
+				}
 			case "id":
 				// Per the SSE spec, ignore ids containing NUL.
 				if !strings.ContainsRune(value, 0) {

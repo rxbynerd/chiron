@@ -348,3 +348,25 @@ func TestStreamEventTooLarge(t *testing.T) {
 		t.Errorf("Next() = %v, want bufio.ErrTooLong", err)
 	}
 }
+
+func TestStreamEventDataAccumulationBounded(t *testing.T) {
+	// C1-SSE-1: two data: lines of 80 bytes each are individually under
+	// the 128-byte bound — the scanner alone would pass them — but the
+	// accumulated payload (80 + 1 + 80 = 161 bytes) must trip the bound
+	// before the event is dispatched.
+	line := strings.Repeat("x", 80)
+	body := "event: step.delta\ndata: " + line + "\ndata: " + line + "\n\n"
+	c := sseClient(t, body, nil, WithMaxEventBytes(128))
+	s, err := c.Stream(context.Background(), "v1_abc", "")
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	defer s.Close()
+	ev, err := s.Next()
+	if ev != nil {
+		t.Errorf("an over-bound event must not be dispatched, got %+v", ev)
+	}
+	if err == nil || !strings.Contains(err.Error(), "exceeds 128-byte bound") {
+		t.Errorf("Next() = %v, want the accumulation bound error", err)
+	}
+}

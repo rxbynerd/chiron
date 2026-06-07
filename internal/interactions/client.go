@@ -112,7 +112,30 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		opt(c)
 	}
+	// Go's net/http strips only its own sensitive headers (Authorization,
+	// Cookie, ...) on cross-domain redirects — never custom ones, so a
+	// followed redirect would deliver x-goog-api-key to the new host. The
+	// same-host policy is enforced on a shallow copy (sharing the
+	// caller's Transport, jar and timeout), so supplying a bare client
+	// via WithHTTPClient cannot lose the guarantee.
+	hc := *c.httpClient
+	hc.CheckRedirect = refuseCrossHostRedirects
+	c.httpClient = &hc
 	return c, nil
+}
+
+// refuseCrossHostRedirects is every client's redirect policy: same-host
+// redirects are followed (capped at three hops), cross-host redirects
+// are refused outright — the API key header travels on every request,
+// and following one would hand it to the redirect target (CWE-601).
+func refuseCrossHostRedirects(req *http.Request, via []*http.Request) error {
+	if req.URL.Host != via[0].URL.Host {
+		return fmt.Errorf("interactions: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
+	}
+	if len(via) >= 3 {
+		return errors.New("interactions: too many redirects")
+	}
+	return nil
 }
 
 // Create starts an interaction: POST /v1beta/interactions
@@ -261,6 +284,8 @@ func (c *Client) backoffDelay(attempt int) time.Duration {
 	if attempt > 30 { // avoid shift overflow; far beyond any sane retry count
 		return c.retryMaxDelay
 	}
+	// Left-shifting time.Duration (int64) wraps on overflow — defined
+	// behaviour in Go — so d <= 0 below catches a wrapped negative.
 	d := c.retryBaseDelay << attempt
 	if d <= 0 || d > c.retryMaxDelay {
 		d = c.retryMaxDelay
