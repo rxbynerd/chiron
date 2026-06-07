@@ -116,3 +116,29 @@ Anything without the `secret://` prefix is rejected as a literal, and the
 rejection error never echoes the offending value — it may itself be the
 credential, and errors end up in logs. A v2 GCP Secret Manager backend
 slots in as a new segment (`secret://gcp/...`) without grammar changes.
+
+## 2026-06-07 — Markdown formatter performs no IO; the sink writes assets
+
+The markdown Formatter returns chart images as `Report.Assets` (name,
+MIME type, bytes) and references them from the document as relative
+links, rather than writing files itself. The `types.Report`/`types.Asset`
+shapes already encode this split, and it keeps the Formatter pure —
+trivially testable against golden files, reusable by any ReportSink
+(stdout-json embeds the assets; the file sink writes them next to the
+report). Asset names are deterministic (`chart-N.<ext>`) with a
+hand-rolled MIME→extension table, because `mime.ExtensionsByType`
+consults platform databases and would make output non-reproducible
+across machines. Front matter is emitted with `gopkg.in/yaml.v3` — an
+existing dependency (see the dependency-set entry above), so no new
+module is introduced.
+
+Two consequences of formatting the DOMAIN model rather than the wire
+shape: the front matter carries no tool set (the domain `Usage`
+deliberately reduces grounding detail to `search_count`; the requested
+tool list is a wire-level concern recorded in config, not the
+interaction), and citations arrive already deduplicated from the
+adapter, so the formatter just numbers them. Interactions with no final
+text output (failed, cancelled, still in progress) still render a
+complete document — front matter with status and `status_detail`, plus a
+placeholder body — so `chiron get` of an unfinished or broken run never
+produces nothing.
