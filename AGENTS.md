@@ -30,6 +30,7 @@ CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
 | `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines. |
 | `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md). |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. Gemini adapter lands in `researcher/gemini`; v2 fleet orchestrator in `researcher/fleet`. |
+| `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; the gemini binding lives in `researcher/gemini`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report`. |
 | `internal/sink` | `ReportSink` seam: where the final report goes (stdout-markdown, file, stdout-json). |
 | `internal/transport` | `Transport` seam: run events out of the core. stdio NDJSON in v1; gRPC in v2. |
