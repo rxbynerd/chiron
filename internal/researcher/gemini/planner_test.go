@@ -3,11 +3,14 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/rxbynerd/chiron/internal/interactions"
 )
 
 // newPlanServer fakes the planning flow: create returns an in-progress
@@ -161,5 +164,53 @@ func TestPlannerFailedPlanRoundSurfaces(t *testing.T) {
 	_, err := newPlanner(t, server).Propose(context.Background(), "q")
 	if err == nil || !strings.Contains(err.Error(), "ended failed") {
 		t.Errorf("err = %v, want the failed plan round surfaced", err)
+	}
+}
+
+// TestPlannerRoundCompletesWithoutText pins C2-TEST-3 (1/2): the beta
+// API may complete a plan round with no text part — an empty plan
+// renders nothing, silently spending a round, so the guard must
+// surface it. The paid round's id still travels as the recovery
+// handle.
+func TestPlannerRoundCompletesWithoutText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			w.Write([]byte(`{"id":"v1_plan_empty","status":"in_progress"}`))
+			return
+		}
+		w.Write([]byte(`{"id":"v1_plan_empty","status":"completed","steps":[{"type":"model_output","content":[]}]}`))
+	}))
+	defer server.Close()
+
+	plan, err := newPlanner(t, server).Propose(context.Background(), "q")
+	if err == nil || !strings.Contains(err.Error(), "without plan text") {
+		t.Errorf("err = %v, want the empty-plan guard", err)
+	}
+	if plan == nil || plan.InteractionID != "v1_plan_empty" {
+		t.Errorf("plan = %+v, want the paid round's id as the recovery handle", plan)
+	}
+}
+
+// TestPlannerRoundRequiresAction pins C2-TEST-3 (2/2): a
+// requires_action plan outcome must keep its typed identity through
+// the planner's wrap — errors.Is, not string matching — so concludeRun
+// maps it to the research-outcome exit code rather than an
+// infrastructure error.
+func TestPlannerRoundRequiresAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			w.Write([]byte(`{"id":"v1_plan_ra","status":"in_progress"}`))
+			return
+		}
+		w.Write([]byte(`{"id":"v1_plan_ra","status":"requires_action"}`))
+	}))
+	defer server.Close()
+
+	plan, err := newPlanner(t, server).Propose(context.Background(), "q")
+	if !errors.Is(err, interactions.ErrRequiresAction) {
+		t.Errorf("err = %v, want ErrRequiresAction to survive the planner wrap", err)
+	}
+	if plan == nil || plan.InteractionID != "v1_plan_ra" {
+		t.Errorf("plan = %+v, want the paid round's id as the recovery handle", plan)
 	}
 }

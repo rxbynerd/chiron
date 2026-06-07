@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/researcher"
 )
 
@@ -131,5 +132,53 @@ func TestPollCountResetsOnFreshStart(t *testing.T) {
 	}
 	if in.Usage.PollCount != 0 {
 		t.Errorf("poll count = %d after a fresh Start, want 0", in.Usage.PollCount)
+	}
+}
+
+// TestInputPartMIMETypes pins C2-TEST-7: the MIME type on every
+// grounding part reaches the API verbatim, so each extension the table
+// recognises — and the content-sniff fallback for unknown ones — is
+// asserted in the decoded create-request body.
+func TestInputPartMIMETypes(t *testing.T) {
+	cases := []struct {
+		file    string
+		content []byte
+		want    string
+	}{
+		{"photo.jpg", []byte("jpeg-data"), "image/jpeg"},
+		{"photo.jpeg", []byte("jpeg-data"), "image/jpeg"},
+		{"anim.gif", []byte("gif-data"), "image/gif"},
+		{"notes.txt", []byte("plain words"), "text/plain"},
+		// Unknown extension and unprintable bytes: the table returns
+		// nothing and http.DetectContentType sniffs binary.
+		{"blob.bin", []byte{0x00, 0x01, 0xfe, 0xff}, "application/octet-stream"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.file, func(t *testing.T) {
+			in := filepath.Join(t.TempDir(), tt.file)
+			if err := os.WriteFile(in, tt.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var body struct {
+				Input []interactions.Content `json:"input"`
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				decodeJSONBody(t, req, &body)
+				w.Write([]byte(`{"id":"v1_mime","status":"in_progress"}`))
+			}))
+			defer server.Close()
+
+			r := newResearcher(t, server, func(o *Options) { o.Inputs = []string{in} })
+			if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if len(body.Input) != 2 {
+				t.Fatalf("input parts = %+v, want prompt + 1 grounding part", body.Input)
+			}
+			if got := body.Input[1].MIMEType; got != tt.want {
+				t.Errorf("MIME type = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

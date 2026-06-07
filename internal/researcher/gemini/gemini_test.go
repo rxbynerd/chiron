@@ -3,7 +3,6 @@ package gemini
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -48,9 +47,7 @@ func TestStartBuildsCreateRequest(t *testing.T) {
 		if req.Method != http.MethodPost || req.URL.Path != "/v1beta/interactions" {
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatalf("decoding create body: %v", err)
-		}
+		decodeJSONBody(t, req, &body)
 		w.Write([]byte(`{"id":"v1_new","status":"in_progress"}`))
 	}))
 	defer server.Close()
@@ -281,28 +278,59 @@ func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
 }
 
 func TestFailedInteractionCarriesDetail(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Write([]byte(`{"id":"v1_fail","status":"failed","created":"2026-06-07T12:00:00Z","updated":"2026-06-07T12:05:00Z"}`))
-	}))
-	defer server.Close()
+	// C2-TEST-2: every failure variant's detail string lands in the
+	// status_detail front matter of its placeholder report, so each is
+	// pinned to status-specific text — a transposition between the
+	// detail strings must fail loudly, not just a missing one.
+	cases := []struct {
+		status         string
+		domain         types.Status
+		wantDetail     string
+		requiresAction bool
+	}{
+		{"failed", types.StatusFailed, "failed server-side", false},
+		{"cancelled", types.StatusCancelled, "was cancelled", false},
+		{"incomplete", types.StatusIncomplete, "ended incomplete", false},
+		{"budget_exceeded", types.StatusBudgetExceeded, "budget was exceeded", false},
+		{"requires_action", types.StatusRequiresAction, "requires client action", true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Write([]byte(`{"id":"v1_fail","status":"` + tt.status + `","created":"2026-06-07T12:00:00Z","updated":"2026-06-07T12:05:00Z"}`))
+			}))
+			defer server.Close()
 
-	r := newResearcher(t, server)
-	ctx := context.Background()
-	if err := r.Await(ctx, "v1_fail"); err != nil {
-		t.Fatalf("Await: a failed status is terminal, not an await error: %v", err)
-	}
-	in, err := r.Result(ctx, "v1_fail")
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusFailed {
-		t.Errorf("status = %s, want failed", in.Status)
-	}
-	if in.StatusDetail == "" {
-		t.Error("a failure variant must carry a human-readable detail")
-	}
-	if in.CompletedAt.IsZero() {
-		t.Error("a terminal interaction must carry its completion stamp")
+			r := newResearcher(t, server)
+			ctx := context.Background()
+			err := r.Await(ctx, "v1_fail")
+			if tt.requiresAction {
+				// requires_action concludes the await with the typed
+				// error; the Result fetch still maps the detail.
+				if !errors.Is(err, interactions.ErrRequiresAction) {
+					t.Fatalf("Await: %v, want ErrRequiresAction", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Await: %s is terminal, not an await error: %v", tt.status, err)
+			}
+
+			in, err := r.Result(ctx, "v1_fail")
+			if err != nil {
+				t.Fatalf("Result: %v", err)
+			}
+			if in.Status != tt.domain {
+				t.Errorf("status = %s, want %s", in.Status, tt.domain)
+			}
+			if !strings.Contains(in.StatusDetail, tt.wantDetail) {
+				t.Errorf("detail = %q, want it to contain %q", in.StatusDetail, tt.wantDetail)
+			}
+			if tt.status != "failed" && strings.Contains(in.StatusDetail, "failed server-side") {
+				t.Errorf("detail = %q carries the failed wording for %s — details transposed", in.StatusDetail, tt.status)
+			}
+			if in.Status.Terminal() && in.CompletedAt.IsZero() {
+				t.Error("a terminal interaction must carry its completion stamp")
+			}
+		})
 	}
 }
 
@@ -370,9 +398,7 @@ func TestMultimodalInputParts(t *testing.T) {
 		Input []interactions.Content `json:"input"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatalf("decoding create body: %v", err)
-		}
+		decodeJSONBody(t, req, &body)
 		w.Write([]byte(`{"id":"v1_mm","status":"in_progress"}`))
 	}))
 	defer server.Close()
@@ -409,7 +435,7 @@ func TestCustomTemplate(t *testing.T) {
 
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		json.NewDecoder(req.Body).Decode(&body)
+		decodeJSONBody(t, req, &body)
 		w.Write([]byte(`{"id":"v1_tmpl","status":"in_progress"}`))
 	}))
 	defer server.Close()
@@ -450,9 +476,9 @@ func TestConstructionValidation(t *testing.T) {
 		{"mcp via --tools", Options{APIKey: testKey, Tools: []string{"mcp_server"}}},
 		{"missing template", Options{APIKey: testKey, TemplatePath: "/does/not/exist.md"}},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if _, err := New(tc.opts); err == nil {
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := New(tt.opts); err == nil {
 				t.Error("New must reject the configuration before any request is built")
 			}
 		})
@@ -462,7 +488,7 @@ func TestConstructionValidation(t *testing.T) {
 func TestTierMapping(t *testing.T) {
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		json.NewDecoder(req.Body).Decode(&body)
+		decodeJSONBody(t, req, &body)
 		w.Write([]byte(`{"id":"v1_max","status":"in_progress"}`))
 	}))
 	defer server.Close()

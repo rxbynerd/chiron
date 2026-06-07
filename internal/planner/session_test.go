@@ -192,3 +192,30 @@ func TestSessionValidatesInputs(t *testing.T) {
 		t.Error("empty query must be rejected")
 	}
 }
+
+// orphaningPlanner fails its round but hands back the paid round's
+// interaction id, per the Planner seam's partial-Plan contract.
+type orphaningPlanner struct{}
+
+func (orphaningPlanner) Propose(context.Context, string) (*Plan, error) {
+	return &Plan{InteractionID: "v1_orphan"}, errors.New("gemini: awaiting plan interaction v1_orphan: context canceled")
+}
+
+func (orphaningPlanner) Refine(context.Context, string, string) (*Plan, error) {
+	return nil, errors.New("unreachable")
+}
+
+// TestSessionSurfacesOrphanedPlanID pins C2-CODE-2: a plan round that
+// was paid for but could not be concluded surfaces its interaction id
+// with the chiron get recovery hint, so the spend is never silently
+// lost.
+func TestSessionSurfacesOrphanedPlanID(t *testing.T) {
+	var out bytes.Buffer
+	s := &Session{Planner: orphaningPlanner{}, In: strings.NewReader(""), Out: &out}
+	if _, err := s.Run(context.Background(), "q"); err == nil {
+		t.Fatal("a failed round must still fail the session")
+	}
+	if !strings.Contains(out.String(), "chiron get v1_orphan") {
+		t.Errorf("output %q must carry the recovery hint for the paid round", out.String())
+	}
+}

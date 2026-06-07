@@ -327,7 +327,7 @@ func TestQuietPathNeverStreams(t *testing.T) {
 }
 
 func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
-	for _, tc := range []struct {
+	for _, tt := range []struct {
 		name      string
 		summaries bool
 		want      string
@@ -335,7 +335,7 @@ func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
 		{"streaming", true, "auto"},
 		{"quiet", false, "none"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var body struct {
 				AgentConfig struct {
 					ThinkingSummaries string `json:"thinking_summaries"`
@@ -351,12 +351,12 @@ func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
 			}))
 			defer server.Close()
 
-			r := newResearcher(t, server, func(o *Options) { o.ThinkingSummaries = tc.summaries })
+			r := newResearcher(t, server, func(o *Options) { o.ThinkingSummaries = tt.summaries })
 			if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			if body.AgentConfig.ThinkingSummaries != tc.want {
-				t.Errorf("thinking_summaries = %q, want %q", body.AgentConfig.ThinkingSummaries, tc.want)
+			if body.AgentConfig.ThinkingSummaries != tt.want {
+				t.Errorf("thinking_summaries = %q, want %q", body.AgentConfig.ThinkingSummaries, tt.want)
 			}
 		})
 	}
@@ -393,5 +393,213 @@ func decodeJSONBody(t *testing.T, r *http.Request, into any) {
 	t.Helper()
 	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
 		t.Fatalf("decoding request body: %v", err)
+	}
+}
+
+// TestAwaitStreamInteractionCompletedEvent pins C2-TEST-1 (1/3): an
+// interaction.completed event concludes the streaming await, whether
+// the resource travels nested under "interaction" or the completion
+// frame omits content entirely (the API may send either —
+// docs/INTERACTIONS-API.md §5). The poll fallback is never reached.
+func TestAwaitStreamInteractionCompletedEvent(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"embedded interaction", `{"interaction":{"id":"v1_done","status":"completed"}}`},
+		{"no embedded interaction", `{"event_id":"e9"}`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			var plainGets atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost:
+					w.Write([]byte(`{"id":"v1_done","status":"in_progress"}`))
+				case r.URL.Query().Get("stream") == "true":
+					sseWrite(t, w, "id: e9\nevent: interaction.completed\ndata: "+tt.data+"\n\n")
+				default:
+					plainGets.Add(1)
+					w.Write([]byte(`{"id":"v1_done","status":"completed"}`))
+				}
+			}))
+			defer server.Close()
+
+			r := newResearcher(t, server, streamOpts(nil, nil))
+			ctx := context.Background()
+			id, err := r.Start(ctx, researcher.Task{Query: "q"})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := r.Await(ctx, id); err != nil {
+				t.Fatalf("Await: a completed event concludes the await, got %v", err)
+			}
+			if plainGets.Load() != 0 {
+				t.Error("the poll fallback ran for a cleanly completed stream")
+			}
+
+			in, err := r.Result(ctx, id)
+			if err != nil {
+				t.Fatalf("Result: %v", err)
+			}
+			if in.Usage.ReconnectCount != 0 || in.Usage.PollCount != 0 {
+				t.Errorf("reconnects/polls = %d/%d, want 0/0", in.Usage.ReconnectCount, in.Usage.PollCount)
+			}
+		})
+	}
+}
+
+// TestAwaitStreamRequiresActionViaCompletedEvent pins C2-TEST-1 (2/3):
+// a requires_action status carried on an interaction.completed event
+// must propagate as the typed error — were eventStatus broken, the run
+// would proceed as if the interaction completed, with the wrong exit
+// code and no diagnostic.
+func TestAwaitStreamRequiresActionViaCompletedEvent(t *testing.T) {
+	var plainGets atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			w.Write([]byte(`{"id":"v1_rac","status":"in_progress"}`))
+		case r.URL.Query().Get("stream") == "true":
+			sseWrite(t, w, "id: e1\nevent: interaction.completed\ndata: {\"interaction\":{\"id\":\"v1_rac\",\"status\":\"requires_action\"}}\n\n")
+		default:
+			plainGets.Add(1)
+			w.Write([]byte(`{"id":"v1_rac","status":"requires_action"}`))
+		}
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server, streamOpts(nil, nil))
+	ctx := context.Background()
+	id, err := r.Start(ctx, researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Await(ctx, id); !errors.Is(err, interactions.ErrRequiresAction) {
+		t.Fatalf("Await = %v, want ErrRequiresAction through the completed-event path", err)
+	}
+	if plainGets.Load() != 0 {
+		t.Error("requires_action via a completed event must not trigger the poll fallback")
+	}
+}
+
+// TestAwaitStreamInteractionCreatedAlreadyTerminal pins C2-TEST-1
+// (3/3): re-attaching past the end of a finished interaction delivers
+// interaction.created carrying a terminal status as the first event;
+// the await concludes immediately without the poll fallback.
+func TestAwaitStreamInteractionCreatedAlreadyTerminal(t *testing.T) {
+	var plainGets atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			w.Write([]byte(`{"id":"v1_done","status":"in_progress"}`))
+		case r.URL.Query().Get("stream") == "true":
+			sseWrite(t, w, "id: e1\nevent: interaction.created\ndata: {\"id\":\"v1_done\",\"status\":\"completed\"}\n\n")
+		default:
+			plainGets.Add(1)
+			w.Write([]byte(`{"id":"v1_done","status":"completed"}`))
+		}
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server, streamOpts(nil, nil))
+	ctx := context.Background()
+	id, err := r.Start(ctx, researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Await(ctx, id); err != nil {
+		t.Fatalf("Await: an already-terminal created event concludes the await, got %v", err)
+	}
+	if plainGets.Load() != 0 {
+		t.Error("the poll fallback ran for an already-terminal re-attach")
+	}
+}
+
+// TestAwaitStreamCancelledDuringBackoff pins C2-TEST-6: cancellation
+// while the await sleeps between reconnect attempts propagates as
+// context.Canceled — never the poll fallback, whose answer would not
+// change ("context cancellation never falls back", DECISIONS.md).
+func TestAwaitStreamCancelledDuringBackoff(t *testing.T) {
+	dialled := make(chan struct{})
+	var (
+		once      sync.Once
+		plainGets atomic.Int64
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			w.Write([]byte(`{"id":"v1_cb","status":"in_progress"}`))
+		case r.URL.Query().Get("stream") == "true":
+			// Not an event stream: the dial fails and the await enters
+			// its backoff sleep.
+			once.Do(func() { close(dialled) })
+			w.Write([]byte(`{"id":"v1_cb","status":"in_progress"}`))
+		default:
+			plainGets.Add(1)
+			w.Write([]byte(`{"id":"v1_cb","status":"in_progress"}`))
+		}
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server, func(o *Options) {
+		o.Stream = true
+		// A backoff long enough that the cancellation below lands
+		// mid-sleep, never expiring within the test.
+		o.ReconnectBaseDelay = time.Hour
+		o.ReconnectMaxDelay = time.Hour
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id, err := r.Start(ctx, researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- r.Await(ctx, id) }()
+	<-dialled
+	time.Sleep(20 * time.Millisecond) // let the failed dial reach the backoff sleep
+	cancel()
+
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Await = %v, want context.Canceled", err)
+	}
+	if plainGets.Load() != 0 {
+		t.Error("cancellation fell back to polling — the answer would not change")
+	}
+}
+
+// TestAwaitSignalsStreamDegradation pins C2-CODE-4: exhausting the
+// streaming failure budget invokes the OnStreamDegraded observer
+// exactly once, before the poll fallback — the in-flight signal an
+// operator watching the event stream needs.
+func TestAwaitSignalsStreamDegradation(t *testing.T) {
+	var degraded atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			w.Write([]byte(`{"id":"v1_dg","status":"in_progress"}`))
+		case r.URL.Query().Get("stream") == "true":
+			w.Write([]byte(`{"id":"v1_dg","status":"in_progress"}`)) // not SSE: every dial fails
+		default:
+			w.Write([]byte(`{"id":"v1_dg","status":"completed"}`))
+		}
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server, streamOpts(nil, nil), func(o *Options) {
+		o.OnStreamDegraded = func() { degraded.Add(1) }
+	})
+	ctx := context.Background()
+	id, err := r.Start(ctx, researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := r.Await(ctx, id); err != nil {
+		t.Fatalf("Await must conclude via the poll fallback, got %v", err)
+	}
+	if got := degraded.Load(); got != 1 {
+		t.Errorf("OnStreamDegraded called %d time(s), want exactly 1", got)
 	}
 }
