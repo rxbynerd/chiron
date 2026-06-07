@@ -89,6 +89,23 @@ func TestApplyFlagsOverlaysOnlySetFlags(t *testing.T) {
 	}
 }
 
+func TestApplyFlagsPlanningAndModelLevers(t *testing.T) {
+	cfg := Default()
+	fs := newFlagSet(t)
+	if err := fs.Parse([]string{"--plan", "--accept-plan", "--model", "gemini-3.1-pro-preview"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := ApplyFlags(&cfg, fs); err != nil {
+		t.Fatalf("ApplyFlags: %v", err)
+	}
+	if !cfg.Plan || !cfg.AcceptPlan {
+		t.Errorf("plan levers not applied: %+v", cfg)
+	}
+	if cfg.Model != "gemini-3.1-pro-preview" {
+		t.Errorf("model = %q", cfg.Model)
+	}
+}
+
 func TestApplyFlagsParsesMCP(t *testing.T) {
 	cfg := Default()
 	fs := newFlagSet(t)

@@ -18,6 +18,8 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("query", "", "research question (alternatively the positional argument)")
 	fs.String("agent", d.Agent, fmt.Sprintf("agent tier: %q or %q", AgentDeepResearch, AgentDeepResearchMax))
 	fs.Bool("plan", false, "collaborative planning: review and refine the plan before spending")
+	fs.Bool("accept-plan", false, "with --plan, approve the first proposed plan without prompting")
+	fs.String("model", "", "follow-up Q&A model (chiron follow-up; adapter default if unset)")
 	fs.Bool("visualise", false, "ask the agent to produce charts")
 	fs.Bool("stream", d.Stream, "stream thought summaries while awaiting")
 	fs.Bool("quiet", false, "poll silently instead of streaming")
@@ -53,6 +55,10 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Agent = mustString(fs, f.Name)
 		case "plan":
 			cfg.Plan = mustBool(fs, f.Name)
+		case "accept-plan":
+			cfg.AcceptPlan = mustBool(fs, f.Name)
+		case "model":
+			cfg.Model = mustString(fs, f.Name)
 		case "visualise":
 			cfg.Visualise = mustBool(fs, f.Name)
 		case "stream":

@@ -57,6 +57,16 @@ type ResearchConfig struct {
 	// Plan enables collaborative planning: review and refine the agent's
 	// plan before spending money.
 	Plan bool `json:"plan,omitempty" yaml:"plan,omitempty"`
+	// AcceptPlan approves the first proposed plan without prompting —
+	// the documented escape for running --plan without an interactive
+	// terminal (the plan still lands in the stored interaction chain as
+	// an audit trail).
+	AcceptPlan bool `json:"accept_plan,omitempty" yaml:"accept_plan,omitempty"`
+	// Model selects the follow-up Q&A model (chiron follow-up); empty
+	// selects the adapter's documented default. Follow-up uses model,
+	// not agent (docs/INTERACTIONS-API.md §3), so this is independent
+	// of Agent.
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
 	// Visualise asks the agent for charts (visualization: auto plus a
 	// prompt nudge).
 	Visualise bool `json:"visualise,omitempty" yaml:"visualise,omitempty"`
