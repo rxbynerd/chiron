@@ -280,3 +280,77 @@ service; `PollUntilTerminal` returns the snapshot with a typed
 also gained `Citations()` — url_citation and file_citation annotations
 deduplicated by URI in first-seen order — shaped to map directly onto
 the domain `types.Citation{URI, Title}`.
+
+## 2026-06-07 — Create is never retried in the gemini adapter
+
+`internal/interactions` retries transient failures (408/429/5xx) by
+default, and its own decision entry accepted the duplicate-spend risk on
+`Create` "if it bites, `WithMaxRetries(0)` exists". For the adapter that
+actually spends the money it bites pre-emptively: a 5xx on
+`POST /interactions` is ambiguous — the server may have accepted, and
+started billing, a research task costing £1–7 (INTERACTIONS-API.md §7)
+before failing to say so. `researcher/gemini` therefore holds two
+clients over one `http.Client`: the create client with
+`WithMaxRetries(0)`, so a failed create surfaces to the user who retries
+knowingly, and the poll client with the default retries, because GET is
+idempotent. A test pins "exactly one create attempt" on a 502.
+
+## 2026-06-07 — Estimated cost is a tier-table planning figure
+
+`Usage.EstimatedCostGBP` is derived in `researcher/gemini/cost.go` from
+the per-tier USD envelope Google publishes (INTERACTIONS-API.md §7:
+deep-research $1.00–$3.00, deep-research-max $3.00–$7.00): the midpoint
+of the envelope converted at a fixed planning rate of 0.79 USD→GBP,
+chosen because it reproduces the £0.80–£5.50 envelope PROPOSAL §2 quotes
+for the same range. It is a pre-run planning figure for the report front
+matter and the M4 `--budget` lever — not billing. Real pricing, live FX
+and attribution are Stint's (a suite concern, PROPOSAL §2); Chiron holds
+no pricing tables beyond this constant pair.
+
+## 2026-06-07 — The domain Interaction carries the resolved tool set
+
+> Supersedes part of the formatter entry above ("the front matter
+> carries no tool set"): PROPOSAL §4.4 lists the tool set among the
+> front-matter fields, and the gap is now closed.
+
+The API does not echo the requested tools back on the Interaction
+resource, so `types.Interaction` gained `Tools []string`, populated by
+the gemini adapter from the create request it actually sent — which is
+also why the adapter emits the default tool trio explicitly rather than
+relying on server-side defaults: the recorded set must be the used set
+even if a beta API's defaults drift. Entries are wire tool-type names,
+with MCP servers disambiguated as `mcp_server:<name>`. The formatter
+renders the list (flow style) between the estimated cost and the
+sources, matching §4.4's field order.
+
+## 2026-06-07 — Run-core lifecycle: emit errors tolerated, sink errors fatal
+
+`internal/run` treats the two output seams asymmetrically, on money
+grounds. Transport emission is best effort: once a paid task is in
+flight, a broken event stream (closed stderr, dead control-plane
+connection) must not abort the run — failures are recorded on the root
+span and the loop continues, because the report is the artefact and
+events are observability. A sink failure, by contrast, fails the run:
+a report that did not land where it was asked to is a failed emit, and
+the already-emitted interaction id still allows recovery. For the same
+reason the id is emitted the moment `Start` returns, before anything
+else can fail, and failure-variant statuses (failed, cancelled,
+budget_exceeded, incomplete) conclude the run normally — placeholder
+report, cost summary, RunResult — with the outcome carried by the exit
+code, not an error.
+
+## 2026-06-07 — CLI exit codes and composition-root boundaries
+
+`chiron research` exits 0 only when the task completed; 1 for usage,
+configuration and infrastructure errors (including timeout — the run
+could not conclude); 2 when the task ended `failed` or `incomplete`;
+3 when it was `cancelled` or `budget_exceeded` (stopped, not broken).
+The contract is documented in the command's help so pipelines can act
+on the outcome without parsing the report. Environment access lives
+only in the CLI composition root: the OTel tracer binds only when the
+standard `OTEL_EXPORTER_OTLP_*` variables name an endpoint (otherwise
+the no-op tracer — an exporter with nowhere to send spans would buffer
+and drop them), and `CHIRON_GEMINI_BASE_URL` overrides the API endpoint
+so the smoke tests prove the research path end-to-end against httptest
+without real network. The run core itself takes seams and a context
+only.
