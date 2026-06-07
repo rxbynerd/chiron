@@ -30,9 +30,10 @@ var _ Formatter = (*Markdown)(nil)
 
 // frontMatter is the YAML document at the head of the report. Field
 // names are part of Chiron's output contract; keep them stable. The
-// domain model deliberately carries no tool set (it is a wire-level
-// detail), so the cost signals here are the search count, token
-// totals, and estimated cost.
+// cost signals are the search count, token totals, and estimated cost;
+// the tool set is the one the adapter resolved onto the create request
+// (PROPOSAL §4.4), recorded on the domain Interaction since the API
+// does not echo it back.
 type frontMatter struct {
 	Query            string       `yaml:"query,omitempty"`
 	Agent            string       `yaml:"agent,omitempty"`
@@ -44,6 +45,7 @@ type frontMatter struct {
 	Searches         int          `yaml:"searches,omitempty"`
 	Tokens           *tokens      `yaml:"tokens,omitempty"`
 	EstimatedCostGBP float64      `yaml:"estimated_cost_gbp,omitempty"`
+	Tools            []string     `yaml:"tools,omitempty,flow"`
 	Sources          []source     `yaml:"sources,omitempty"`
 }
 
@@ -172,6 +174,7 @@ func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 		Searches:         in.Usage.SearchCount,
 		Tokens:           tokensOf(in.Usage),
 		EstimatedCostGBP: in.Usage.EstimatedCostGBP,
+		Tools:            in.Tools,
 		Sources:          sources,
 	}
 }

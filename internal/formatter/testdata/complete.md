@@ -13,6 +13,7 @@ tokens:
   tool_use: 1000
   thought: 9000
 estimated_cost_gbp: 1.84
+tools: [google_search, url_context, code_execution, 'mcp_server:docs']
 sources:
   - uri: https://example.org/era-report
     title: ERA Annual Safety Report

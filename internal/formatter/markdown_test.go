@@ -37,6 +37,7 @@ func TestMarkdownFormat(t *testing.T) {
 				ID:     "v1_complete",
 				Agent:  "deep-research-preview-04-2026",
 				Query:  "Compare the safety records of European rail operators",
+				Tools:  []string{"google_search", "url_context", "code_execution", "mcp_server:docs"},
 				Status: types.StatusCompleted,
 				Outputs: []types.Output{
 					{Type: types.OutputThoughtSummary, Text: "planning the report..."},
