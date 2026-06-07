@@ -48,6 +48,20 @@ CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
 - Secrets are `secret://` references end to end.
 - Keep commits in logical units; explain rationale in the message body.
 
+## Test infrastructure conventions
+
+- Tests never hit the real network: fakes are `httptest.Server`
+  handlers, routed to the client via `CHIRON_GEMINI_BASE_URL` (CLI
+  e2e) or `Options.BaseURL`/`WithBaseURL` (package tests).
+- Create `httptest.Server` at the call site with `defer server.Close()`;
+  do not hide server lifecycle inside helper functions — the call site
+  owns and varies the handler.
+- For new SSE tests in any package, use an `sseWrite`-style helper
+  (`t.Helper()`; calls `http.Flusher.Flush()` after writing) rather
+  than raw `io.WriteString` literals, so a handler that keeps the
+  connection open cannot leave the scanner blocked.
+- Table-test loop variables are named `tt`.
+
 ## Security-sensitive environment variables
 
 - `CHIRON_GEMINI_BASE_URL` — overrides the Gemini API endpoint. The API
