@@ -54,6 +54,19 @@ state machine with natural span boundaries for the tracer, and because
 (`chiron get <id>`) and follow-ups fall out of the same surface with no
 local state.
 
+## 2026-06-07 — internal/types follows INTERACTIONS-API.md, not PROPOSAL §3
+
+The live Interactions API has drifted from the shapes the proposal was
+verified against (2026-04-28 → 2026-05-20 revision), as documented in
+`docs/INTERACTIONS-API.md` §8: responses are `steps[]` of typed
+`content[]` parts (not `outputs[]`), citations are `annotations` on text
+parts (not a response-level list), the status enum is wider
+(`requires_action`, `cancelled`, `incomplete`, `budget_exceeded`), and
+the usage block carries token totals plus `grounding_tool_count`.
+`internal/types` models the **new** shapes with wire-exact JSON tags, and
+a test pins the decode against the reference's §4 example. Where the
+proposal and the API reference disagree, the reference wins.
+
 ## 2026-06-07 — Durations serialise as strings
 
 `config.Duration` wraps `time.Duration` to marshal as `"30m"` in JSON and

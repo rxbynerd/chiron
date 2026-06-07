@@ -6,8 +6,9 @@ long-running research agent end-to-end (start → await → retrieve → format
 never mutates a workspace, runs no shell, applies no edits.
 
 Read `docs/PROPOSAL.md` before changing anything structural; record
-notable decisions in `docs/DECISIONS.md`. Documentation uses en-GB
-spelling and no emojis.
+notable decisions in `docs/DECISIONS.md`. For anything touching the
+Gemini API, `docs/INTERACTIONS-API.md` is normative and wins over the
+proposal. Documentation uses en-GB spelling and no emojis.
 
 ## Build and verify
 
@@ -27,7 +28,7 @@ CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
 | `cmd/chiron` | Entrypoint; delegates to `internal/cli`. |
 | `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`) and flag→config resolution. Commands stay thin. |
 | `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines. |
-| `internal/types` | Shared seam-crossing types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. |
+| `internal/types` | Shared seam-crossing types: `Interaction`, `Step`, `Content`, `Annotation`, `Usage`, `Report`, `RunResult` — shaped to `docs/INTERACTIONS-API.md` §4 (normative; the API drifted from the proposal). |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. Gemini adapter lands in `researcher/gemini`; v2 fleet orchestrator in `researcher/fleet`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report`. |
 | `internal/sink` | `ReportSink` seam: where the final report goes (stdout-markdown, file, stdout-json). |

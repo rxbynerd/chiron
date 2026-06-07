@@ -3,76 +3,154 @@
 // Formatter, and the RunResult summarising one research run. Keeping them
 // here lets every seam package depend on types without depending on each
 // other.
+//
+// The Interaction family models the wire shapes in
+// docs/INTERACTIONS-API.md §4 (normative for this repository — the live
+// API has drifted from PROPOSAL.md §3; see the reference's §8). JSON tags
+// mirror the wire names exactly.
 package types
 
 import "time"
 
-// Status is the lifecycle state of an interaction.
+// Status is the lifecycle state of an interaction. The full enum per
+// docs/INTERACTIONS-API.md §4; v1 treats everything other than
+// in_progress and completed as a terminal-failure variant.
 type Status string
 
-// Interaction statuses, mirroring the Interactions API lifecycle
-// (in_progress until the agent finishes, then completed or failed).
+// Interaction statuses.
 const (
-	StatusInProgress Status = "in_progress"
-	StatusCompleted  Status = "completed"
-	StatusFailed     Status = "failed"
+	StatusInProgress     Status = "in_progress"
+	StatusRequiresAction Status = "requires_action"
+	StatusCompleted      Status = "completed"
+	StatusFailed         Status = "failed"
+	StatusCancelled      Status = "cancelled"
+	StatusIncomplete     Status = "incomplete"
+	StatusBudgetExceeded Status = "budget_exceeded"
 )
 
-// Interaction is the result of one research task. It is the unit a
-// Researcher produces and a Formatter consumes. The ID doubles as the
-// resume handle: state is held server-side, so a crashed run recovers
-// with `chiron get <id>` and Chiron keeps no local state.
+// Terminal reports whether the status ends a run. Everything other than
+// in_progress is terminal — including requires_action, which should not
+// occur for deep research but must not hang a poller if it does
+// (docs/INTERACTIONS-API.md §4). An empty status is unknown, not terminal.
+func (s Status) Terminal() bool {
+	return s != "" && s != StatusInProgress
+}
+
+// Interaction is the result of one research task, mirroring the
+// Interaction resource (docs/INTERACTIONS-API.md §4). The ID doubles as
+// the resume handle: state is held server-side (store: true), so a
+// crashed run recovers with `chiron get <id>` and Chiron keeps no local
+// state.
 type Interaction struct {
-	ID          string     `json:"id"`
-	Agent       string     `json:"agent,omitempty"`
-	Query       string     `json:"query,omitempty"`
-	Status      Status     `json:"status"`
-	Outputs     []Output   `json:"outputs,omitempty"`
-	Citations   []Citation `json:"citations,omitempty"`
-	Usage       Usage      `json:"usage,omitzero"`
-	CreatedAt   time.Time  `json:"created_at,omitzero"`
-	CompletedAt time.Time  `json:"completed_at,omitzero"`
+	ID     string `json:"id"`
+	Object string `json:"object,omitempty"`
+	// Agent is the agent identifier for research tasks; Model is set
+	// instead on follow-up Q&A interactions (reference §3).
+	Agent                 string    `json:"agent,omitempty"`
+	Model                 string    `json:"model,omitempty"`
+	Status                Status    `json:"status"`
+	Created               time.Time `json:"created,omitzero"`
+	Updated               time.Time `json:"updated,omitzero"`
+	Steps                 []Step    `json:"steps,omitempty"`
+	Usage                 Usage     `json:"usage,omitzero"`
+	PreviousInteractionID string    `json:"previous_interaction_id,omitempty"`
 }
 
-// OutputType discriminates the entries of Interaction.Outputs.
-type OutputType string
+// FinalOutput returns the last model_output step — the one carrying the
+// final report text, chart images, and citation annotations
+// (docs/INTERACTIONS-API.md §4) — or false if there is none yet.
+func (in *Interaction) FinalOutput() (*Step, bool) {
+	for i := len(in.Steps) - 1; i >= 0; i-- {
+		if in.Steps[i].Type == StepModelOutput {
+			return &in.Steps[i], true
+		}
+	}
+	return nil, false
+}
 
-// Output types produced by a research agent. The final report is the last
-// text output; image outputs carry agent-generated charts.
+// StepType discriminates the entries of Interaction.Steps.
+type StepType string
+
+// Step types. The API also emits tool-call/result step types; consumers
+// must tolerate values beyond these.
 const (
-	OutputText           OutputType = "text"
-	OutputImage          OutputType = "image"
-	OutputThoughtSummary OutputType = "thought_summary"
+	StepUserInput   StepType = "user_input"
+	StepModelOutput StepType = "model_output"
 )
 
-// Output is a single agent output: report text, a thought summary, or an
-// image (chart) with its decoded bytes.
-type Output struct {
-	Type OutputType `json:"type"`
-	// Text carries text and thought_summary outputs.
-	Text string `json:"text,omitempty"`
-	// MIMEType and Data carry image outputs (decoded, not base64).
-	MIMEType string `json:"mime_type,omitempty"`
-	Data     []byte `json:"data,omitempty"`
+// Step is one entry in an interaction: user input, model output, or a
+// tool call/result.
+type Step struct {
+	Type    StepType  `json:"type"`
+	Content []Content `json:"content,omitempty"`
 }
 
-// Citation is one source the agent cited, kept for the report's sources
-// section and for verification.
-type Citation struct {
-	URI   string `json:"uri"`
-	Title string `json:"title,omitempty"`
+// ContentType discriminates content parts.
+type ContentType string
+
+// Content part types. text and thought carry Text; image carries
+// MIMEType plus Data or URI; document (request-side grounding) carries
+// URI and MIMEType.
+const (
+	ContentText     ContentType = "text"
+	ContentThought  ContentType = "thought"
+	ContentImage    ContentType = "image"
+	ContentDocument ContentType = "document"
+)
+
+// Content is one typed part of a step. Data is base64 on the wire, which
+// encoding/json maps to []byte automatically.
+type Content struct {
+	Type        ContentType  `json:"type"`
+	Text        string       `json:"text,omitempty"`
+	Annotations []Annotation `json:"annotations,omitempty"`
+	MIMEType    string       `json:"mime_type,omitempty"`
+	Data        []byte       `json:"data,omitempty"`
+	URI         string       `json:"uri,omitempty"`
 }
 
-// Usage records per-run cost signals. Chiron tracks the signals and
-// enforces budget caps; pricing tables and attribution are deferred to
-// Stint (a suite concern, not Chiron's).
+// AnnotationType discriminates citation annotations.
+type AnnotationType string
+
+// Annotation types.
+const (
+	AnnotationURLCitation  AnnotationType = "url_citation"
+	AnnotationFileCitation AnnotationType = "file_citation"
+)
+
+// Annotation is a citation attached to a text content part, spanning
+// [StartIndex, EndIndex) bytes of its Text. url_citation carries URL and
+// Title; file_citation carries DocumentURI, FileName and PageNumber.
+// Deduplicate by URL for a sources list.
+type Annotation struct {
+	Type        AnnotationType `json:"type"`
+	URL         string         `json:"url,omitempty"`
+	Title       string         `json:"title,omitempty"`
+	DocumentURI string         `json:"document_uri,omitempty"`
+	FileName    string         `json:"file_name,omitempty"`
+	PageNumber  int            `json:"page_number,omitempty"`
+	StartIndex  int            `json:"start_index,omitempty"`
+	EndIndex    int            `json:"end_index,omitempty"`
+}
+
+// Usage is the interaction's usage block: token totals plus per-tool
+// grounding counts. These are the per-run cost signals Chiron tracks;
+// pricing tables and attribution are deferred to Stint.
 type Usage struct {
-	InputTokens      int     `json:"input_tokens,omitempty"`
-	OutputTokens     int     `json:"output_tokens,omitempty"`
-	SearchCount      int     `json:"search_count,omitempty"`
-	PollCount        int     `json:"poll_count,omitempty"`
-	ReconnectCount   int     `json:"reconnect_count,omitempty"`
-	EstimatedCostGBP float64 `json:"estimated_cost_gbp,omitempty"`
+	TotalInputTokens   int                  `json:"total_input_tokens,omitempty"`
+	TotalCachedTokens  int                  `json:"total_cached_tokens,omitempty"`
+	TotalOutputTokens  int                  `json:"total_output_tokens,omitempty"`
+	TotalToolUseTokens int                  `json:"total_tool_use_tokens,omitempty"`
+	TotalThoughtTokens int                  `json:"total_thought_tokens,omitempty"`
+	TotalTokens        int                  `json:"total_tokens,omitempty"`
+	GroundingToolCount []GroundingToolCount `json:"grounding_tool_count,omitempty"`
+}
+
+// GroundingToolCount is the number of times one grounding tool ran — the
+// search-count cost signal.
+type GroundingToolCount struct {
+	Type  string `json:"type"`
+	Count int    `json:"count"`
 }
 
 // Report is a formatted research report: a single portable Markdown
@@ -94,11 +172,15 @@ type Asset struct {
 }
 
 // RunResult summarises one research run for machine consumption
-// (--output json) and for the end-of-run cost summary.
+// (--output json) and for the end-of-run cost summary. Usage carries the
+// API's signals; the remaining fields are Chiron-side run telemetry.
 type RunResult struct {
-	InteractionID string        `json:"interaction_id"`
-	Status        Status        `json:"status"`
-	Report        *Report       `json:"report,omitempty"`
-	Usage         Usage         `json:"usage,omitzero"`
-	Duration      time.Duration `json:"duration_ns,omitempty"`
+	InteractionID    string        `json:"interaction_id"`
+	Status           Status        `json:"status"`
+	Report           *Report       `json:"report,omitempty"`
+	Usage            Usage         `json:"usage,omitzero"`
+	EstimatedCostGBP float64       `json:"estimated_cost_gbp,omitempty"`
+	PollCount        int           `json:"poll_count,omitempty"`
+	ReconnectCount   int           `json:"reconnect_count,omitempty"`
+	Duration         time.Duration `json:"duration_ns,omitempty"`
 }
