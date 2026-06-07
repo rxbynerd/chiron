@@ -165,6 +165,12 @@ func (c ResearchConfig) Validate() error {
 		if name == "" || url == "" {
 			return fmt.Errorf("mcp: server entries need both a name and a URL")
 		}
+		// MCP servers are remote by definition; a file: or javascript:
+		// URL would only produce a confusing API error after the
+		// request is built — reject it here with a local message.
+		if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+			return fmt.Errorf("mcp: server %q URL %q must be http(s) — MCP servers are remote endpoints", name, url)
+		}
 	}
 	return nil
 }
