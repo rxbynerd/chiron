@@ -70,9 +70,10 @@ type OutputType string
 const (
 	OutputText  OutputType = "text"
 	OutputImage OutputType = "image"
-	// TODO(M5): map thought content parts to OutputThoughtSummary in
-	// the gemini adapter's toDomain before streaming display goes live
-	// — no mapping assigns this constant yet.
+	// OutputThoughtSummary carries the agent's reasoning summaries,
+	// mapped from wire thought content parts by the gemini adapter.
+	// The formatter excludes them from the report body; they surface
+	// through --output json and the streaming display.
 	OutputThoughtSummary OutputType = "thought_summary"
 )
 

@@ -49,10 +49,18 @@ type Options struct {
 	// Visualise asks for charts: visualization "auto" plus a prompt
 	// nudge (PROPOSAL §4.3). Off sends "off".
 	Visualise bool
-	// ThinkingSummaries asks the agent to stream thought summaries
-	// ("auto"); polling runs leave it false ("none") — there is nothing
-	// to display them on until the M5 streaming surface.
+	// ThinkingSummaries asks the agent to produce thought summaries
+	// ("auto"); quiet (polling) runs leave it false ("none") — there is
+	// nothing to display them on. The CLI sets it from cfg.Stream.
 	ThinkingSummaries bool
+	// Stream awaits by SSE — rendering progress as it arrives and
+	// reconnecting on drops — instead of polling. Falls back to polling
+	// when streaming repeatedly fails (see awaitStream).
+	Stream bool
+	// OnThought, when set, observes each streamed thought summary. It
+	// is called synchronously from the streaming await and must not
+	// block; the CLI binds it to the transport's delta events.
+	OnThought func(text string)
 	// Tools overrides the default tool set (google_search, url_context,
 	// code_execution). Only those three names are valid here; MCP and
 	// file_search arrive via their own fields.
@@ -73,6 +81,11 @@ type Options struct {
 	// for tests; the defaults suit tasks that run for minutes.
 	PollInterval    time.Duration
 	PollMaxInterval time.Duration
+	// ReconnectBaseDelay and ReconnectMaxDelay override the backoff
+	// between streaming reconnect attempts — for tests; the defaults
+	// (500ms doubling to 8s) mirror the client's retry backoff.
+	ReconnectBaseDelay time.Duration
+	ReconnectMaxDelay  time.Duration
 }
 
 // Researcher is the gemini-deep-research binding of the Researcher
@@ -96,6 +109,7 @@ type Researcher struct {
 	estimate  float64
 	inputs    []string
 	pollCfg   interactions.PollConfig
+	streamCfg streamConfig
 
 	// inFlight enforces the one-run-at-a-time contract at runtime: a
 	// second Start while one is in flight fails instead of silently
@@ -103,9 +117,12 @@ type Researcher struct {
 	// must give each concurrent task its own Researcher).
 	inFlight  atomic.Bool
 	pollCount atomic.Int64
-	mu        sync.Mutex
-	started   bool // Start ran: lastQuery and toolNames describe the interaction
-	lastQuery string
+	// reconnectCount tallies streaming re-dials after a drop — the
+	// reconnect_count cost signal (PROPOSAL §4.5), reported via Usage.
+	reconnectCount atomic.Int64
+	mu             sync.Mutex
+	started        bool // Start ran: lastQuery and toolNames describe the interaction
+	lastQuery      string
 }
 
 var _ researcher.Researcher = (*Researcher)(nil)
@@ -146,6 +163,7 @@ func New(opts Options) (*Researcher, error) {
 			Interval:    opts.PollInterval,
 			MaxInterval: opts.PollMaxInterval,
 		},
+		streamCfg: streamConfigFrom(opts),
 	}, nil
 }
 
@@ -327,22 +345,48 @@ func (r *Researcher) Start(ctx context.Context, task researcher.Task) (string, e
 		return "", errors.New("gemini: the API returned an interaction without an id")
 	}
 
-	// Both per-run state resets happen under the one mutex, so a
+	// All per-run state resets happen under the one mutex, so a
 	// stale OnPoll increment from a previous run cannot interleave
 	// between them.
 	r.mu.Lock()
 	r.started = true
 	r.lastQuery = task.Query
 	r.pollCount.Store(0)
+	r.reconnectCount.Store(0)
 	r.mu.Unlock()
 	return in.ID, nil
 }
 
-// Await implements researcher.Researcher by polling until the
-// interaction is terminal. A requires_action status — which deep
-// research cannot legitimately produce — surfaces as an error wrapping
-// interactions.ErrRequiresAction rather than hanging the poller.
+// Await implements researcher.Researcher: by SSE when streaming is
+// configured — thought summaries to the OnThought observer, reconnect
+// on drops — and by polling otherwise. Streaming that repeatedly fails
+// falls back to polling rather than abandoning a paid run (see
+// awaitStream); requires_action — which deep research cannot
+// legitimately produce — surfaces as an error wrapping
+// interactions.ErrRequiresAction on either path.
 func (r *Researcher) Await(ctx context.Context, id string) error {
+	if r.streamCfg.enabled {
+		err := r.awaitStream(ctx, id)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, interactions.ErrRequiresAction) || ctx.Err() != nil:
+			// Research outcomes and cancellation are never grounds for
+			// a fallback: the answer would not change.
+			return fmt.Errorf("gemini: awaiting interaction %s: %w", id, err)
+		}
+		// Streaming repeatedly failed but the task is still running —
+		// and still spending — server-side. Polling is the degraded
+		// path that saves the run; the abandoned stream's error is
+		// deliberately absorbed (the poll's own failure surfaces if
+		// the API is truly unreachable).
+	}
+	return r.awaitPoll(ctx, id)
+}
+
+// awaitPoll polls until the interaction is terminal — the --quiet path
+// and the fallback when streaming repeatedly fails.
+func (r *Researcher) awaitPoll(ctx context.Context, id string) error {
 	cfg := r.pollCfg
 	cfg.OnPoll = func(*interactions.Interaction) { r.pollCount.Add(1) }
 	if _, err := r.poll.PollUntilTerminal(ctx, id, cfg); err != nil {
@@ -405,6 +449,13 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 		out.CompletedAt = in.Updated
 	}
 
+	// Thought summaries first (they precede the report chronologically),
+	// then chart images, then the final text. The formatter renders only
+	// the text and images; thoughts surface through --output json and
+	// the streaming display.
+	for _, thought := range thoughtTexts(in) {
+		out.Outputs = append(out.Outputs, types.Output{Type: types.OutputThoughtSummary, Text: thought})
+	}
 	for _, img := range in.Images() {
 		out.Outputs = append(out.Outputs, types.Output{
 			Type:     types.OutputImage,
@@ -428,9 +479,28 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 		ThoughtTokens:    in.Usage.TotalThoughtTokens,
 		SearchCount:      searchCount(in.Usage.GroundingToolCount),
 		PollCount:        int(r.pollCount.Load()),
+		ReconnectCount:   int(r.reconnectCount.Load()),
 		EstimatedCostGBP: estimate,
 	}
 	return out
+}
+
+// thoughtTexts collects the thought content parts of every
+// model_output step, in order — the agent's reasoning summaries,
+// mapped to OutputThoughtSummary domain outputs.
+func thoughtTexts(in *interactions.Interaction) []string {
+	var thoughts []string
+	for _, s := range in.Steps {
+		if s.Type != interactions.StepModelOutput {
+			continue
+		}
+		for _, c := range s.Content {
+			if c.Type == interactions.ContentThought && c.Text != "" {
+				thoughts = append(thoughts, c.Text)
+			}
+		}
+	}
+	return thoughts
 }
 
 // searchCount reduces the grounding counts to the search-count cost

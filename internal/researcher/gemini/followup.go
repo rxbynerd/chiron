@@ -34,5 +34,6 @@ func NewFollowUp(opts Options, model string) (*Researcher, error) {
 			Interval:    opts.PollInterval,
 			MaxInterval: opts.PollMaxInterval,
 		},
+		streamCfg: streamConfigFrom(opts),
 	}, nil
 }

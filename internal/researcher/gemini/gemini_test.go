@@ -206,15 +206,19 @@ func TestEndToEndCompletedMapsWireToDomain(t *testing.T) {
 		t.Errorf("tools = %v, want %v", in.Tools, wantTools)
 	}
 
-	// Outputs: the decoded chart image plus the final text, thoughts excluded.
-	if len(in.Outputs) != 2 {
-		t.Fatalf("outputs = %+v, want image + final text", in.Outputs)
+	// Outputs: thought summaries first, then the decoded chart image,
+	// then the final text.
+	if len(in.Outputs) != 3 {
+		t.Fatalf("outputs = %+v, want thought + image + final text", in.Outputs)
 	}
-	if in.Outputs[0].Type != types.OutputImage || string(in.Outputs[0].Data) != "chart-bytes" {
-		t.Errorf("image output = %+v, want decoded chart bytes", in.Outputs[0])
+	if in.Outputs[0].Type != types.OutputThoughtSummary || in.Outputs[0].Text != "thinking..." {
+		t.Errorf("thought output = %+v, want the wire thought part mapped", in.Outputs[0])
 	}
-	if in.Outputs[1].Type != types.OutputText || in.Outputs[1].Text != "# Report body" {
-		t.Errorf("text output = %+v", in.Outputs[1])
+	if in.Outputs[1].Type != types.OutputImage || string(in.Outputs[1].Data) != "chart-bytes" {
+		t.Errorf("image output = %+v, want decoded chart bytes", in.Outputs[1])
+	}
+	if in.Outputs[2].Type != types.OutputText || in.Outputs[2].Text != "# Report body" {
+		t.Errorf("text output = %+v", in.Outputs[2])
 	}
 
 	// Citations deduplicated by URI in first-seen order.
