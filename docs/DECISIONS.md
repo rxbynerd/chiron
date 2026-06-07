@@ -22,6 +22,10 @@ decision recorded in PROPOSAL.md §5.
 
 ## 2026-06-07 — Dependency set: cobra, pflag (transitive), yaml.v3
 
+> **Extended** by "OpenTelemetry dependency set" below, which admits the
+> OTel SDK as the one justified exception for PROPOSAL §4.5; the
+> no-vendor-AI-SDK rule is unchanged.
+
 - `github.com/spf13/cobra` — the sanctioned CLI framework, consistent with
   the rest of the suite.
 - `github.com/spf13/pflag` — arrives transitively with cobra; used
@@ -118,6 +122,10 @@ credential, and errors end up in logs. A v2 GCP Secret Manager backend
 slots in as a new segment (`secret://gcp/...`) without grammar changes.
 
 ## 2026-06-07 — Markdown formatter performs no IO; the sink writes assets
+
+> **Partially superseded**: the "no tool set in front matter"
+> consequence below was reversed by "The domain Interaction carries the
+> resolved tool set" further down. The no-IO split itself stands.
 
 The markdown Formatter returns chart images as `Report.Assets` (name,
 MIME type, bytes) and references them from the document as relative
@@ -227,6 +235,12 @@ both bindings route every string payload through `secret.Scrub`, so a
 credential cannot transit traces any more than logs.
 
 ## 2026-06-07 — internal/interactions: client shape, retries, bounds, SSE resume
+
+> **Partially superseded**: the polling bullet's treatment of
+> `requires_action` as plain terminal was replaced by "requires_action
+> returns a typed error" below, and the Create-retry trade-off was
+> tightened for the spending callers by "Create is never retried in the
+> gemini adapter". The remaining bullets stand.
 
 The Interactions client is stdlib-only `net/http` + hand-rolled SSE — no
 new dependencies. Decisions of note:
@@ -344,6 +358,10 @@ report, cost summary, RunResult — with the outcome carried by the exit
 code, not an error.
 
 ## 2026-06-07 — CLI exit codes and composition-root boundaries
+
+> **Extended** by "Client-side budget gate" below, which adds exit 4
+> (blocked client-side before any spend) to the contract described
+> here.
 
 `chiron research` exits 0 only when the task completed; 1 for usage,
 configuration and infrastructure errors (including timeout — the run
@@ -502,3 +520,28 @@ toggles the request itself — thinking_summaries "auto" when streaming,
 "none" under --quiet (C1-M5-1) — and wire thought content parts now
 map to OutputThoughtSummary domain outputs, so --output json carries
 the reasoning trail that streamed past.
+
+## 2026-06-07 — v1 complete
+
+All eight milestones (PROPOSAL §9, M0–M7) are implemented, and two full
+review/remediation cycles have run to a clean close:
+
+- **Cycle 1** (post-M3/M6/M7, brief at `docs/reviews/cycle-1-brief.md`):
+  21 findings after deduplication — 3 High, 4 Medium, 10 Low, 2 Info,
+  2 deferred to M5 by the brief itself. Every finding dispositioned in
+  `docs/reviews/cycle-1-remediation.md`; the deferred pair was closed by
+  the M5 streaming work.
+- **Cycle 2** (full v1, brief at `docs/reviews/cycle-2-brief.md`):
+  27 findings — 1 Critical, 5 High, 7 Medium, 14 Low — predominantly
+  test-coverage work; production code arrived with no Critical/High/
+  Medium code findings. Every finding dispositioned in
+  `docs/reviews/cycle-2-remediation.md`, including one reviewer
+  assertion refuted by test (C2-TEST-3).
+
+At the closing commit, `go build ./...`, `go vet ./...` and
+`go test -count=1 ./...` pass; total statement coverage is **89.5%**
+(`go tool cover -func`), with the untested remainder concentrated in
+`cmd/chiron` (a two-line main) and the deliberately inert
+`internal/memory` no-op. The v2 seams sit ready as designed: the gRPC
+transport stub, the fleet researcher stub, `proto/chiron/v1`, and the
+locally declared `ContextStore` awaiting Paddock.
