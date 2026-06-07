@@ -358,3 +358,74 @@ and drop them), and `CHIRON_GEMINI_BASE_URL` overrides the API endpoint
 so the smoke tests prove the research path end-to-end against httptest
 without real network. The run core itself takes seams and a context
 only.
+
+## 2026-06-07 — Client-side budget gate: exit 4 means blocked before spend
+
+`--budget` is enforced in the CLI before any create, by comparing the
+tier's planning estimate — the existing constant pair in
+`researcher/gemini/cost.go`, exposed as `EstimatedCostGBP()`; no second
+cost table exists — against the cap. A blocked run exits **4**
+(`ExitBlocked`), reporting estimate vs cap, and the same code covers a
+declined `--plan` review: both mean "Chiron stopped the run client-side
+before any research spend", which is deliberately distinct from exit 3
+(a *running* task stopped server-side, `cancelled`/`budget_exceeded`).
+The gate sits ahead of the plan phase too, because plan rounds also
+spend. Follow-up Q&A passes the gate trivially — its estimate is zero
+(see the follow-up entry below) — and `chiron get` never gates: it
+creates nothing.
+
+The plan refine loop is bounded structurally rather than monetarily
+(`planner.DefaultMaxRounds`, five rounds including the proposal, the
+counter rendered with every plan): the API publishes per-run envelopes
+only (INTERACTIONS-API.md §7), no per-round planning price, and
+inventing one to divide into the budget would be a fabricated figure
+masquerading as a control.
+
+## 2026-06-07 — Plan-phase creates are never auto-retried either
+
+Extends "Create is never retried in the gemini adapter": the planner
+binding (`gemini.NewPlanner`) holds the same client split — creates
+with `WithMaxRetries(0)`, polls with the defaults. A plan round is a
+paid create like any other, and an ambiguous 5xx on
+`POST /interactions` may already have paid for the round; a test pins
+exactly one create attempt on a 502. The planner seam itself
+(`internal/planner`) covers propose and refine only: approval is
+deliberately not on the seam, because an approved plan is an ordinary
+research run — a create chained by `previous_interaction_id` with
+`collaborative_planning` off — so the run core gained no planning mode,
+just a `PreviousInteractionID` passthrough. The interactive session
+renders plans and prompts on **stderr** (stdout belongs to the report),
+and a non-terminal stdin can never approve spend: `--plan` aborts with
+guidance unless `--accept-plan` explicitly approves the first plan
+unattended, which still leaves the plan in the stored interaction chain
+as an audit trail.
+
+## 2026-06-07 — Follow-up Q&A: gemini-3.1-pro-preview by default, estimate zero
+
+`chiron follow-up` creates with `model` + `previous_interaction_id` —
+not `agent` — per INTERACTIONS-API.md §3, with no `agent_config` and no
+`tools`, and the query travels **verbatim**: a follow-up questions an
+existing report, so the research report template does not apply. The
+default model is `gemini-3.1-pro-preview` because it is the model the
+API reference itself names for follow-ups against the pinned
+`Api-Revision: 2026-05-20`; it is overridable via `--model`/`model` in
+config, so a cheaper or newer model needs no code change. `background`
+and `store` stay true so the one poll-and-resume machinery serves
+follow-ups too. The cost estimate in follow-up mode is **zero**:
+model-priced Q&A sits outside the per-tier research envelope, and a
+fabricated figure would pollute both the report front matter and the
+budget gate. Actual token usage is still reported in the cost summary.
+
+## 2026-06-07 — Resumed interactions claim no tool set; estimate from the wire agent
+
+`chiron get` resumes interactions this adapter never started. The API
+does not echo the create request's tool set back (the reason
+`types.Interaction.Tools` is adapter-populated — see "The domain
+Interaction carries the resolved tool set"), so for resumed
+interactions the adapter records **no** tools rather than guessing the
+default trio: the recorded set must be the used set, and absent is
+honest where invented is not. Same for the query. The planning estimate
+falls back to the interaction's own wire agent id
+(`estimateForAgentID`), so resuming a max-tier run reports the max-tier
+figure regardless of the locally configured tier; unknown agents (and
+model-based follow-ups) estimate zero.
