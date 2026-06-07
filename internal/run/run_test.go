@@ -404,3 +404,16 @@ func TestRunWithDiscardSink(t *testing.T) {
 		t.Errorf("events = %v, want the cost summary even when the report is discarded", got)
 	}
 }
+
+// TestRunNilInteractionFromResearcher pins C2-TEST-10, the seam
+// contract: a Researcher whose Result returns nil, nil is a broken
+// implementation, and the run must conclude with a clear error rather
+// than handing the formatter a nil interaction to panic on.
+func TestRunNilInteractionFromResearcher(t *testing.T) {
+	deps, r, _, _ := happyDeps()
+	r.result = nil // Result returns nil, nil
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	if err == nil || !strings.Contains(err.Error(), "returned no interaction") {
+		t.Fatalf("error = %v, want the nil-interaction guard", err)
+	}
+}

@@ -171,7 +171,7 @@ func Resume(ctx context.Context, deps Deps, id string) (result *types.RunResult,
 		root.End(err)
 	}()
 	root.SetAttr("interaction_id", id)
-	root.SetAttr("resumed", "true")
+	root.SetAttr("resumed", true)
 
 	// No run_started: a resume has no query to announce and starts no
 	// task. The id event re-states the resume handle for consumers that
