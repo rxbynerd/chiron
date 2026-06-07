@@ -1,0 +1,214 @@
+// The Chiron v2 control-plane contract (PROPOSAL.md §6), mirroring the
+// conventions of Stirrup's harness.proto. The connection direction is
+// OUTBOUND-DIAL: a research run dials the control plane (the pattern
+// `stirrup job` uses with CONTROL_PLANE_ADDR) and opens one Session
+// stream — the control plane never dials into a runner.
+//
+// The run-lifecycle events here mirror the NDJSON event kinds the v1
+// stdio transport emits (internal/transport/events.go), so v1 and v2
+// describe the same machine-readable lifecycle.
+syntax = "proto3";
+
+package chiron.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/rxbynerd/chiron/proto/chiron/v1;chironv1";
+
+// ControlPlaneService is the service a research runner dials outbound
+// to. The runner is the gRPC client, so SessionRequest flows runner →
+// control plane and SessionResponse flows control plane → runner.
+service ControlPlaneService {
+  // Session is the single bidirectional stream a runner holds for its
+  // lifetime. The runner opens with RunnerHello, receives
+  // ResearchRequest messages, streams RunEvent messages as work
+  // progresses, and closes each request with a ResearchResponse.
+  rpc Session(stream SessionRequest) returns (stream SessionResponse);
+}
+
+// SessionRequest is everything a runner sends up the session stream.
+message SessionRequest {
+  oneof message {
+    RunnerHello hello = 1;
+    RunEvent event = 2;
+    ResearchResponse response = 3;
+  }
+}
+
+// SessionResponse is everything the control plane sends down the
+// session stream.
+message SessionResponse {
+  oneof message {
+    ResearchRequest request = 1;
+    CancelRequest cancel = 2;
+  }
+}
+
+// RunnerHello opens a session: it identifies the runner so the control
+// plane can schedule work onto it.
+message RunnerHello {
+  // runner_id uniquely identifies this runner instance.
+  string runner_id = 1;
+  // version is the chiron build the runner carries.
+  string version = 2;
+  // researchers names the Researcher bindings this runner offers
+  // (e.g. "gemini-deep-research", "stirrup-fleet").
+  repeated string researchers = 3;
+}
+
+// ResearchRequest asks a runner to execute one research run.
+message ResearchRequest {
+  // run_id is the control plane's handle for the run; the runner echoes
+  // it on every RunEvent and on the ResearchResponse.
+  string run_id = 1;
+  // query is the research question.
+  string query = 2;
+  // previous_interaction_id, when set, asks a follow-up against a
+  // completed interaction.
+  string previous_interaction_id = 3;
+  // namespace carries the tenant for context-store isolation.
+  string namespace = 4;
+  // budget bounds the run's spend; the runner reports against it in
+  // CostSummary.
+  Budget budget = 5;
+}
+
+// CancelRequest asks the runner to stop a run in flight.
+message CancelRequest {
+  string run_id = 1;
+  string reason = 2;
+}
+
+// Budget bounds one run's spend.
+message Budget {
+  // max_cost_gbp caps the estimated cost, in GBP.
+  double max_cost_gbp = 1;
+  // max_total_tokens caps total token usage across the run.
+  int64 max_total_tokens = 2;
+}
+
+// RunEvent is one run-lifecycle event. The payload kinds mirror the v1
+// NDJSON event kinds one-to-one.
+message RunEvent {
+  // time is when the event occurred on the runner.
+  google.protobuf.Timestamp time = 1;
+  // run_id echoes the ResearchRequest this event belongs to.
+  string run_id = 2;
+
+  oneof payload {
+    RunStarted run_started = 3;
+    InteractionCreated interaction_created = 4;
+    StatusChanged status_changed = 5;
+    Delta delta = 6;
+    RunCompleted run_completed = 7;
+    CostSummary cost_summary = 8;
+  }
+}
+
+// RunStarted opens a run: the query has been accepted and the
+// researcher is about to start.
+message RunStarted {
+  string query = 1;
+  // researcher names the Researcher binding executing the run.
+  string researcher = 2;
+}
+
+// InteractionCreated carries the interaction ID — the resume handle —
+// emitted as soon as it is known so a crashed run can be recovered.
+message InteractionCreated {
+  string interaction_id = 1;
+}
+
+// StatusChanged reports an interaction status transition observed while
+// awaiting completion.
+message StatusChanged {
+  Status status = 1;
+}
+
+// Delta carries an incremental update (a streamed thought summary)
+// while the research task runs.
+message Delta {
+  string text = 1;
+}
+
+// RunCompleted closes a run with its terminal status.
+message RunCompleted {
+  Status status = 1;
+  // error carries the failure detail when status is not
+  // STATUS_COMPLETED.
+  string error = 2;
+}
+
+// CostSummary reports the end-of-run cost signals.
+message CostSummary {
+  Usage usage = 1;
+  // duration_ms is wall-clock run duration in milliseconds.
+  int64 duration_ms = 2;
+}
+
+// ResearchResponse closes one ResearchRequest with its result.
+message ResearchResponse {
+  string run_id = 1;
+  // interaction_id is the resume handle of the underlying interaction.
+  string interaction_id = 2;
+  Status status = 3;
+  Report report = 4;
+  Usage usage = 5;
+  // citations are the deduplicated sources backing the report.
+  repeated Citation citations = 6;
+}
+
+// Status is the interaction lifecycle state, matching
+// internal/types.Status (shaped to docs/INTERACTIONS-API.md §4).
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_IN_PROGRESS = 1;
+  STATUS_REQUIRES_ACTION = 2;
+  STATUS_COMPLETED = 3;
+  STATUS_FAILED = 4;
+  STATUS_CANCELLED = 5;
+  STATUS_INCOMPLETE = 6;
+  STATUS_BUDGET_EXCEEDED = 7;
+}
+
+// Report is a formatted research report: a single portable Markdown
+// document plus any chart assets, matching internal/types.Report.
+message Report {
+  bytes markdown = 1;
+  repeated Asset assets = 2;
+}
+
+// Asset is a file written alongside the report, typically an
+// agent-generated chart referenced from the Markdown.
+message Asset {
+  string name = 1;
+  string mime_type = 2;
+  bytes data = 3;
+}
+
+// Citation is one source the agent cited, already deduplicated,
+// matching the seam-level domain model (internal/types.Citation).
+message Citation {
+  string uri = 1;
+  string title = 2;
+}
+
+// Usage carries the per-run cost signals of the seam-level domain
+// model (internal/types.Usage): token and search counts mapped from
+// the API, plus runner-side telemetry. Pricing attribution is a Stint
+// concern, not Chiron's.
+message Usage {
+  int64 input_tokens = 1;
+  int64 cached_tokens = 2;
+  int64 output_tokens = 3;
+  int64 tool_use_tokens = 4;
+  int64 thought_tokens = 5;
+  // search_count is the grounding search count — the per-run search
+  // cost signal.
+  int64 search_count = 6;
+  // poll_count and reconnect_count are runner-side telemetry.
+  int64 poll_count = 7;
+  int64 reconnect_count = 8;
+  // estimated_cost_gbp is the runner's estimate of the run's cost.
+  double estimated_cost_gbp = 9;
+}

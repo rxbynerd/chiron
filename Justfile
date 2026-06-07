@@ -23,3 +23,12 @@ lint:
 
 # Everything CI runs.
 ci: build vet test lint
+
+# Lint and compile-check the proto/chiron/v1 Buf module.
+proto-lint:
+    cd proto && buf lint && buf build
+
+# Generate Go from proto/chiron/v1 (pinned remote plugins; needs network).
+# Output is not committed in v1 — see docs/DECISIONS.md.
+proto:
+    cd proto && buf generate

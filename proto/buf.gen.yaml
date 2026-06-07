@@ -1,0 +1,16 @@
+# Code generation for proto/chiron/v1. Run via `just proto` (which runs
+# `buf generate` from this directory). Plugins are pinned remote plugins
+# resolved from the Buf Schema Registry, so generation needs no local
+# protoc toolchain — only network access.
+#
+# Generated Go is NOT committed in v1: it would pull
+# google.golang.org/protobuf and google.golang.org/grpc into go.mod for
+# code no v1 path executes (see docs/DECISIONS.md).
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/go:v1.36.6
+    out: ..
+    opt: module=github.com/rxbynerd/chiron
+  - remote: buf.build/grpc/go:v1.5.1
+    out: ..
+    opt: module=github.com/rxbynerd/chiron

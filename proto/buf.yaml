@@ -1,0 +1,10 @@
+# Buf module for the Chiron v2 control-plane contract (PROPOSAL.md §6).
+# The module root is this directory; the contract lives at
+# chiron/v1/chiron.proto.
+version: v2
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

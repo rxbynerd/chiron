@@ -142,3 +142,46 @@ text output (failed, cancelled, still in progress) still render a
 complete document — front matter with status and `status_detail`, plus a
 placeholder body — so `chiron get` of an unfinished or broken run never
 produces nothing.
+
+## 2026-06-07 — NDJSON run events go to stderr, not stdout
+
+The stdio transport (`internal/transport.Stdio`) defaults to **stderr**.
+stdout belongs to the report: the `stdout-markdown` and `stdout-json`
+sinks write the run's primary artefact there, and
+`chiron research --query ... | tee report.md` must produce a clean
+document. Interleaving machine-readable lifecycle events into that
+stream would corrupt a piped report, whereas stderr keeps progress
+visible in a terminal and separable in a pipeline (`2>events.ndjson`).
+This mirrors the wider Unix convention: data on stdout, diagnostics and
+progress on stderr. The writer is injectable (`NewStdio(w)`), so a
+future flag can redirect events to a file without a new transport.
+
+Each event is one JSON line; a zero `time` is stamped by the transport
+so consumers can always order events. Event kinds
+(`internal/transport/events.go`) mirror the `RunEvent` payload kinds in
+`proto/chiron/v1/chiron.proto` one-to-one, so the v1 NDJSON stream and
+the v2 control-plane stream describe the same lifecycle.
+
+## 2026-06-07 — proto/chiron/v1 is committed; generated Go is not (in v1)
+
+The v2 control-plane contract lives in `proto/chiron/v1/chiron.proto`
+as a Buf v2 module (`proto/buf.yaml`, `proto/buf.gen.yaml`), shaped for
+the outbound-dial pattern of PROPOSAL.md §6: the runner dials
+`ControlPlaneService` and holds one bidirectional `Session` stream
+(hello → research requests down, run events and responses up).
+
+Generation was verified working at the time of this entry: `just proto`
+(`buf generate` with remote plugins pinned to
+`buf.build/protocolbuffers/go:v1.36.6` and `buf.build/grpc/go:v1.5.1`)
+produces `chiron.pb.go` and `chiron_grpc.pb.go`, and the output compiles
+against `google.golang.org/protobuf` v1.36.11 and
+`google.golang.org/grpc` v1.81.1. The generated code is nevertheless
+**not committed**, because no v1 code path imports it: committing it
+would pull the protobuf runtime and the full grpc-go dependency tree
+into `go.mod` for dormant code, against the minimal-and-auditable
+dependency ground rule (AGENTS.md). The v2 wave that first binds the
+gRPC transport runs `just proto`, commits the output, and justifies the
+runtime dependencies here in the same change. Note that remote plugins
+need network access; an air-gapped build can install
+`protoc-gen-go`/`protoc-gen-go-grpc` locally at the same versions and
+swap `remote:` for `local:` in `buf.gen.yaml`.
