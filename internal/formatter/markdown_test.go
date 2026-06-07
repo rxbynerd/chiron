@@ -244,3 +244,28 @@ func TestMarkdownFormatNilInteraction(t *testing.T) {
 		t.Error("Format(nil) must error, not render an empty document")
 	}
 }
+
+// TestExtensionFor pins C2-TEST-8: a wrong extension breaks the
+// report's relative image link, so every MIME type the table knows —
+// and the neutral fallback — is asserted.
+func TestExtensionFor(t *testing.T) {
+	cases := []struct {
+		mime string
+		want string
+	}{
+		{"image/png", ".png"},
+		{"image/jpeg", ".jpg"},
+		{"image/jpg", ".jpg"},
+		{"image/gif", ".gif"},
+		{"image/svg+xml", ".svg"},
+		{"image/webp", ".webp"},
+		{"  Image/PNG  ", ".png"}, // trimmed and case-insensitive
+		{"image/tiff", ".img"},    // unknown: neutral, never empty
+		{"", ".img"},
+	}
+	for _, tt := range cases {
+		if got := extensionFor(tt.mime); got != tt.want {
+			t.Errorf("extensionFor(%q) = %q, want %q", tt.mime, got, tt.want)
+		}
+	}
+}

@@ -1,8 +1,3 @@
-// The markdown Formatter renders one Interaction as a single portable
-// document (PROPOSAL.md §4.4): YAML front matter carrying the run's
-// identity and cost signals, the final text output as the body, chart
-// images as relative links backed by returned assets, and a numbered
-// sources section at the foot.
 package formatter
 
 import (
@@ -17,10 +12,14 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// Markdown is the v1 Formatter. It performs no IO: chart images are
-// returned as Report.Assets and referenced from the document by
-// relative links, leaving placement to the ReportSink (see
-// docs/DECISIONS.md).
+// Markdown is the v1 Formatter. It renders one Interaction as a single
+// portable document (PROPOSAL.md §4.4): YAML front matter carrying the
+// run's identity and cost signals, the final text output as the body,
+// chart images as relative links backed by returned assets, and a
+// numbered sources section at the foot. It performs no IO: chart
+// images are returned as Report.Assets and referenced from the
+// document by relative links, leaving placement to the ReportSink
+// (see docs/DECISIONS.md).
 type Markdown struct{}
 
 // NewMarkdown returns the markdown Formatter.
