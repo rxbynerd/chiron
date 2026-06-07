@@ -42,10 +42,16 @@ func (s Status) Terminal() bool {
 // resume handle: state is held server-side, so a crashed run recovers
 // with `chiron get <id>` and Chiron keeps no local state.
 type Interaction struct {
-	ID     string `json:"id"`
-	Agent  string `json:"agent,omitempty"`
-	Query  string `json:"query,omitempty"`
-	Status Status `json:"status"`
+	ID    string `json:"id"`
+	Agent string `json:"agent,omitempty"`
+	Query string `json:"query,omitempty"`
+	// Tools is the tool set the research task actually ran with,
+	// populated by the adapter from the resolved create request (not
+	// echoed by the API), so the report's front matter can record it
+	// (PROPOSAL §4.4). Entries are tool type names; MCP servers appear
+	// as "mcp_server:<name>".
+	Tools  []string `json:"tools,omitempty"`
+	Status Status   `json:"status"`
 	// StatusDetail is a human-readable reason accompanying failure or
 	// cancellation states, when the adapter has one.
 	StatusDetail string     `json:"status_detail,omitempty"`
