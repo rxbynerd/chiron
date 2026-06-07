@@ -95,3 +95,24 @@ had put wire-exact shapes directly into `internal/types`.
 YAML rather than a nanosecond integer, since ResearchConfig is a
 user-facing, hand-editable document. Both string and integer forms are
 accepted on decode.
+
+## 2026-06-07 — secret:// reference grammar
+
+The first path segment of a `secret://` reference selects the backend; a
+bare single segment defaults to `env`, so the documented
+`secret://GEMINI_API_KEY` form keeps working:
+
+- `secret://NAME` and `secret://env/NAME` — environment variable `NAME`.
+- `secret://file/<path>` — contents of the file at `<path>`, with the
+  leading slash *implied*: `secret://file/etc/chiron/key` and
+  `secret://file//etc/chiron/key` both mean `/etc/chiron/key`. Relative
+  paths are deliberately unsupported — a reference that resolves
+  differently depending on the working directory is a misconfiguration
+  hazard; use `env` for ad-hoc local values. Trailing newlines are
+  trimmed (secrets files conventionally end with one); an empty file or
+  unset/empty variable is an error, never an empty value.
+
+Anything without the `secret://` prefix is rejected as a literal, and the
+rejection error never echoes the offending value — it may itself be the
+credential, and errors end up in logs. A v2 GCP Secret Manager backend
+slots in as a new segment (`secret://gcp/...`) without grammar changes.
