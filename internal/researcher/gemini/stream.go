@@ -31,18 +31,20 @@ const (
 // streamConfig is the resolved streaming behaviour shared by the
 // adapter's entry points.
 type streamConfig struct {
-	enabled   bool
-	onThought func(string)
-	baseDelay time.Duration
-	maxDelay  time.Duration
+	enabled    bool
+	onThought  func(string)
+	onDegraded func()
+	baseDelay  time.Duration
+	maxDelay   time.Duration
 }
 
 func streamConfigFrom(opts Options) streamConfig {
 	cfg := streamConfig{
-		enabled:   opts.Stream,
-		onThought: opts.OnThought,
-		baseDelay: opts.ReconnectBaseDelay,
-		maxDelay:  opts.ReconnectMaxDelay,
+		enabled:    opts.Stream,
+		onThought:  opts.OnThought,
+		onDegraded: opts.OnStreamDegraded,
+		baseDelay:  opts.ReconnectBaseDelay,
+		maxDelay:   opts.ReconnectMaxDelay,
 	}
 	if cfg.baseDelay <= 0 {
 		cfg.baseDelay = defaultReconnectBaseDelay
@@ -127,7 +129,7 @@ func (r *Researcher) consumeStream(stream *interactions.Stream) (done bool, err 
 				// A clean end without a terminal state is still a drop:
 				// the server closed an in-flight stream (idle timeout,
 				// rolling restart). Reconnect from the last event.
-				return false, fmt.Errorf("interactions: stream ended before the interaction concluded: %w", err)
+				return false, fmt.Errorf("gemini: stream ended before the interaction concluded: %w", err)
 			}
 			return false, err
 		}
@@ -136,7 +138,7 @@ func (r *Researcher) consumeStream(stream *interactions.Stream) (done bool, err 
 		case interactions.EventError:
 			// A server-reported stream error counts against the
 			// failure budget like any other drop.
-			return false, fmt.Errorf("interactions: stream error event: %w", ev.Err)
+			return false, fmt.Errorf("gemini: stream error event: %w", ev.Err)
 		case interactions.EventStepDelta:
 			if r.streamCfg.onThought != nil && ev.Delta != nil &&
 				ev.Delta.Type == interactions.DeltaThoughtSummary && ev.Delta.Text != "" {
@@ -196,6 +198,11 @@ func requiresActionErr(s interactions.Status) error {
 // backoff sleeps before reconnect attempt n (1-based), doubling from
 // the base delay to the cap, returning early on cancellation.
 func (r *Researcher) backoff(ctx context.Context, n int) error {
+	if n > 30 { // avoid shift overflow, matching client.go's backoffDelay
+		n = 30
+	}
+	// Left-shifting time.Duration (int64) wraps on overflow — defined
+	// behaviour in Go — so d <= 0 below catches a wrapped negative.
 	d := r.streamCfg.baseDelay << (n - 1)
 	if d <= 0 || d > r.streamCfg.maxDelay {
 		d = r.streamCfg.maxDelay

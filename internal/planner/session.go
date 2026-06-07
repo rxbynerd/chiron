@@ -59,6 +59,7 @@ func (s *Session) Run(ctx context.Context, query string) (string, error) {
 
 	plan, err := s.Planner.Propose(ctx, query)
 	if err != nil {
+		s.noteOrphan(plan)
 		return "", err
 	}
 
@@ -86,9 +87,22 @@ func (s *Session) Run(ctx context.Context, query string) (string, error) {
 
 		plan, err = s.Planner.Refine(ctx, plan.InteractionID, feedback)
 		if err != nil {
+			s.noteOrphan(plan)
 			return "", err
 		}
 	}
+}
+
+// noteOrphan surfaces the interaction id of a plan round that was paid
+// for but could not be concluded (cancelled mid-poll, failed round) —
+// the same recovery posture as the research run, whose id is emitted
+// the moment it is known. Without this, the round's spend would be
+// unrecoverable: nothing else ever learns the id.
+func (s *Session) noteOrphan(plan *Plan) {
+	if plan == nil || plan.InteractionID == "" || s.Out == nil {
+		return
+	}
+	fmt.Fprintf(s.Out, "plan interaction %s did not conclude; it is stored server-side — recover it with: chiron get %s\n", plan.InteractionID, plan.InteractionID)
 }
 
 // renderPlan writes one plan between unambiguous fences, with the round

@@ -61,6 +61,11 @@ type Options struct {
 	// is called synchronously from the streaming await and must not
 	// block; the CLI binds it to the transport's delta events.
 	OnThought func(text string)
+	// OnStreamDegraded, when set, observes the one-way degradation
+	// from streaming to polling after the failure budget is spent —
+	// the in-flight signal that the run is still progressing, just
+	// less prettily. Called at most once per await; must not block.
+	OnStreamDegraded func()
 	// Tools overrides the default tool set (google_search, url_context,
 	// code_execution). Only those three names are valid here; MCP and
 	// file_search arrive via their own fields.
@@ -379,7 +384,11 @@ func (r *Researcher) Await(ctx context.Context, id string) error {
 		// and still spending — server-side. Polling is the degraded
 		// path that saves the run; the abandoned stream's error is
 		// deliberately absorbed (the poll's own failure surfaces if
-		// the API is truly unreachable).
+		// the API is truly unreachable). The observer gives watchers
+		// of the event stream an in-flight signal of the change.
+		if r.streamCfg.onDegraded != nil {
+			r.streamCfg.onDegraded()
+		}
 	}
 	return r.awaitPoll(ctx, id)
 }

@@ -128,16 +128,21 @@ func (p *Planner) round(ctx context.Context, input any, previousID string) (*pla
 		return nil, errors.New("gemini: the API returned a plan interaction without an id")
 	}
 
+	// From here the round is paid for: every error path hands back a
+	// partial Plan carrying the interaction id — the recovery handle
+	// (chiron get) for a round that could not be concluded, per the
+	// Planner seam's contract. The id would otherwise be lost on a
+	// cancelled or failed poll.
 	final, err := p.poll.PollUntilTerminal(ctx, in.ID, p.pollCfg)
 	if err != nil {
-		return nil, fmt.Errorf("gemini: awaiting plan interaction %s: %w", in.ID, err)
+		return &planner.Plan{InteractionID: in.ID}, fmt.Errorf("gemini: awaiting plan interaction %s: %w", in.ID, err)
 	}
 	if final.Status != interactions.StatusCompleted {
-		return nil, fmt.Errorf("gemini: plan interaction %s ended %s", in.ID, final.Status)
+		return &planner.Plan{InteractionID: in.ID}, fmt.Errorf("gemini: plan interaction %s ended %s", in.ID, final.Status)
 	}
 	text := final.FinalText()
 	if text == "" {
-		return nil, fmt.Errorf("gemini: plan interaction %s completed without plan text", in.ID)
+		return &planner.Plan{InteractionID: in.ID}, fmt.Errorf("gemini: plan interaction %s completed without plan text", in.ID)
 	}
 	return &planner.Plan{InteractionID: in.ID, Text: text}, nil
 }

@@ -25,6 +25,12 @@ type Plan struct {
 // is spent. Each call creates a paid (much cheaper than a full run, but
 // not free) planning interaction, which is why Session bounds its
 // rounds.
+//
+// On error, implementations may still return a non-nil *Plan carrying
+// only InteractionID: the round's create succeeded — and was paid for —
+// but the plan could not be concluded (cancelled mid-poll, failed
+// round). The id is the recovery handle (`chiron get <id>`); Text is
+// empty and the Plan must not be treated as reviewable.
 type Planner interface {
 	// Propose asks the agent to plan the research for query.
 	Propose(ctx context.Context, query string) (*Plan, error)
