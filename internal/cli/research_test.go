@@ -9,14 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
 // newInteractionsServer fakes the Interactions API: create returns an
-// in-progress interaction, the first GET completes it with a report,
-// a citation and a chart.
+// in-progress interaction; a streaming GET serves an SSE stream with a
+// thought summary and a status update (the default --stream path); a
+// plain GET returns the final resource with a report, a citation and a
+// chart (the --quiet poll path and the post-await re-fetch).
 func newInteractionsServer(t *testing.T, finalStatus string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +29,12 @@ func newInteractionsServer(t *testing.T, finalStatus string) *httptest.Server {
 		}
 		if r.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_smoke","status":"in_progress","created":"2026-06-07T12:00:00Z"}`))
+			return
+		}
+		if r.URL.Query().Get("stream") == "true" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("id: e1\nevent: step.delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thought_summary_delta\",\"text\":\"weighing sources\"}}\n\n"))
+			w.Write([]byte("id: e2\nevent: interaction.status_update\ndata: {\"interaction_id\":\"v1_smoke\",\"status\":\"" + finalStatus + "\"}\n\n"))
 			return
 		}
 		w.Write([]byte(`{
@@ -90,7 +100,35 @@ func TestResearchEndToEndText(t *testing.T) {
 		t.Errorf("stdout missing the cited source:\n%s", stdout)
 	}
 
-	// Run events go to stderr as NDJSON, resume handle first among them.
+	// Run events go to stderr as NDJSON, resume handle first among
+	// them; the streamed thought summary appears as a delta event
+	// between the resume handle and the status change.
+	want := []string{"run_started", "interaction_created", "delta", "status_changed", "run_completed", "cost_summary"}
+	if kinds := eventKinds(t, stderr); strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Errorf("event kinds = %v, want %v", kinds, want)
+	}
+	if !strings.Contains(stderr, "v1_smoke") {
+		t.Error("stderr events must carry the interaction id — the resume handle")
+	}
+	if !strings.Contains(stderr, "weighing sources") {
+		t.Error("stderr must carry the streamed thought summary")
+	}
+	if strings.Contains(stdout, "weighing sources") {
+		t.Error("thought summaries must never reach stdout — it belongs to the report")
+	}
+}
+
+// sseStatus serves a minimal SSE stream concluding the interaction with
+// one status update — the default --stream await path for fakes whose
+// interesting detail lives in the plain-GET resource.
+func sseStatus(w http.ResponseWriter, id, status string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Write([]byte("id: e1\nevent: interaction.status_update\ndata: {\"interaction_id\":\"" + id + "\",\"status\":\"" + status + "\"}\n\n"))
+}
+
+// eventKinds parses the NDJSON event stream from stderr into its kinds.
+func eventKinds(t *testing.T, stderr string) []string {
+	t.Helper()
 	var kinds []string
 	for line := range strings.Lines(stderr) {
 		var ev struct {
@@ -101,12 +139,103 @@ func TestResearchEndToEndText(t *testing.T) {
 		}
 		kinds = append(kinds, ev.Kind)
 	}
-	want := []string{"run_started", "interaction_created", "status_changed", "run_completed", "cost_summary"}
-	if strings.Join(kinds, ",") != strings.Join(want, ",") {
-		t.Errorf("event kinds = %v, want %v", kinds, want)
+	return kinds
+}
+
+func TestResearchQuietPolls(t *testing.T) {
+	var streamGets atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("stream") == "true" {
+			streamGets.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.Method == http.MethodPost {
+			w.Write([]byte(`{"id":"v1_quiet","status":"in_progress"}`))
+			return
+		}
+		w.Write([]byte(`{
+			"id": "v1_quiet",
+			"status": "completed",
+			"steps": [{"type": "model_output", "content": [{"type": "text", "text": "# Smoke report"}]}]
+		}`))
+	}))
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	stdout, stderr, err := execute(t, "research", "--query", "smoke question", "--quiet")
+	if err != nil {
+		t.Fatalf("research --quiet: %v\nstderr: %s", err, stderr)
 	}
-	if !strings.Contains(stderr, "v1_smoke") {
-		t.Error("stderr events must carry the interaction id — the resume handle")
+	if streamGets.Load() != 0 {
+		t.Errorf("--quiet attached %d streams, want none", streamGets.Load())
+	}
+	if !strings.Contains(stdout, "# Smoke report") {
+		t.Errorf("stdout missing report body:\n%s", stdout)
+	}
+	for _, kind := range eventKinds(t, stderr) {
+		if kind == "delta" {
+			t.Error("--quiet must not emit delta events")
+		}
+	}
+}
+
+func TestStreamTogglesThinkingSummaries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"stream default", nil, "auto"},
+		{"quiet", []string{"--quiet"}, "none"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu     sync.Mutex
+				bodies []map[string]any
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Errorf("decoding create body: %v", err)
+					}
+					mu.Lock()
+					bodies = append(bodies, body)
+					mu.Unlock()
+					w.Write([]byte(`{"id":"v1_toggle","status":"in_progress"}`))
+					return
+				}
+				if r.URL.Query().Get("stream") == "true" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Write([]byte("id: e1\nevent: interaction.status_update\ndata: {\"interaction_id\":\"v1_toggle\",\"status\":\"completed\"}\n\n"))
+					return
+				}
+				w.Write([]byte(`{"id":"v1_toggle","status":"completed"}`))
+			}))
+			defer server.Close()
+			t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			args := append([]string{"research", "--query", "q", "-o", "none"}, tc.args...)
+			if _, stderr, err := execute(t, args...); err != nil {
+				t.Fatalf("research: %v\nstderr: %s", err, stderr)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 1 {
+				t.Fatalf("creates = %d, want 1", len(bodies))
+			}
+			cfg, _ := bodies[0]["agent_config"].(map[string]any)
+			if cfg == nil {
+				t.Fatal("create request missing agent_config")
+			}
+			if got := cfg["thinking_summaries"]; got != tc.want {
+				t.Errorf("thinking_summaries = %v, want %q — cfg.Stream must toggle the API request", got, tc.want)
+			}
+		})
 	}
 }
 

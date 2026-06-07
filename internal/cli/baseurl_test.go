@@ -69,6 +69,10 @@ func TestBaseURLOverrideUsed(t *testing.T) {
 			w.Write([]byte(`{"id":"v1_base","status":"in_progress"}`))
 			return
 		}
+		if r.URL.Query().Get("stream") == "true" {
+			sseStatus(w, "v1_base", "completed")
+			return
+		}
 		w.Write([]byte(`{"id":"v1_base","status":"completed"}`))
 	}))
 	defer server.Close()

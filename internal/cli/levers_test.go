@@ -135,6 +135,10 @@ func TestGetResumesAndEmitsReport(t *testing.T) {
 			t.Errorf("get must never create: got %s %s", r.Method, r.URL.Path)
 			return
 		}
+		if r.URL.Query().Get("stream") == "true" {
+			sseStatus(w, "v1_resume", "completed")
+			return
+		}
 		w.Write([]byte(`{
 			"id": "v1_resume",
 			"agent": "deep-research-preview-04-2026",
@@ -177,6 +181,10 @@ func TestFollowUpChainsModelInteraction(t *testing.T) {
 				t.Fatalf("decoding create body: %v", err)
 			}
 			w.Write([]byte(`{"id":"v1_followup","status":"in_progress"}`))
+			return
+		}
+		if r.URL.Query().Get("stream") == "true" {
+			sseStatus(w, "v1_followup", "completed")
 			return
 		}
 		w.Write([]byte(`{
@@ -235,6 +243,11 @@ func newPlanFlowServer(t *testing.T, bodies *[]map[string]any) *httptest.Server 
 			} else {
 				w.Write([]byte(`{"id":"v1_research","status":"in_progress"}`))
 			}
+			return
+		}
+		if r.URL.Query().Get("stream") == "true" {
+			// Only the research run streams; the planner polls.
+			sseStatus(w, "v1_research", "completed")
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/v1_plan") {

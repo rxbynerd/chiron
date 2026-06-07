@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -77,6 +78,7 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 		if err != nil {
 			return err
 		}
+		bindThoughtDisplay(ctx, &opts, deps.Transport)
 		res, err := gemini.New(opts)
 		if err != nil {
 			return err
@@ -114,6 +116,7 @@ func runGet(cmd *cobra.Command, cfg config.ResearchConfig, id string) error {
 		if err != nil {
 			return err
 		}
+		bindThoughtDisplay(ctx, &opts, deps.Transport)
 		res, err := gemini.New(opts)
 		if err != nil {
 			return err
@@ -141,6 +144,7 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID strin
 		if err != nil {
 			return err
 		}
+		bindThoughtDisplay(ctx, &opts, deps.Transport)
 		res, err := gemini.NewFollowUp(opts, model)
 		if err != nil {
 			return err
@@ -197,22 +201,51 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 // geminiOptions maps the resolved config onto the adapter's options —
 // the one place the flag surface meets the wire surface. It fails when
 // the base-URL override is invalid, before any client is constructed.
+// cfg.Stream drives both halves of the streaming surface: the await
+// strategy (SSE with reconnect vs silent polling) and the API request
+// (thinking_summaries auto vs none — there is nothing to display
+// summaries on in a --quiet run, so they are not requested).
 func geminiOptions(cfg config.ResearchConfig, apiKey string) (gemini.Options, error) {
 	baseURL, err := geminiBaseURL()
 	if err != nil {
 		return gemini.Options{}, err
 	}
 	return gemini.Options{
-		APIKey:       apiKey,
-		BaseURL:      baseURL,
-		Tier:         cfg.Agent,
-		Visualise:    cfg.Visualise,
-		Tools:        cfg.Tools,
-		MCP:          cfg.MCP,
-		FileSearch:   cfg.FileSearch,
-		Inputs:       cfg.Inputs,
-		TemplatePath: cfg.Template,
+		APIKey:            apiKey,
+		BaseURL:           baseURL,
+		Tier:              cfg.Agent,
+		Visualise:         cfg.Visualise,
+		Stream:            cfg.Stream,
+		ThinkingSummaries: cfg.Stream,
+		Tools:             cfg.Tools,
+		MCP:               cfg.MCP,
+		FileSearch:        cfg.FileSearch,
+		Inputs:            cfg.Inputs,
+		TemplatePath:      cfg.Template,
 	}, nil
+}
+
+// bindThoughtDisplay routes streamed thought summaries onto the run's
+// transport as delta events — the M5 display surface: NDJSON on stderr
+// beside the rest of the lifecycle events, never stdout, which belongs
+// to the report. Emission is best effort, matching the run core's
+// treatment of the transport: a broken event stream must not abort a
+// paid run.
+func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.Transport) {
+	if !opts.Stream {
+		return
+	}
+	type deltaPayload struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	opts.OnThought = func(text string) {
+		payload, err := json.Marshal(deltaPayload{Type: "thought_summary", Text: text})
+		if err != nil {
+			return
+		}
+		_ = tr.Emit(ctx, transport.Event{Kind: transport.KindDelta, Payload: payload})
+	}
 }
 
 // geminiBaseURL reads and validates CHIRON_GEMINI_BASE_URL before any
