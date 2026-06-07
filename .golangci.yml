@@ -1,0 +1,26 @@
+# golangci-lint v2 configuration.
+#
+# golangci-lint v2 removed the v1 default exclusions, so a "latest"
+# release started flagging idiomatic errcheck sites (deferred Close on
+# read paths, fmt.Fprint* to CLI writers) that v1 suppressed out of the
+# box. This file makes the lint contract explicit and committed rather
+# than dependent on upstream defaults:
+#
+#   - std-error-handling restores the standard exclusions (errcheck on
+#     *.Close, fmt.*print*, os.Std* and friends).
+#   - errcheck is relaxed in _test.go files, where httptest handler
+#     writes and similar are conventionally unchecked.
+#
+# The CI workflow pins the golangci-lint version for the same reason
+# the actions are SHA-pinned (C1-SEC-3): main must not break without a
+# change in this repository.
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

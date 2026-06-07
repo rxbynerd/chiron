@@ -545,3 +545,29 @@ At the closing commit, `go build ./...`, `go vet ./...` and
 `internal/memory` no-op. The v2 seams sit ready as designed: the gRPC
 transport stub, the fleet researcher stub, `proto/chiron/v1`, and the
 locally declared `ContextStore` awaiting Paddock.
+
+## 2026-06-07 — Lint contract committed: .golangci.yml plus pinned linter version
+
+The first push to main after the v1 close failed CI lint with 28
+errcheck findings — none of them new code. The workflow ran
+golangci-lint with `version: latest` and no committed configuration;
+golangci-lint v2 removed the v1 default exclusions, so a release of the
+linter changed what main was held to without any change in this
+repository. Triage confirmed every finding was an idiomatic ignore
+(deferred `Close` on read paths, `fmt.Fprint*` to the CLI writer,
+httptest handler writes in `_test.go`) rather than a real defect.
+
+Remediation makes the lint contract explicit instead of inherited:
+
+- `.golangci.yml` (v2 schema) enables the `std-error-handling`
+  exclusion preset, restoring the standard errcheck suppressions, and
+  relaxes errcheck in `_test.go` files where unchecked handler writes
+  are conventional.
+- The workflow pins `version: v2.12.2` for the same reason the action
+  SHAs are pinned (C1-SEC-3): main must not break without a commit in
+  this repository. Linter bumps are now deliberate and travel with any
+  config adjustment they require.
+
+Peppering the 28 sites with `_ =` assignments was rejected — it adds
+noise at call sites the Go ecosystem conventionally leaves bare, and
+the next linter default change would simply produce a different batch.
