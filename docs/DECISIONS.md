@@ -221,3 +221,43 @@ name vocabulary so backends can rely on it. The JSONL binding writes the
 same spans and metrics as newline-delimited JSON for local debugging;
 both bindings route every string payload through `secret.Scrub`, so a
 credential cannot transit traces any more than logs.
+
+## 2026-06-07 — internal/interactions: client shape, retries, bounds, SSE resume
+
+The Interactions client is stdlib-only `net/http` + hand-rolled SSE — no
+new dependencies. Decisions of note:
+
+- The package owns the wire-format types per the "Wire types vs domain
+  types" entry above, with a `LastVerified` constant (2026-06-07)
+  recording the docs revision the shapes were verified against, beside
+  the pinned `Api-Revision: 2026-05-20` header on every request.
+- Retries cover transport errors and HTTP 408/429/5xx only, with capped
+  exponential backoff; other 4xx surface immediately as a typed
+  `*APIError` (URI code, message, HTTP status). Create is retried like
+  everything else — INTERACTIONS-API.md §6 says to — which accepts a
+  small duplicate-spend risk if a 5xx lands after the server actually
+  accepted a create. v1 takes that trade because interaction IDs surface
+  as soon as they are known and the budget levers arrive in M4; if it
+  bites, `WithMaxRetries(0)` exists.
+- `Create` rejects `background: true` without `store: true` locally
+  (§3's rule) rather than burning a paid request to learn it, and
+  `CreateRequest` emits `background`/`store`/`stream` explicitly — never
+  `omitempty` — because their server-side defaults differ.
+- Every body read is bounded via `io.LimitReader` (64 MiB responses,
+  16 MiB per SSE event, 1 MiB error bodies, all configurable): a
+  misbehaving endpoint cannot exhaust memory, and an over-bound document
+  fails loudly instead of truncating silently.
+- Polling treats every non-`in_progress` status as terminal (full §4
+  enum), so `requires_action` or `budget_exceeded` stop the poll rather
+  than hanging it; failure-variant mapping is the caller's concern via
+  `Status.Failed`. Defaults back off 10s → 60s ×1.5 against tasks that
+  run minutes (§7).
+- SSE resume is via `?last_event_id=` query parameter, not the
+  `Last-Event-ID` header, which the docs do not promise is honoured
+  (§5). The streamer is a parsing primitive: `Next`/`LastEventID`/
+  `Close` only, with reconnect policy left to the caller (M5). Because
+  the reference does not pin down whether `event_type`/`event_id` travel
+  as SSE fields or inside the JSON payload, the parser accepts both,
+  preferring the SSE fields; unknown event and delta types are surfaced
+  with their raw payload rather than dropped.
+
