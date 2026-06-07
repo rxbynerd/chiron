@@ -22,16 +22,26 @@ func newResearchCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research [query]",
 		Short: "Start a research task, await it, and emit the report",
-		Long: `Start a research task, await the long-running agent (streaming or
-polling), retrieve the result, and emit a cited Markdown report. The main path.`,
+		Long: `Start a research task, await the long-running agent, retrieve the
+result, and emit a cited Markdown report. The main path.
+
+The interaction id is emitted on stderr (NDJSON run events) as soon as
+it is known: it is the resume handle for a crashed or timed-out run.
+
+Exit codes:
+
+  0  the research completed and the report was emitted
+  1  usage, configuration, or infrastructure errors (bad flags,
+     unresolvable secrets, network failures, timeout)
+  2  the research task ended failed or incomplete
+  3  the research task was cancelled or exceeded the server-side budget`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, args)
 			if err != nil {
 				return err
 			}
-			_ = cfg
-			return errNotImplemented(cmd)
+			return runResearch(cmd, cfg)
 		},
 	}
 	addResearchFlags(cmd)

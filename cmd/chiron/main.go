@@ -4,15 +4,11 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/rxbynerd/chiron/internal/cli"
 )
 
 func main() {
-	if err := cli.NewRootCommand().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "chiron:", err)
-		os.Exit(1)
-	}
+	os.Exit(cli.Execute())
 }

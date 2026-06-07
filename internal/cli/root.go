@@ -4,8 +4,27 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 )
+
+// Execute runs the chiron command tree and returns the process exit
+// code for main to pass to os.Exit: 0 on success, an ExitError's code
+// for distinct research outcomes, and ExitUsage for everything else
+// (see the research command's help for the contract).
+func Execute() int {
+	if err := NewRootCommand().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "chiron:", err)
+		if exitErr, ok := errors.AsType[*ExitError](err); ok {
+			return exitErr.Code
+		}
+		return ExitUsage
+	}
+	return 0
+}
 
 // NewRootCommand builds the chiron command tree.
 func NewRootCommand() *cobra.Command {
