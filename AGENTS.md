@@ -47,3 +47,21 @@ CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
   Justify any new dependency in `docs/DECISIONS.md` before adding it.
 - Secrets are `secret://` references end to end.
 - Keep commits in logical units; explain rationale in the message body.
+
+## Security-sensitive environment variables
+
+- `CHIRON_GEMINI_BASE_URL` — overrides the Gemini API endpoint. The API
+  key is sent in a header on every request to this base, so whoever
+  controls the variable receives the key. Its absence is the safe
+  default; it exists for the httptest smoke tests and must never be set
+  in production. Values are validated at startup: absolute `https://`
+  required, `http://` admitted for loopback hosts only. For v2 GKE
+  deployments, consider disabling it entirely in release builds via a
+  build tag.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` —
+  standard OTel configuration; binding either sends spans carrying
+  research queries and interaction ids to the named collector. The
+  scrubber guarantees the API key never transits a span, but the queries
+  themselves are visible to whatever endpoint is configured: treat the
+  collector address as deployment configuration, not a user-settable
+  knob. In GKE v2, restrict both to operator-supplied Secrets.

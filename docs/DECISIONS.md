@@ -199,6 +199,10 @@ SDK). Direct modules, all at the current stable release:
   processor, resource; also `sdk/trace/tracetest` for the scrub tests.
 - `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`
   v1.44.0 — OTLP over HTTP/protobuf.
+- `go.opentelemetry.io/otel/trace` v1.44.0 — `oteltrace.Tracer` and
+  `oteltrace.SpanFromContext` in `otel.go`. (Added to this entry during
+  cycle-1 remediation, C1-SPEC-2: the module was always a direct
+  dependency; the log simply failed to list it.)
 
 The HTTP exporter was chosen over the gRPC one to keep the linked tree
 smaller, but honesty compels a caveat: `go.opentelemetry.io/proto/otlp`
@@ -429,3 +433,33 @@ falls back to the interaction's own wire agent id
 (`estimateForAgentID`), so resuming a max-tier run reports the max-tier
 figure regardless of the locally configured tier; unknown agents (and
 model-based follow-ups) estimate zero.
+
+## 2026-06-07 — Cycle-1 remediation: base-URL validation, redirect policy, stdin posture
+
+Three security-posture decisions from the cycle-1 review remediation
+(findings in `docs/reviews/cycle-1-brief.md`; dispositions in
+`docs/reviews/cycle-1-remediation.md`):
+
+- **`CHIRON_GEMINI_BASE_URL` is validated before any client exists**
+  (C1-SEC-1): the API key travels in a header on every request to this
+  base, so an unvalidated override is a key-exfiltration and SSRF
+  channel. The rule is https:// anywhere, http:// for loopback hosts
+  only. The loopback exemption deviates from the brief's https-only
+  recommendation deliberately: the CLI smoke tests drive the binary end
+  to end against plain-HTTP `httptest` servers and the adapter exposes
+  no TLS-trust injection point, while loopback http reaches neither a
+  network path nor an internal metadata service — the threats named by
+  the finding. The variable is documented as security-sensitive in
+  AGENTS.md.
+- **The interactions client refuses cross-host redirects** (C1-SEC-2):
+  Go strips only its own sensitive headers on cross-domain redirects,
+  never custom ones like `x-goog-api-key`. The policy is enforced on a
+  shallow copy of whatever `http.Client` is supplied, so
+  `WithHTTPClient` cannot lose the guarantee.
+- **Unknown stdin reader types are neither config nor a terminal**
+  (C1-CODE-4): `stdinIsPiped` previously treated any non-`*os.File`
+  reader as piped config, so an embedding host's live reader would be
+  drained and decoded as YAML. Now only a real pipe/file is implicit
+  config, and the separate `stdinIsTerminal` — deliberately not the
+  negation — keeps the earlier decision that a non-terminal stdin can
+  never approve `--plan` spend.
