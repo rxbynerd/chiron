@@ -200,6 +200,28 @@ func TestResearchBudgetExceededExitCode(t *testing.T) {
 	}
 }
 
+func TestResearchRequiresActionExitCode(t *testing.T) {
+	// requires_action aborts the await with a typed error; the CLI maps
+	// it to the failed-research exit code — it is a research outcome,
+	// not an infrastructure fault.
+	server := newInteractionsServer(t, "requires_action")
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	_, _, err := execute(t, "research", "--query", "smoke question", "-o", "none")
+	exitErr, ok := errors.AsType[*ExitError](err)
+	if !ok {
+		t.Fatalf("error = %v, want an ExitError", err)
+	}
+	if exitErr.Code != ExitResearchFailed {
+		t.Errorf("exit code = %d, want %d for requires_action", exitErr.Code, ExitResearchFailed)
+	}
+	if !strings.Contains(err.Error(), "requires client action") {
+		t.Errorf("error %q must carry the requires_action detail", err)
+	}
+}
+
 func TestResearchRequiresQuery(t *testing.T) {
 	if _, _, err := execute(t, "research"); err == nil {
 		t.Error("research without a query must fail before any seam is constructed")

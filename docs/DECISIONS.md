@@ -343,8 +343,12 @@ code, not an error.
 
 `chiron research` exits 0 only when the task completed; 1 for usage,
 configuration and infrastructure errors (including timeout — the run
-could not conclude); 2 when the task ended `failed` or `incomplete`;
-3 when it was `cancelled` or `budget_exceeded` (stopped, not broken).
+could not conclude); 2 when the task ended `failed` or `incomplete`, or
+reported `requires_action` — a research outcome, not an infrastructure
+fault: deep research cannot legitimately request client action, so the
+typed `interactions.ErrRequiresAction` maps to the failed-run code with
+its detail in the error; 3 when it was `cancelled` or `budget_exceeded`
+(stopped, not broken).
 The contract is documented in the command's help so pipelines can act
 on the outcome without parsing the report. Environment access lives
 only in the CLI composition root: the OTel tracer binds only when the

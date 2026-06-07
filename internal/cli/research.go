@@ -11,6 +11,7 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/formatter"
+	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/researcher/gemini"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/secret"
@@ -28,7 +29,9 @@ const (
 	// errors: bad flags, unresolvable secrets, network failures,
 	// timeouts. Cobra's own errors land here via main.
 	ExitUsage = 1
-	// ExitResearchFailed: the task reached failed or incomplete.
+	// ExitResearchFailed: the task reached failed or incomplete, or
+	// reported requires_action — a state deep research cannot
+	// legitimately produce and Chiron cannot service.
 	ExitResearchFailed = 2
 	// ExitResearchStopped: the task was cancelled or exceeded the
 	// server-side budget — stopped, rather than broken.
@@ -108,6 +111,13 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 		Tracer:     tracer,
 	}, run.Params{Query: cfg.Query, Agent: cfg.Agent})
 	if err != nil {
+		// requires_action is a research outcome, not an infrastructure
+		// fault: deep research cannot legitimately request client
+		// action (docs/INTERACTIONS-API.md §4), so the task is broken,
+		// not Chiron — exit as a failed run, detail in the error.
+		if errors.Is(err, interactions.ErrRequiresAction) {
+			return &ExitError{Code: ExitResearchFailed, Err: err}
+		}
 		return err
 	}
 	return exitForStatus(result)

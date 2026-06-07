@@ -33,7 +33,8 @@ Exit codes:
   0  the research completed and the report was emitted
   1  usage, configuration, or infrastructure errors (bad flags,
      unresolvable secrets, network failures, timeout)
-  2  the research task ended failed or incomplete
+  2  the research task ended failed or incomplete, or required client
+     action (a state deep research cannot legitimately produce)
   3  the research task was cancelled or exceeded the server-side budget`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
