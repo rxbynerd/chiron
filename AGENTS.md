@@ -28,7 +28,7 @@ CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
 | `cmd/chiron` | Entrypoint; delegates to `internal/cli`. |
 | `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`) and flag→config resolution. Commands stay thin. |
 | `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines. |
-| `internal/types` | Shared seam-crossing types: `Interaction`, `Step`, `Content`, `Annotation`, `Usage`, `Report`, `RunResult` — shaped to `docs/INTERACTIONS-API.md` §4 (normative; the API drifted from the proposal). |
+| `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md). |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. Gemini adapter lands in `researcher/gemini`; v2 fleet orchestrator in `researcher/fleet`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report`. |
 | `internal/sink` | `ReportSink` seam: where the final report goes (stdout-markdown, file, stdout-json). |

@@ -56,6 +56,12 @@ local state.
 
 ## 2026-06-07 — internal/types follows INTERACTIONS-API.md, not PROPOSAL §3
 
+> **Superseded** the same day by "Wire types vs domain types" below:
+> wire-exact shapes moved out of `internal/types` into
+> `internal/interactions`. The premise stands — where the proposal and
+> the API reference disagree, the reference wins — but it now binds the
+> adapter, not the domain model.
+
 The live Interactions API has drifted from the shapes the proposal was
 verified against (2026-04-28 → 2026-05-20 revision), as documented in
 `docs/INTERACTIONS-API.md` §8: responses are `steps[]` of typed
@@ -66,6 +72,22 @@ the usage block carries token totals plus `grounding_tool_count`.
 `internal/types` models the **new** shapes with wire-exact JSON tags, and
 a test pins the decode against the reference's §4 example. Where the
 proposal and the API reference disagree, the reference wins.
+
+## 2026-06-07 — Wire types vs domain types
+
+`internal/types` is the seam-level **domain model**: the stable shapes
+the core, formatter, and sinks program against (`Interaction` with
+`Outputs`/`Citations`, the full status enum plus `Terminal()`, and a
+flat `Usage` of cost signals). The **wire schema** — `steps[]`, typed
+`content[]` parts, `annotations`, per docs/INTERACTIONS-API.md §4 — is
+owned by `internal/interactions`, and `researcher/gemini` maps wire to
+domain.
+
+Rationale: the Interactions API is beta and actively drifting (see
+INTERACTIONS-API.md §8 for the drift it has already exhibited), so the
+churn is contained in the adapter behind a `last_verified` marker while
+core/formatter/sink stay stable. This supersedes the entry above, which
+had put wire-exact shapes directly into `internal/types`.
 
 ## 2026-06-07 — Durations serialise as strings
 
