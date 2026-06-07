@@ -154,6 +154,61 @@ func TestMarkdownFormat(t *testing.T) {
 				{Name: "chart-2.png", MIMEType: "image/png", Data: []byte("png-bytes")},
 			},
 		},
+		{
+			// C1-CODE-3 (a): a citation title containing `]` must have
+			// the bracket escaped so it cannot break out of the link
+			// text.
+			name: "citation-bracket-title",
+			in: &types.Interaction{
+				ID:      "v1_brkt",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Catalogue bracket usage in legal citations",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Brackets\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/brackets", Title: "Title with ] bracket](https://evil.example)"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// C1-CODE-3 (b): a citation URI containing `)` must have the
+			// paren percent-encoded so it cannot terminate the link
+			// target early.
+			name: "citation-paren-uri",
+			in: &types.Interaction{
+				ID:      "v1_paren",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Survey URLs containing parentheses",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Parentheses\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/wiki/Foo_(bar)", Title: "Foo (bar)"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// C1-CODE-3 (c): a javascript: URI is not a web-verifiable
+			// source — no Markdown link (and no front-matter source) is
+			// emitted for it; only the https citation survives.
+			name: "citation-javascript-uri",
+			in: &types.Interaction{
+				ID:      "v1_js",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit citation hygiene",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Hygiene\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "javascript:alert(1)", Title: "Hostile"},
+					{URI: "https://example.org/safe", Title: "Safe source"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
 	}
 
 	for _, tc := range cases {

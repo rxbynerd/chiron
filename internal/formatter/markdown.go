@@ -68,13 +68,17 @@ type source struct {
 	Title string `yaml:"title,omitempty"`
 }
 
-// markdown renders the source as a numbered-list entry body.
+// markdown renders the source as a numbered-list entry body. Title and
+// URI are API-provided and untrusted: `]` in a title and `)` in a URI
+// would break out of the link syntax, so both are neutralised before
+// formatting. Scheme filtering happens earlier, in collectSources.
 func (s source) markdown() string {
-	title := s.Title
+	title := strings.ReplaceAll(s.Title, "]", `\]`)
 	if title == "" {
 		title = s.URI
 	}
-	return fmt.Sprintf("[%s](%s)", title, s.URI)
+	uri := strings.ReplaceAll(s.URI, ")", "%29")
+	return fmt.Sprintf("[%s](%s)", title, uri)
 }
 
 // Format renders the interaction. The body is the last text output —
@@ -180,11 +184,14 @@ func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 }
 
 // collectSources maps citations into front-matter shape, skipping any
-// without a URI (nothing to verify against).
+// without a URI (nothing to verify against) and any with a non-web
+// scheme: citation URIs are API-provided, and a javascript:, data: or
+// file: URI is not a verifiable source — some renderers would pass it
+// through to live HTML.
 func collectSources(citations []types.Citation) []source {
 	var out []source
 	for _, c := range citations {
-		if c.URI == "" {
+		if !strings.HasPrefix(c.URI, "https://") && !strings.HasPrefix(c.URI, "http://") {
 			continue
 		}
 		out = append(out, source{URI: c.URI, Title: c.Title})
