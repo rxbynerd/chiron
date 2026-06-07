@@ -13,40 +13,72 @@ proposal. Documentation uses en-GB spelling and no emojis.
 ## Build and verify
 
 ```sh
-just build   # go build -o bin/chiron ./cmd/chiron
-just test    # go test ./...
-just vet     # go vet ./...
-just lint    # golangci-lint if installed, else go vet
+just build        # go build -o bin/chiron ./cmd/chiron
+just test         # go test ./...
+just vet          # go vet ./...
+just lint         # golangci-lint if installed, else go vet
+just ci           # everything CI runs
+just proto-lint   # lint + compile-check proto/chiron/v1 (needs buf)
+just proto        # generate Go from the proto module (output not committed)
 ```
 
-CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint.
+CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint,
+with actions pinned to full commit SHAs.
 
 ## Per-package map
 
 | Package | Role |
 | --- | --- |
-| `cmd/chiron` | Entrypoint; delegates to `internal/cli`. |
-| `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`) and flag→config resolution. Commands stay thin. |
-| `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines. |
-| `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md). |
-| `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. Gemini adapter lands in `researcher/gemini`; v2 fleet orchestrator in `researcher/fleet`. |
-| `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; the gemini binding lives in `researcher/gemini`. |
-| `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report`. |
-| `internal/sink` | `ReportSink` seam: where the final report goes (stdout-markdown, file, stdout-json). |
-| `internal/transport` | `Transport` seam: run events out of the core. stdio NDJSON in v1; gRPC in v2. |
-| `internal/trace` | `Tracer` seam: spans + run metrics (OTel + local jsonl bindings to come). |
-| `internal/secret` | `Resolver` seam for `secret://` references. Literal keys never appear in config, logs, or traces. |
+| `cmd/chiron` | Entrypoint; `os.Exit(cli.Execute())` and nothing else. |
+| `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`), flag→config resolution, and the composition root: the only place environment is read, seams are bound, and exit codes (0–4) are assigned. |
+| `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines, validation (enums, timeout cap, secret:// rule, MCP URL schemes). |
+| `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md, "Wire types vs domain types"). |
+| `internal/interactions` | Hand-rolled Interactions API client: wire types (`last_verified` marker), create/get with retries and capped backoff, bounded reads everywhere, cross-host redirect refusal, poll-to-terminal, SSE streaming primitive with `?last_event_id=` resume. |
+| `internal/run` | The pure-function research core: `Run` (start→await→retrieve→format→emit) and `Resume`. Depends only on the seam interfaces; takes a context and `Deps`, reads no environment. |
+| `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. |
+| `internal/researcher/gemini` | The Deep Research adapter: tier mapping and cost table, input grounding, prompt template, streaming await with reconnect and poll fallback, planner binding, follow-up mode. Creates are never auto-retried (money). |
+| `internal/researcher/fleet` | v2 stirrup-fleet orchestrator seam — a stub that returns not-implemented, pinned by tests. |
+| `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
+| `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report` (front matter, body, charts as assets, numbered sources). Pure — no IO; golden-file tested. |
+| `internal/sink` | `ReportSink` seam: stdout-markdown, file (0600, writes assets), stdout-json, multi. |
+| `internal/transport` | `Transport` seam: run events out of the core. `Stdio` NDJSON on stderr (v1); `grpc` stub for v2. Event kinds mirror `proto/chiron/v1` one-to-one. |
+| `internal/trace` | `Tracer` seam with three bindings: OTel (OTLP/HTTP), JSONL (local debug), Noop. `names.go` fixes the span/metric vocabulary; all payloads scrubbed. |
+| `internal/secret` | `secret://` resolver (env, file backends), the credential-pattern `Scrub` primitive, and the scrubbing slog handler. Literal keys never appear in config, logs, traces, or stderr. |
 | `internal/memory` | `ContextStore` seam + `Noop` only — deliberately unimplemented (PROPOSAL §5); fulfilled externally by Paddock in v2. Declared locally, never imported from paddockapi (see DECISIONS.md). |
+| `proto/chiron/v1` | The v2 control-plane contract as a Buf module. Generated Go is deliberately not committed in v1 (see DECISIONS.md). |
 
 ## Ground rules
 
 - The run core must depend only on the seam interfaces; concrete types
-  are injected from `ResearchConfig`.
+  are injected from `ResearchConfig` at the CLI composition root.
 - Dependency surface is minimal and auditable: stdlib, cobra (+pflag),
-  yaml.v3. **No vendor AI SDKs** — adapters are hand-rolled `net/http`.
-  Justify any new dependency in `docs/DECISIONS.md` before adding it.
-- Secrets are `secret://` references end to end.
+  yaml.v3, and the OpenTelemetry SDK (the one justified exception —
+  see DECISIONS.md). **No vendor AI SDKs** — adapters are hand-rolled
+  `net/http`. Justify any new dependency in `docs/DECISIONS.md` before
+  adding it.
+- Secrets are `secret://` references end to end; every output path
+  (logs, traces, stderr, thought deltas) routes through `secret.Scrub`.
+- stdout belongs to the report; events, prompts, and diagnostics go to
+  stderr.
 - Keep commits in logical units; explain rationale in the message body.
+
+## Money safety
+
+Research tasks cost £1–7 each, so spend paths have hard rules:
+
+- Nothing creates an interaction before the `--budget` gate has run;
+  the gate precedes the plan phase too, because plan rounds also spend.
+- `POST /interactions` is never auto-retried by the spending callers
+  (gemini adapter and planner binding): an ambiguous 5xx may already
+  have started billing. GETs retry freely.
+- The interaction id is emitted the moment `Start` returns, before
+  anything else can fail, so a crashed run is always recoverable with
+  `chiron get <id>`.
+- A non-terminal stdin can never approve `--plan` spend; only a real
+  terminal or an explicit `--accept-plan`.
+- A broken event stream must not abort a paid run: transport emission
+  is best effort, and a failed SSE await falls back to polling rather
+  than abandoning a running task.
 
 ## Test infrastructure conventions
 
