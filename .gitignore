@@ -1,0 +1,17 @@
+# Binaries
+/chiron
+/bin/
+/dist/
+
+# Test and coverage artefacts
+*.test
+*.out
+coverage.html
+
+# Local trace debug output
+*.jsonl
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
