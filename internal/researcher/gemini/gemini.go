@@ -97,6 +97,11 @@ type Researcher struct {
 	inputs    []string
 	pollCfg   interactions.PollConfig
 
+	// inFlight enforces the one-run-at-a-time contract at runtime: a
+	// second Start while one is in flight fails instead of silently
+	// corrupting lastQuery and pollCount (the v2 fleet orchestrator
+	// must give each concurrent task its own Researcher).
+	inFlight  atomic.Bool
 	pollCount atomic.Int64
 	mu        sync.Mutex
 	started   bool // Start ran: lastQuery and toolNames describe the interaction
@@ -271,6 +276,11 @@ func assembleTools(opts Options) ([]interactions.Tool, []string, error) {
 // report, not a new research task, so the report template does not
 // apply.
 func (r *Researcher) Start(ctx context.Context, task researcher.Task) (string, error) {
+	if !r.inFlight.CompareAndSwap(false, true) {
+		return "", errors.New("gemini: researcher already has a run in flight")
+	}
+	defer r.inFlight.Store(false)
+
 	if task.Query == "" {
 		return "", errors.New("gemini: query must not be empty")
 	}
@@ -317,11 +327,14 @@ func (r *Researcher) Start(ctx context.Context, task researcher.Task) (string, e
 		return "", errors.New("gemini: the API returned an interaction without an id")
 	}
 
+	// Both per-run state resets happen under the one mutex, so a
+	// stale OnPoll increment from a previous run cannot interleave
+	// between them.
 	r.mu.Lock()
 	r.started = true
 	r.lastQuery = task.Query
-	r.mu.Unlock()
 	r.pollCount.Store(0)
+	r.mu.Unlock()
 	return in.ID, nil
 }
 

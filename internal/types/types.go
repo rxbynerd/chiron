@@ -68,8 +68,11 @@ type OutputType string
 // Output types produced by a research agent. The final report is the last
 // text output; image outputs carry agent-generated charts.
 const (
-	OutputText           OutputType = "text"
-	OutputImage          OutputType = "image"
+	OutputText  OutputType = "text"
+	OutputImage OutputType = "image"
+	// TODO(M5): map thought content parts to OutputThoughtSummary in
+	// the gemini adapter's toDomain before streaming display goes live
+	// — no mapping assigns this constant yet.
 	OutputThoughtSummary OutputType = "thought_summary"
 )
 

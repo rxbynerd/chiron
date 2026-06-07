@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -9,6 +10,13 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/interactions"
 )
+
+// maxInputBytes caps one local --input file — matching the Gemini API's
+// per-part size guidance — so a runaway path cannot exhaust process
+// memory before the request is even built. Reads are bounded like every
+// other read in the codebase: over the cap fails loudly, never
+// truncates silently.
+const maxInputBytes = 50 << 20 // 50 MiB
 
 // buildInput assembles the create request's input: the prompt string
 // alone when there is no multimodal grounding, otherwise a Content
@@ -42,9 +50,9 @@ func inputPart(in string) (interactions.Content, error) {
 		return interactions.Content{Type: partType(mimeType), MIMEType: mimeType, URI: in}, nil
 	}
 
-	data, err := os.ReadFile(in)
+	data, err := readInputBounded(in)
 	if err != nil {
-		return interactions.Content{}, fmt.Errorf("gemini: reading input %s: %w", in, err)
+		return interactions.Content{}, err
 	}
 	mimeType := mimeFromName(in)
 	if mimeType == "" {
@@ -56,6 +64,24 @@ func inputPart(in string) (interactions.Content, error) {
 		}
 	}
 	return interactions.Content{Type: partType(mimeType), MIMEType: mimeType, Data: data}, nil
+}
+
+// readInputBounded reads a local input file up to maxInputBytes
+// (inclusive), failing with the path and the limit when it is larger.
+func readInputBounded(in string) ([]byte, error) {
+	f, err := os.Open(in)
+	if err != nil {
+		return nil, fmt.Errorf("gemini: reading input %s: %w", in, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxInputBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("gemini: reading input %s: %w", in, err)
+	}
+	if int64(len(data)) > maxInputBytes {
+		return nil, fmt.Errorf("gemini: input %s exceeds %d-byte limit; use a URL reference instead", in, maxInputBytes)
+	}
+	return data, nil
 }
 
 // partType selects the wire part type for a MIME type.
