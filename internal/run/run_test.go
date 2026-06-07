@@ -97,6 +97,19 @@ func (t *recordingTransport) kinds() []string {
 	return kinds
 }
 
+// countingTracer counts Metric emissions by name; spans are no-ops.
+type countingTracer struct {
+	trace.Noop
+	metrics map[string]int
+}
+
+func (c *countingTracer) Metric(_ context.Context, name string, _ float64) {
+	if c.metrics == nil {
+		c.metrics = make(map[string]int)
+	}
+	c.metrics[name]++
+}
+
 func completedInteraction() *types.Interaction {
 	return &types.Interaction{
 		ID:     "v1_run",
@@ -316,6 +329,8 @@ func TestRunSinkError(t *testing.T) {
 	boom := errors.New("disk full")
 	deps, _, _, tr := happyDeps()
 	deps.Sink = &recordingSink{err: boom}
+	counter := &countingTracer{}
+	deps.Tracer = counter
 	if _, err := Run(context.Background(), deps, Params{Query: "q"}); !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want the sink failure", err)
 	}
@@ -323,6 +338,11 @@ func TestRunSinkError(t *testing.T) {
 		if kind == transport.KindRunCompleted {
 			t.Error("run_completed must not be emitted when the report failed to land")
 		}
+	}
+	// C1-CODE-6: one failed run, one failure metric — the deferred
+	// emission must not double-count with recordMetrics' own.
+	if n := counter.metrics[trace.MetricFailures]; n != 1 {
+		t.Errorf("MetricFailures emitted %d time(s) on a sink failure, want exactly 1", n)
 	}
 }
 
