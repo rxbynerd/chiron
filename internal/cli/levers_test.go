@@ -142,6 +142,13 @@ func TestGetResumesAndEmitsReport(t *testing.T) {
 	if strings.Contains(stdout, "tools:") {
 		t.Errorf("front matter claims a tool set for a resumed interaction:\n%s", stdout)
 	}
+	// Likewise the query: the interaction's user_input step carries the
+	// TEMPLATED prompt, not the raw question, so the adapter records no
+	// query for resumed interactions and the front matter omits the
+	// field rather than rendering the prompt boilerplate.
+	if strings.Contains(stdout, "query:") {
+		t.Errorf("front matter claims a query for a resumed interaction:\n%s", stdout)
+	}
 }
 
 func TestFollowUpChainsModelInteraction(t *testing.T) {
