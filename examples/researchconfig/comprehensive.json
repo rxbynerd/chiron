@@ -1,0 +1,16 @@
+{
+  "query": "Competitive landscape of 10BASE-T1L PHY vendors",
+  "agent": "deep-research-max",
+  "plan": true,
+  "visualise": true,
+  "stream": true,
+  "tools": ["google_search", "url_context", "code_execution"],
+  "mcp": {
+    "corp-docs": "https://mcp.example.internal"
+  },
+  "output": "text",
+  "out": "report.md",
+  "api_key_ref": "secret://GEMINI_API_KEY",
+  "budget_gbp": 6.0,
+  "timeout": "45m"
+}

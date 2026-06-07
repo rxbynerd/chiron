@@ -19,5 +19,12 @@ mutates a workspace, runs no shell, and applies no edits.`,
 		SilenceErrors: true,
 	}
 
+	root.AddCommand(
+		newResearchCommand(),
+		newResearchConfigCommand(),
+		newGetCommand(),
+		newFollowUpCommand(),
+	)
+
 	return root
 }

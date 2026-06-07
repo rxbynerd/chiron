@@ -1,0 +1,13 @@
+# A minimal ResearchConfig: the documented defaults, written out.
+# Use as a base for a pipeline or with --config:
+#
+#   chiron research --config examples/researchconfig/default.yaml \
+#     --query "Competitive landscape of 10BASE-T1L PHY vendors"
+#
+# Keys mirror internal/config.ResearchConfig. Absent keys keep their
+# defaults; unknown keys are rejected.
+agent: deep-research
+stream: true
+output: text
+api_key_ref: secret://GEMINI_API_KEY
+timeout: 30m
