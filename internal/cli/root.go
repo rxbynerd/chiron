@@ -9,6 +9,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/rxbynerd/chiron/internal/secret"
 )
 
 // Execute runs the chiron command tree and returns the process exit
@@ -17,7 +19,9 @@ import (
 // (see the research command's help for the contract).
 func Execute() int {
 	if err := NewRootCommand().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "chiron:", err)
+		// Scrubbed like every other output path: API error messages
+		// must not become the one channel a credential can transit.
+		fmt.Fprintln(os.Stderr, "chiron:", secret.Scrub(err.Error()))
 		if exitErr, ok := errors.AsType[*ExitError](err); ok {
 			return exitErr.Code
 		}

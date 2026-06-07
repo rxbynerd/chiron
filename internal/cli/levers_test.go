@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,23 @@ func executeWithStdin(t *testing.T, stdin io.Reader, args ...string) (stdout, st
 	root.SetArgs(args)
 	err = root.Execute()
 	return out.String(), errBuf.String(), err
+}
+
+// pipedStdin returns a real pipe carrying content — what a shell
+// pipeline actually hands the process. Only *os.File pipes count as
+// piped config; bare readers deliberately do not (C1-CODE-4).
+func pipedStdin(t *testing.T, content string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() { r.Close() })
+	go func() {
+		defer w.Close()
+		io.WriteString(w, content)
+	}()
+	return r
 }
 
 func TestResearchConfigEmitsResolvedJSON(t *testing.T) {
@@ -60,7 +78,7 @@ func TestResearchConfigPipelineComposition(t *testing.T) {
 		t.Fatalf("first stage: %v", err)
 	}
 
-	second, _, err := executeWithStdin(t, strings.NewReader(first), "research-config", "--visualise")
+	second, _, err := executeWithStdin(t, pipedStdin(t, first), "research-config", "--visualise")
 	if err != nil {
 		t.Fatalf("second stage: %v", err)
 	}

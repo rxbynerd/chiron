@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"time"
 
@@ -71,7 +73,10 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	}
 
 	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
-		opts := geminiOptions(cfg, apiKey)
+		opts, err := geminiOptions(cfg, apiKey)
+		if err != nil {
+			return err
+		}
 		res, err := gemini.New(opts)
 		if err != nil {
 			return err
@@ -105,7 +110,11 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // report through the normal sinks. No create, no spend, no budget gate.
 func runGet(cmd *cobra.Command, cfg config.ResearchConfig, id string) error {
 	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
-		res, err := gemini.New(geminiOptions(cfg, apiKey))
+		opts, err := geminiOptions(cfg, apiKey)
+		if err != nil {
+			return err
+		}
+		res, err := gemini.New(opts)
 		if err != nil {
 			return err
 		}
@@ -128,7 +137,11 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID strin
 	}
 
 	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
-		res, err := gemini.NewFollowUp(geminiOptions(cfg, apiKey), model)
+		opts, err := geminiOptions(cfg, apiKey)
+		if err != nil {
+			return err
+		}
+		res, err := gemini.NewFollowUp(opts, model)
 		if err != nil {
 			return err
 		}
@@ -182,11 +195,16 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 }
 
 // geminiOptions maps the resolved config onto the adapter's options —
-// the one place the flag surface meets the wire surface.
-func geminiOptions(cfg config.ResearchConfig, apiKey string) gemini.Options {
+// the one place the flag surface meets the wire surface. It fails when
+// the base-URL override is invalid, before any client is constructed.
+func geminiOptions(cfg config.ResearchConfig, apiKey string) (gemini.Options, error) {
+	baseURL, err := geminiBaseURL()
+	if err != nil {
+		return gemini.Options{}, err
+	}
 	return gemini.Options{
 		APIKey:       apiKey,
-		BaseURL:      os.Getenv(envGeminiBaseURL),
+		BaseURL:      baseURL,
 		Tier:         cfg.Agent,
 		Visualise:    cfg.Visualise,
 		Tools:        cfg.Tools,
@@ -194,6 +212,43 @@ func geminiOptions(cfg config.ResearchConfig, apiKey string) gemini.Options {
 		FileSearch:   cfg.FileSearch,
 		Inputs:       cfg.Inputs,
 		TemplatePath: cfg.Template,
+	}, nil
+}
+
+// geminiBaseURL reads and validates CHIRON_GEMINI_BASE_URL before any
+// client exists. The API key travels in a header on every request to
+// this base, so an unvalidated override is a key-exfiltration and SSRF
+// channel (CWE-918, CWE-319): https:// is required, with http://
+// permitted for loopback hosts only — the CLI smoke tests' httptest
+// servers — so a cleartext or internal-network endpoint can never
+// receive the key. The variable's absence is the safe default; see
+// AGENTS.md for the operational caveat.
+func geminiBaseURL() (string, error) {
+	raw := os.Getenv(envGeminiBaseURL)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || !allowedBaseScheme(u) {
+		return "", fmt.Errorf("%s must be an absolute https:// URL (http:// only for loopback test servers), got %q", envGeminiBaseURL, raw)
+	}
+	return raw, nil
+}
+
+// allowedBaseScheme admits https anywhere and http on loopback only.
+func allowedBaseScheme(u *url.URL) bool {
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
 	}
 }
 
@@ -220,7 +275,7 @@ func gateBudget(cfg config.ResearchConfig, estimateGBP float64) error {
 // there is no one to approve the spend, so the run aborts unless
 // --accept-plan says otherwise.
 func reviewPlan(ctx context.Context, cmd *cobra.Command, cfg config.ResearchConfig, opts gemini.Options) (string, error) {
-	if stdinIsPiped(cmd.InOrStdin()) && !cfg.AcceptPlan {
+	if !stdinIsTerminal(cmd.InOrStdin()) && !cfg.AcceptPlan {
 		return "", errors.New("research --plan: stdin is not a terminal, so the plan cannot be reviewed interactively — pass --accept-plan to approve the first plan unattended")
 	}
 

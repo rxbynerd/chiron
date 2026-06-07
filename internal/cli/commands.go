@@ -182,15 +182,34 @@ func loadBase(cmd *cobra.Command) (config.ResearchConfig, error) {
 
 // stdinIsPiped reports whether the command's input is a pipe or file
 // rather than a terminal, so interactive runs never block on stdin.
+// Unknown reader types are NOT implicit config sources: a library host
+// that hands the command tree a live reader it controls must not have
+// it silently drained and decoded as YAML.
 func stdinIsPiped(in io.Reader) bool {
 	f, ok := in.(*os.File)
 	if !ok {
-		// Non-file readers (tests, future embedding) are explicit inputs.
-		return true
+		return false
 	}
 	info, err := f.Stat()
 	if err != nil {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice == 0
+}
+
+// stdinIsTerminal reports whether the command's input is an interactive
+// terminal — the only stdin that can approve spend (--plan review).
+// Deliberately not the negation of stdinIsPiped: an unknown reader type
+// is neither an implicit config source nor a terminal, so it can
+// neither smuggle config in nor approve a paid run.
+func stdinIsTerminal(in io.Reader) bool {
+	f, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
