@@ -11,13 +11,6 @@ import (
 	"github.com/rxbynerd/chiron/internal/config"
 )
 
-// errNotImplemented marks command bodies that later milestones fill in
-// (PROPOSAL §9). Flag parsing and config resolution already work, so a
-// stubbed command still validates its inputs.
-func errNotImplemented(cmd *cobra.Command) error {
-	return fmt.Errorf("chiron %s is not implemented yet (see docs/PROPOSAL.md §9)", cmd.Name())
-}
-
 func newResearchCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research [query]",
@@ -28,6 +21,15 @@ result, and emit a cited Markdown report. The main path.
 The interaction id is emitted on stderr (NDJSON run events) as soon as
 it is known: it is the resume handle for a crashed or timed-out run.
 
+With --plan, the agent first proposes a research plan for interactive
+review (accept, refine, or quit) before any research money is spent;
+the plan and its prompts render on stderr, keeping stdout clean for
+the report. Reviewing needs a terminal on stdin — in a pipeline, pass
+--accept-plan to approve the first plan unattended.
+
+With --budget, the run is blocked up front when the tier's estimated
+cost exceeds the cap — before any interaction is created.
+
 Exit codes:
 
   0  the research completed and the report was emitted
@@ -35,7 +37,9 @@ Exit codes:
      unresolvable secrets, network failures, timeout)
   2  the research task ended failed or incomplete, or required client
      action (a state deep research cannot legitimately produce)
-  3  the research task was cancelled or exceeded the server-side budget`,
+  3  the research task was cancelled or exceeded the server-side budget
+  4  the run was blocked before any spend: the estimate exceeded
+     --budget, or the plan review was aborted`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, args)
@@ -65,8 +69,7 @@ result as JSON. Composable in a pipeline:
 			if err != nil {
 				return err
 			}
-			_ = cfg
-			return errNotImplemented(cmd)
+			return cfg.EncodeJSON(cmd.OutOrStdout())
 		},
 	}
 	addResearchFlags(cmd)
@@ -79,15 +82,16 @@ func newGetCommand() *cobra.Command {
 		Short: "Re-fetch and format an interaction (resume after a crash)",
 		Long: `Re-fetch a completed or in-progress interaction by its ID and format the
 report. State is held server-side, so a crashed run is recovered with no
-local state.`,
+local state. An in-progress interaction is awaited to completion,
+respecting --timeout; a finished one is emitted immediately. No new
+interaction is created and nothing new is spent.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)
 			if err != nil {
 				return err
 			}
-			_ = cfg
-			return errNotImplemented(cmd)
+			return runGet(cmd, cfg, args[0])
 		},
 	}
 	addResearchFlags(cmd)
@@ -98,14 +102,17 @@ func newFollowUpCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "follow-up <interaction-id>",
 		Short: "Ask a follow-up question against a completed interaction",
-		Args:  cobra.ExactArgs(1),
+		Long: `Ask a follow-up question about a completed research interaction. The
+question is answered by a model over the stored interaction
+(previous_interaction_id), not by a new research task — quick and far
+cheaper than re-researching. --model overrides the default model.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)
 			if err != nil {
 				return err
 			}
-			_ = cfg
-			return errNotImplemented(cmd)
+			return runFollowUp(cmd, cfg, args[0])
 		},
 	}
 	addResearchFlags(cmd)

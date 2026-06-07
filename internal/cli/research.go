@@ -12,6 +12,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/interactions"
+	"github.com/rxbynerd/chiron/internal/planner"
 	"github.com/rxbynerd/chiron/internal/researcher/gemini"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/secret"
@@ -36,6 +37,12 @@ const (
 	// ExitResearchStopped: the task was cancelled or exceeded the
 	// server-side budget — stopped, rather than broken.
 	ExitResearchStopped = 3
+	// ExitBlocked: the run was stopped client-side before any research
+	// spend — the cost estimate exceeded the --budget cap, or the user
+	// declined the plan at the --plan gate. Nothing was started;
+	// distinct from ExitResearchStopped, where a running task was
+	// stopped server-side.
+	ExitBlocked = 4
 )
 
 // envGeminiBaseURL overrides the Gemini API endpoint — httptest servers
@@ -54,15 +61,93 @@ func (e *ExitError) Error() string { return e.Err.Error() }
 
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// runResearch executes `chiron research` end-to-end: resolve the API
-// key, construct the seams from the resolved config, and hand off to
-// the run core. M2 awaits by polling; the M5 streaming surface arrives
-// with --stream support.
+// runResearch executes `chiron research` end-to-end: gate the budget,
+// optionally review the plan (--plan), then hand off to the run core.
+// M2 awaits by polling; the M5 streaming surface arrives with --stream
+// support.
 func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	if cfg.Query == "" {
 		return errors.New("research: a query is required (--query or the positional argument)")
 	}
 
+	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
+		opts := geminiOptions(cfg, apiKey)
+		res, err := gemini.New(opts)
+		if err != nil {
+			return err
+		}
+		// The budget gate runs before ANY create — the research one and
+		// the plan rounds alike, since both spend.
+		if err := gateBudget(cfg, res.EstimatedCostGBP()); err != nil {
+			return err
+		}
+		deps.Researcher = res
+
+		var previousID string
+		if cfg.Plan {
+			previousID, err = reviewPlan(ctx, cmd, cfg, opts)
+			if err != nil {
+				return err
+			}
+		}
+
+		result, err := run.Run(ctx, deps, run.Params{
+			Query:                 cfg.Query,
+			Agent:                 cfg.Agent,
+			PreviousInteractionID: previousID,
+		})
+		return concludeRun(result, err)
+	})
+}
+
+// runGet executes `chiron get <id>`: re-attach to a stored interaction,
+// await whatever state remains (respecting --timeout), and emit the
+// report through the normal sinks. No create, no spend, no budget gate.
+func runGet(cmd *cobra.Command, cfg config.ResearchConfig, id string) error {
+	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
+		res, err := gemini.New(geminiOptions(cfg, apiKey))
+		if err != nil {
+			return err
+		}
+		deps.Researcher = res
+		result, err := run.Resume(ctx, deps, id)
+		return concludeRun(result, err)
+	})
+}
+
+// runFollowUp executes `chiron follow-up <id> --query "..."`: a new
+// interaction chained to a stored one via previous_interaction_id,
+// carrying model rather than agent (docs/INTERACTIONS-API.md §3).
+func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID string) error {
+	if cfg.Query == "" {
+		return errors.New("follow-up: a query is required (--query)")
+	}
+	model := cfg.Model
+	if model == "" {
+		model = gemini.DefaultFollowUpModel
+	}
+
+	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
+		res, err := gemini.NewFollowUp(geminiOptions(cfg, apiKey), model)
+		if err != nil {
+			return err
+		}
+		deps.Researcher = res
+		result, err := run.Run(ctx, deps, run.Params{
+			Query:                 cfg.Query,
+			Agent:                 model,
+			PreviousInteractionID: previousID,
+		})
+		return concludeRun(result, err)
+	})
+}
+
+// withRunSeams owns the lifecycle every API-bound command shares: the
+// timeout context, the resolved API key, the tracer (flushed on exit),
+// and the transport and sink seams. The Researcher field is left for
+// the caller — research, get and follow-up bind different modes of the
+// gemini adapter.
+func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, apiKey string, deps run.Deps) error) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
 
@@ -85,7 +170,21 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 		}()
 	}
 
-	res, err := gemini.New(gemini.Options{
+	events := transport.NewStdio(cmd.ErrOrStderr())
+	defer events.Close()
+
+	return f(ctx, apiKey, run.Deps{
+		Formatter: formatter.NewMarkdown(),
+		Sink:      buildSink(cmd, cfg),
+		Transport: events,
+		Tracer:    tracer,
+	})
+}
+
+// geminiOptions maps the resolved config onto the adapter's options —
+// the one place the flag surface meets the wire surface.
+func geminiOptions(cfg config.ResearchConfig, apiKey string) gemini.Options {
+	return gemini.Options{
 		APIKey:       apiKey,
 		BaseURL:      os.Getenv(envGeminiBaseURL),
 		Tier:         cfg.Agent,
@@ -95,26 +194,62 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 		FileSearch:   cfg.FileSearch,
 		Inputs:       cfg.Inputs,
 		TemplatePath: cfg.Template,
-	})
-	if err != nil {
-		return err
+	}
+}
+
+// gateBudget enforces --budget before any create. The estimate is the
+// tier's planning figure (the cost table in researcher/gemini); a
+// blocked run exits ExitBlocked with both figures, so the caller can
+// raise the cap or pick the cheaper tier knowingly.
+func gateBudget(cfg config.ResearchConfig, estimateGBP float64) error {
+	if cfg.BudgetGBP <= 0 || estimateGBP <= cfg.BudgetGBP {
+		return nil
+	}
+	return &ExitError{
+		Code: ExitBlocked,
+		Err: fmt.Errorf("research blocked before any spend: estimated cost £%.2f (%s) exceeds the £%.2f budget cap — raise --budget or choose a cheaper tier",
+			estimateGBP, cfg.Agent, cfg.BudgetGBP),
+	}
+}
+
+// reviewPlan runs the collaborative-planning gate (--plan): propose a
+// plan, review it interactively — or approve the first one unattended
+// with --accept-plan — and return the accepted plan's interaction id
+// for the research run to chain from. Plans and prompts render on
+// stderr: stdout belongs to the report. Without a terminal on stdin
+// there is no one to approve the spend, so the run aborts unless
+// --accept-plan says otherwise.
+func reviewPlan(ctx context.Context, cmd *cobra.Command, cfg config.ResearchConfig, opts gemini.Options) (string, error) {
+	if stdinIsPiped(cmd.InOrStdin()) && !cfg.AcceptPlan {
+		return "", errors.New("research --plan: stdin is not a terminal, so the plan cannot be reviewed interactively — pass --accept-plan to approve the first plan unattended")
 	}
 
-	events := transport.NewStdio(cmd.ErrOrStderr())
-	defer events.Close()
-
-	result, err := run.Run(ctx, run.Deps{
-		Researcher: res,
-		Formatter:  formatter.NewMarkdown(),
-		Sink:       buildSink(cmd, cfg),
-		Transport:  events,
-		Tracer:     tracer,
-	}, run.Params{Query: cfg.Query, Agent: cfg.Agent})
+	p, err := gemini.NewPlanner(opts)
 	if err != nil {
-		// requires_action is a research outcome, not an infrastructure
-		// fault: deep research cannot legitimately request client
-		// action (docs/INTERACTIONS-API.md §4), so the task is broken,
-		// not Chiron — exit as a failed run, detail in the error.
+		return "", err
+	}
+	session := &planner.Session{
+		Planner:    p,
+		In:         cmd.InOrStdin(),
+		Out:        cmd.ErrOrStderr(),
+		AutoAccept: cfg.AcceptPlan,
+	}
+	id, err := session.Run(ctx, cfg.Query)
+	if errors.Is(err, planner.ErrAborted) {
+		// Declining the plan blocks the run before any research spend —
+		// the same contract as the budget gate.
+		return "", &ExitError{Code: ExitBlocked, Err: err}
+	}
+	return id, err
+}
+
+// concludeRun maps the run core's outcome onto the exit-code contract:
+// requires_action is a research outcome (deep research cannot
+// legitimately request client action — docs/INTERACTIONS-API.md §4),
+// not an infrastructure fault, so it exits as a failed run with the
+// detail in the error.
+func concludeRun(result *types.RunResult, err error) error {
+	if err != nil {
 		if errors.Is(err, interactions.ErrRequiresAction) {
 			return &ExitError{Code: ExitResearchFailed, Err: err}
 		}
