@@ -463,3 +463,42 @@ Three security-posture decisions from the cycle-1 review remediation
   config, and the separate `stdinIsTerminal` — deliberately not the
   negation — keeps the earlier decision that a non-terminal stdin can
   never approve `--plan` spend.
+
+## 2026-06-07 — Streaming reconnect policy and the poll fallback
+
+The SSE streamer in `internal/interactions` is deliberately a parsing
+primitive; the reconnect POLICY lives in the gemini adapter
+(`researcher/gemini/stream.go`):
+
+- Resume is via the `?last_event_id=` query parameter with the last
+  seen event id, never the `Last-Event-ID` header, which the docs do
+  not promise is honoured (INTERACTIONS-API.md §5). Reconnects back
+  off 500ms doubling to an 8s cap, mirroring the client's retry
+  backoff.
+- A per-await failure budget of four counts dial failures, broken
+  streams, clean EOFs without a terminal state, and server `error`
+  events — and is deliberately never reset by progress: a stream
+  alternating deltas with errors would otherwise hold the await
+  captive forever. A long task that genuinely drops more than four
+  times concludes less prettily but just as correctly by poll.
+- When the budget is spent, `Await` FALLS BACK TO POLLING rather than
+  failing the run: the task is still running — and still spending —
+  server-side, and abandoning a £1–7 interaction over a broken event
+  channel would waste the spend; the stream's error is absorbed, and
+  if the API is truly unreachable the poll's own failure surfaces.
+  `requires_action` and context cancellation never fall back, because
+  polling would not change either answer.
+- Each re-dial after the initial attach increments
+  `Usage.ReconnectCount`, so the §4.5 reconnect_count metric is real
+  (cycle-1 finding C1-M5-2). `interaction.completed` may omit content,
+  so the await takes only the status from stream events and the run
+  core's Result re-GETs the full resource (§5).
+
+The display surface is the transport, not a bespoke renderer: thought
+summaries arrive as `delta` NDJSON events on stderr beside the rest of
+the lifecycle (stdout belongs to the report), keeping the v1 stream
+and the v2 control-plane stream identical in shape. cfg.Stream also
+toggles the request itself — thinking_summaries "auto" when streaming,
+"none" under --quiet (C1-M5-1) — and wire thought content parts now
+map to OutputThoughtSummary domain outputs, so --output json carries
+the reasoning trail that streamed past.
