@@ -185,3 +185,39 @@ runtime dependencies here in the same change. Note that remote plugins
 need network access; an air-gapped build can install
 `protoc-gen-go`/`protoc-gen-go-grpc` locally at the same versions and
 swap `remote:` for `local:` in `buf.gen.yaml`.
+
+## 2026-06-07 — OpenTelemetry dependency set, and metrics as span attributes
+
+PROPOSAL §4.5 mandates OTLP emission to the suite's Langfuse/Grafana
+backend, so the official SDK is the justified exception to the
+hand-rolled-`net/http` rule (it is an observability SDK, not a vendor AI
+SDK). Direct modules, all at the current stable release:
+
+- `go.opentelemetry.io/otel` v1.44.0 — API (`attribute`, `codes`,
+  `trace`).
+- `go.opentelemetry.io/otel/sdk` v1.44.0 — `TracerProvider`, batch span
+  processor, resource; also `sdk/trace/tracetest` for the scrub tests.
+- `go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp`
+  v1.44.0 — OTLP over HTTP/protobuf.
+
+The HTTP exporter was chosen over the gRPC one to keep the linked tree
+smaller, but honesty compels a caveat: `go.opentelemetry.io/proto/otlp`
+(v1.10.0) ships its collector stubs with gRPC service code and
+grpc-gateway HTTP bindings in the same packages, so
+`google.golang.org/grpc` v1.81.1, `grpc-gateway/v2` v2.29.0, and
+`google.golang.org/protobuf` v1.36.11 are *linked*, not merely present
+in the module graph, even on the HTTP path. This is the floor for any
+conformant OTLP exporter today. (It also means the grpc/protobuf tree
+the proto entry above kept out of `go.mod` has arrived via
+observability; that entry's rationale — don't commit dormant generated
+code — still stands.)
+
+Metrics (`metric.<name>` attributes on the span in context) deliberately
+bypass the OTel *metrics* SDK: Langfuse is trace-oriented, the §4.5
+metrics are per-run rather than fleet-aggregated, and skipping
+`sdk/metric` plus an OTLP metrics exporter keeps the tree at the floor
+described above. `internal/trace/names.go` fixes the span and metric
+name vocabulary so backends can rely on it. The JSONL binding writes the
+same spans and metrics as newline-delimited JSON for local debugging;
+both bindings route every string payload through `secret.Scrub`, so a
+credential cannot transit traces any more than logs.
