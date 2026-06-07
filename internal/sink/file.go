@@ -44,11 +44,13 @@ func (f *File) Write(ctx context.Context, result *types.RunResult) error {
 		if a.Name == "" || a.Name != filepath.Base(a.Name) {
 			return fmt.Errorf("sink: asset name %q is not a bare file name", a.Name)
 		}
-		if err := os.WriteFile(filepath.Join(dir, a.Name), a.Data, 0o644); err != nil {
+		// 0o600 like the JSONL trace: reports carry query text,
+		// citations and cost signals — owner-only on shared hosts.
+		if err := os.WriteFile(filepath.Join(dir, a.Name), a.Data, 0o600); err != nil {
 			return fmt.Errorf("sink: writing asset %s: %w", a.Name, err)
 		}
 	}
-	if err := os.WriteFile(f.path, result.Report.Markdown, 0o644); err != nil {
+	if err := os.WriteFile(f.path, result.Report.Markdown, 0o600); err != nil {
 		return fmt.Errorf("sink: writing report: %w", err)
 	}
 	return nil

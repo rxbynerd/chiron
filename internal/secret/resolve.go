@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -121,6 +122,12 @@ func (File) Resolve(_ context.Context, ref string) (string, error) {
 	b, err := os.ReadFile(r.Name)
 	if err != nil {
 		return "", fmt.Errorf("secret: reading %s: %w", r.Name, err)
+	}
+	// A warning, not an error: a mis-permissioned but valid key file
+	// must not block a run, but the operator should hear about it.
+	if info, statErr := os.Stat(r.Name); statErr == nil && info.Mode().Perm()&0o177 != 0 {
+		slog.Warn("secret file permissions are too open; tighten to 0600",
+			"path", r.Name, "mode", info.Mode().Perm().String())
 	}
 	v := strings.TrimRight(string(b), "\r\n")
 	if v == "" {

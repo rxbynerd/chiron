@@ -69,6 +69,22 @@ func TestFileWritesReportAndAssets(t *testing.T) {
 			t.Errorf("asset %s = %q, want %q", a.Name, data, a.Data)
 		}
 	}
+
+	// C1-SEC-4: reports carry query text, citations and cost signals —
+	// owner-only, like the JSONL trace.
+	names := []string{path}
+	for _, a := range res.Report.Assets {
+		names = append(names, filepath.Join(dir, a.Name))
+	}
+	for _, name := range names {
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %v, want 0600", name, perm)
+		}
+	}
 }
 
 func TestFileRejectsPathShapedAssetNames(t *testing.T) {

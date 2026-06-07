@@ -1,12 +1,49 @@
 package secret
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestFileResolveWarnsOnOpenPermissions pins C1-SEC-5: a key file
+// readable beyond its owner resolves — a mis-permissioned but valid
+// file must not block a run — but warns the operator.
+func TestFileResolveWarnsOnOpenPermissions(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	ctx := context.Background()
+
+	open := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(open, []byte("k3y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := File{}.Resolve(ctx, "secret://file"+open)
+	if err != nil || got != "k3y" {
+		t.Fatalf("Resolve = %q, %v; the warning must not block resolution", got, err)
+	}
+	if !strings.Contains(buf.String(), "tighten to 0600") {
+		t.Errorf("no permission warning logged for a 0644 key file: %q", buf.String())
+	}
+
+	buf.Reset()
+	tight := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(tight, []byte("k3y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (File{}).Resolve(ctx, "secret://file"+tight); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a 0600 key file must not warn: %q", buf.String())
+	}
+}
 
 func TestParseRef(t *testing.T) {
 	tests := []struct {
