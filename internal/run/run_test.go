@@ -23,9 +23,14 @@ type fakeResearcher struct {
 	awaitBlocks bool // block until ctx is done, then return ctx.Err()
 	result      *types.Interaction
 	resultErr   error
+
+	started  bool
+	lastTask researcher.Task
 }
 
 func (f *fakeResearcher) Start(_ context.Context, task researcher.Task) (string, error) {
+	f.started = true
+	f.lastTask = task
 	if f.startErr != nil {
 		return "", f.startErr
 	}
@@ -176,6 +181,55 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	if cost.Usage.EstimatedCostGBP != 1.58 || cost.Usage.SearchCount != 80 {
 		t.Errorf("cost_summary usage = %+v, want the run's cost signals", cost.Usage)
+	}
+}
+
+func TestRunPassesPreviousInteractionID(t *testing.T) {
+	// Plan approval and follow-up Q&A both chain to a stored
+	// interaction; the core must hand the id through to Start verbatim.
+	deps, r, _, _ := happyDeps()
+	_, err := Run(context.Background(), deps, Params{Query: "q", PreviousInteractionID: "v1_plan"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.lastTask.PreviousInteractionID != "v1_plan" {
+		t.Errorf("Start task = %+v, want previous interaction v1_plan", r.lastTask)
+	}
+}
+
+func TestResumeHappyPath(t *testing.T) {
+	deps, r, snk, tr := happyDeps()
+	result, err := Resume(context.Background(), deps, "v1_run")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if r.started {
+		t.Error("Resume must never start a new interaction — no new spend")
+	}
+	if result.InteractionID != "v1_run" || result.Status != types.StatusCompleted {
+		t.Errorf("result = %+v, want completed v1_run", result)
+	}
+	if snk.result != result {
+		t.Error("the sink must receive the resumed RunResult")
+	}
+
+	// No run_started (there is no query to announce) and no new start
+	// phase: the lifecycle is id, status, completion, cost.
+	want := []string{
+		transport.KindInteractionCreated,
+		transport.KindStatusChanged,
+		transport.KindRunCompleted,
+		transport.KindCostSummary,
+	}
+	if got := tr.kinds(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("event kinds = %v, want %v", got, want)
+	}
+}
+
+func TestResumeRequiresID(t *testing.T) {
+	deps, _, _, _ := happyDeps()
+	if _, err := Resume(context.Background(), deps, ""); err == nil {
+		t.Error("Resume with an empty id must fail before touching any seam")
 	}
 }
 

@@ -55,6 +55,11 @@ func (d Deps) validate() error {
 type Params struct {
 	Query string
 	Agent string
+	// PreviousInteractionID chains this run to a stored interaction:
+	// the approval step of collaborative planning (the final plan's id,
+	// with the researcher flipping collaborative_planning off) and
+	// follow-up Q&A both pass it through to Researcher.Start.
+	PreviousInteractionID string
 }
 
 // Transport event payloads. Shapes mirror the RunEvent payloads in
@@ -125,7 +130,10 @@ func Run(ctx context.Context, deps Deps, params Params) (result *types.RunResult
 	// anything else can fail, so a crashed run recovers server-side
 	// state with `chiron get <id>`.
 	startCtx, startSpan := deps.Tracer.StartSpan(ctx, trace.SpanStart)
-	id, err := deps.Researcher.Start(startCtx, researcher.Task{Query: params.Query})
+	id, err := deps.Researcher.Start(startCtx, researcher.Task{
+		Query:                 params.Query,
+		PreviousInteractionID: params.PreviousInteractionID,
+	})
 	if err == nil && id == "" {
 		err = errors.New("run: researcher returned an empty interaction id")
 	}
@@ -137,13 +145,54 @@ func Run(ctx context.Context, deps Deps, params Params) (result *types.RunResult
 	root.SetAttr("interaction_id", id)
 	emit(ctx, deps, root, transport.KindInteractionCreated, interactionCreatedPayload{InteractionID: id})
 
+	return conclude(ctx, deps, root, id, started)
+}
+
+// Resume re-attaches to an existing interaction by its id — the
+// research loop without the start phase (chiron get): await whatever
+// state remains, retrieve, format, and emit through the same sinks as a
+// fresh run. An already-terminal interaction concludes on the first
+// poll, so resuming a finished run is just a re-fetch. No new
+// interaction is created and no new spend is started.
+func Resume(ctx context.Context, deps Deps, id string) (result *types.RunResult, err error) {
+	if err := deps.validate(); err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, errors.New("run: interaction id must not be empty")
+	}
+
+	started := time.Now()
+	ctx, root := deps.Tracer.StartSpan(ctx, trace.SpanResearch)
+	defer func() {
+		if err != nil {
+			deps.Tracer.Metric(ctx, trace.MetricFailures, 1)
+		}
+		root.End(err)
+	}()
+	root.SetAttr("interaction_id", id)
+	root.SetAttr("resumed", "true")
+
+	// No run_started: a resume has no query to announce and starts no
+	// task. The id event re-states the resume handle for consumers that
+	// key on it.
+	emit(ctx, deps, root, transport.KindInteractionCreated, interactionCreatedPayload{InteractionID: id})
+
+	return conclude(ctx, deps, root, id, started)
+}
+
+// conclude is the back half shared by Run and Resume: await the
+// interaction to a terminal state, retrieve it, format the report, and
+// emit it — then the closing events and metrics.
+func conclude(ctx context.Context, deps Deps, root trace.Span, id string, started time.Time) (*types.RunResult, error) {
 	// Await + retrieve: block until the task is terminal, then fetch
 	// its final state. Both live under the await span — retrieval is
 	// the await's conclusion, not a separate phase (trace vocabulary is
 	// fixed in internal/trace/names.go).
 	awaitCtx, awaitSpan := deps.Tracer.StartSpan(ctx, trace.SpanAwait)
 	var in *types.Interaction
-	if err = deps.Researcher.Await(awaitCtx, id); err == nil {
+	err := deps.Researcher.Await(awaitCtx, id)
+	if err == nil {
 		in, err = deps.Researcher.Result(awaitCtx, id)
 		if err == nil && in == nil {
 			err = errors.New("run: researcher returned no interaction")
@@ -170,7 +219,7 @@ func Run(ctx context.Context, deps Deps, params Params) (result *types.RunResult
 		return nil, fmt.Errorf("run: formatting interaction %s: %w", id, err)
 	}
 
-	result = &types.RunResult{
+	result := &types.RunResult{
 		InteractionID: id,
 		Status:        in.Status,
 		Report:        report,
