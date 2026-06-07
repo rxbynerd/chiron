@@ -17,7 +17,6 @@ func TestPollUntilTerminal(t *testing.T) {
 		StatusCancelled,
 		StatusIncomplete,
 		StatusBudgetExceeded,
-		StatusRequiresAction, // should not occur, must still not hang
 	}
 	for _, terminal := range terminals {
 		t.Run(string(terminal), func(t *testing.T) {
@@ -50,6 +49,22 @@ func TestPollUntilTerminal(t *testing.T) {
 				t.Errorf("OnPoll observed %v", observed)
 			}
 		})
+	}
+}
+
+func TestPollRequiresActionReturnsTypedError(t *testing.T) {
+	// requires_action cannot legitimately occur for deep research; the
+	// poller must surface it immediately as ErrRequiresAction with the
+	// snapshot attached, not hang until the server's 60-minute cap.
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, `{"id":"v1_abc","status":"requires_action"}`)
+	}))
+	in, err := c.PollUntilTerminal(context.Background(), "v1_abc", PollConfig{Interval: time.Millisecond})
+	if !errors.Is(err, ErrRequiresAction) {
+		t.Fatalf("error = %v, want ErrRequiresAction", err)
+	}
+	if in == nil || in.Status != StatusRequiresAction {
+		t.Errorf("snapshot = %+v, want requires_action interaction", in)
 	}
 }
 

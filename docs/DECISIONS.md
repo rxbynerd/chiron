@@ -261,3 +261,22 @@ new dependencies. Decisions of note:
   preferring the SSE fields; unknown event and delta types are surfaced
   with their raw payload rather than dropped.
 
+
+## 2026-06-07 — requires_action returns a typed error, not plain terminal
+
+> Supersedes one bullet of the interactions-client entry above: the
+> poller no longer treats `requires_action` as an ordinary terminal
+> status.
+
+`internal/interactions.Status.Terminal()` now matches
+`types.Status.Terminal()` exactly — everything except `in_progress` and
+`requires_action` — so the wire and domain enums share both strings and
+semantics, keeping the adapter's status mapping a plain string
+conversion. Because deep research supports no custom function tools, an
+interaction that reports `requires_action` is in a state Chiron cannot
+service; `PollUntilTerminal` returns the snapshot with a typed
+`ErrRequiresAction` immediately rather than hanging until the server's
+60-minute cap or pretending the run concluded. The wire `Interaction`
+also gained `Citations()` — url_citation and file_citation annotations
+deduplicated by URI in first-seen order — shaped to map directly onto
+the domain `types.Citation{URI, Title}`.

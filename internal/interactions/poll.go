@@ -2,8 +2,17 @@ package interactions
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrRequiresAction is returned by PollUntilTerminal when an interaction
+// reports requires_action. Deep research cannot legitimately require
+// client action — the agent supports no custom function tools
+// (docs/INTERACTIONS-API.md §3) — so rather than hanging until the
+// 60-minute server cap, the poller surfaces the state immediately as a
+// typed error for the caller to cancel or investigate.
+var ErrRequiresAction = errors.New("interactions: interaction requires client action, which deep research cannot request")
 
 // Polling defaults: deep-research tasks run for minutes (most under 20,
 // hard max 60 — docs/INTERACTIONS-API.md §7), so polling starts at 10s
@@ -44,13 +53,16 @@ func (cfg PollConfig) withDefaults() PollConfig {
 }
 
 // PollUntilTerminal polls Get until the interaction reaches a terminal
-// status — anything other than in_progress, per the full enum in
-// docs/INTERACTIONS-API.md §4, so requires_action and budget_exceeded
-// stop the poll rather than hanging it. It returns the terminal snapshot
-// with a nil error; mapping failure variants to errors is the caller's
-// concern (Status.Failed helps). It returns early with ctx.Err() on
-// cancellation, or with the Get error if a retrieval fails after the
-// client's own transient-error retries.
+// status, per the full enum in docs/INTERACTIONS-API.md §4 — so
+// budget_exceeded and the other failure variants stop the poll, not just
+// completed and failed. It returns the terminal snapshot with a nil
+// error; mapping failure variants to errors is the caller's concern
+// (Status.Failed helps). A requires_action status — which deep research
+// cannot legitimately produce — returns the snapshot with
+// ErrRequiresAction immediately rather than polling until the server's
+// 60-minute cap. It returns early with ctx.Err() on cancellation, or
+// with the Get error if a retrieval fails after the client's own
+// transient-error retries.
 func (c *Client) PollUntilTerminal(ctx context.Context, id string, cfg PollConfig) (*Interaction, error) {
 	cfg = cfg.withDefaults()
 	interval := cfg.Interval
@@ -61,6 +73,9 @@ func (c *Client) PollUntilTerminal(ctx context.Context, id string, cfg PollConfi
 		}
 		if cfg.OnPoll != nil {
 			cfg.OnPoll(in)
+		}
+		if in.Status == StatusRequiresAction {
+			return in, ErrRequiresAction
 		}
 		if in.Status.Terminal() {
 			return in, nil

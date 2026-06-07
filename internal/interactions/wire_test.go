@@ -14,7 +14,7 @@ func TestStatusTerminalAndFailed(t *testing.T) {
 		failed   bool
 	}{
 		{StatusInProgress, false, false},
-		{StatusRequiresAction, true, true},
+		{StatusRequiresAction, false, false}, // handled via ErrRequiresAction, matching types.Status
 		{StatusCompleted, true, false},
 		{StatusFailed, true, true},
 		{StatusCancelled, true, true},
@@ -137,6 +137,36 @@ func TestURLCitationsDedupesByURL(t *testing.T) {
 	got := in.URLCitations()
 	if len(got) != 2 || got[0].URL != "https://x" || got[1].URL != "https://y" {
 		t.Errorf("URLCitations() = %+v, want x then y", got)
+	}
+}
+
+func TestCitationsMapsBothKindsAndDedupes(t *testing.T) {
+	in := Interaction{Steps: []Step{
+		{Type: StepModelOutput, Content: []Content{
+			{Type: ContentText, Text: "a", Annotations: []Annotation{
+				{Type: AnnotationURLCitation, URL: "https://x", Title: "Source X"},
+				{Type: AnnotationFileCitation, DocumentURI: "files/doc1", FileName: "doc1.pdf"},
+				{Type: AnnotationURLCitation, URL: "https://x", Title: "Duplicate X"},
+				{Type: AnnotationFileCitation}, // no URI: skipped
+			}},
+			{Type: ContentText, Text: "b", Annotations: []Annotation{
+				{Type: AnnotationURLCitation, URL: "https://y", Title: "Source Y"},
+			}},
+		}},
+	}}
+	got := in.Citations()
+	want := []Citation{
+		{URI: "https://x", Title: "Source X"},
+		{URI: "files/doc1", Title: "doc1.pdf"},
+		{URI: "https://y", Title: "Source Y"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Citations() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Citations()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 

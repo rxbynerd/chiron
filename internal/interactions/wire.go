@@ -10,6 +10,10 @@ import (
 // Status is the lifecycle state of an interaction: the full enum per
 // docs/INTERACTIONS-API.md §4. v1 treats everything other than
 // in_progress and completed as a terminal-failure variant.
+//
+// The seven wire strings are identical to internal/types.Status, so the
+// wire-to-domain mapping in researcher/gemini is a plain string
+// conversion; Terminal() semantics match too.
 type Status string
 
 // Interaction statuses.
@@ -23,18 +27,19 @@ const (
 	StatusBudgetExceeded Status = "budget_exceeded"
 )
 
-// Terminal reports whether the status ends a run. Everything other than
-// in_progress is terminal — including requires_action, which should not
-// occur for deep research but must not hang a poller if it does
-// (docs/INTERACTIONS-API.md §4). An empty status is unknown, not
-// terminal.
+// Terminal reports whether the status ends a run: everything except
+// in_progress and requires_action, matching types.Status.Terminal.
+// requires_action should not occur for deep research (no custom function
+// tools, docs/INTERACTIONS-API.md §3) and is not terminal in itself, but
+// PollUntilTerminal still returns promptly with ErrRequiresAction rather
+// than hanging on it. An empty status is unknown, not terminal.
 func (s Status) Terminal() bool {
-	return s != "" && s != StatusInProgress
+	return s != "" && s != StatusInProgress && s != StatusRequiresAction
 }
 
 // Failed reports whether the status is a terminal-failure variant:
-// terminal but not completed (failed, cancelled, incomplete,
-// budget_exceeded, or the should-not-occur requires_action).
+// terminal but not completed (failed, cancelled, incomplete or
+// budget_exceeded).
 func (s Status) Failed() bool {
 	return s.Terminal() && s != StatusCompleted
 }
@@ -208,9 +213,56 @@ func (in *Interaction) Images() []Content {
 	return images
 }
 
-// URLCitations returns the url_citation annotations across the text
-// parts of every model_output step, deduplicated by URL in first-seen
-// order — the sources list (docs/INTERACTIONS-API.md §4).
+// Citation is one deduplicated source reference derived from citation
+// annotations, shaped to map directly onto the domain model's
+// types.Citation{URI, Title}: url_citation contributes URL/Title,
+// file_citation contributes DocumentURI/FileName.
+type Citation struct {
+	URI   string
+	Title string
+}
+
+// Citations returns the sources list: every url_citation and
+// file_citation annotation across the text parts of every model_output
+// step, deduplicated by URI (URL or document_uri) in first-seen order
+// (docs/INTERACTIONS-API.md §4). Annotations without a URI are skipped.
+func (in *Interaction) Citations() []Citation {
+	var citations []Citation
+	seen := make(map[string]bool)
+	for _, s := range in.Steps {
+		if s.Type != StepModelOutput {
+			continue
+		}
+		for _, c := range s.Content {
+			if c.Type != ContentText {
+				continue
+			}
+			for _, a := range c.Annotations {
+				var cite Citation
+				switch a.Type {
+				case AnnotationURLCitation:
+					cite = Citation{URI: a.URL, Title: a.Title}
+				case AnnotationFileCitation:
+					cite = Citation{URI: a.DocumentURI, Title: a.FileName}
+				default:
+					continue
+				}
+				if cite.URI == "" || seen[cite.URI] {
+					continue
+				}
+				seen[cite.URI] = true
+				citations = append(citations, cite)
+			}
+		}
+	}
+	return citations
+}
+
+// URLCitations returns the raw url_citation annotations — byte offsets
+// included — across the text parts of every model_output step,
+// deduplicated by URL in first-seen order. Citations is the
+// domain-shaped sources list; this keeps the offset detail for callers
+// that need to anchor citations within the text.
 func (in *Interaction) URLCitations() []Annotation {
 	var citations []Annotation
 	seen := make(map[string]bool)
