@@ -309,3 +309,72 @@ func TestCancelToleratesEmptyBody(t *testing.T) {
 		t.Errorf("interaction = %+v, want zero value", in)
 	}
 }
+
+// TestNonJSONErrorBodyTruncated pins C2-TEST-11: an oversize non-JSON
+// error body is clipped to the snippet bound from the front — the
+// message carries the head of the body, never tail-only content, and
+// never the whole thing.
+func TestNonJSONErrorBodyTruncated(t *testing.T) {
+	long := strings.Repeat("front-", 50) + "TAIL-MARKER" // 311 bytes, > the 256 snippet bound
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, long)
+	}))
+	_, err := c.Get(context.Background(), "v1_abc")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %v (%T), want *APIError", err, err)
+	}
+	if len(apiErr.Message) > 256+len("...") {
+		t.Errorf("message length = %d, want clipped to the 256-byte snippet bound", len(apiErr.Message))
+	}
+	if !strings.HasPrefix(apiErr.Message, "front-") {
+		t.Errorf("message %q must carry the head of the body", apiErr.Message)
+	}
+	if strings.Contains(apiErr.Message, "TAIL-MARKER") {
+		t.Errorf("message %q carries tail-only content past the bound", apiErr.Message)
+	}
+	if !strings.HasSuffix(apiErr.Message, "...") {
+		t.Errorf("message %q must mark the truncation", apiErr.Message)
+	}
+}
+
+// TestWithHTTPClientIsUsed pins C2-TEST-13 (1/2): the supplied client
+// actually carries the requests — proven by a transport that tags every
+// response it serves.
+func TestWithHTTPClientIsUsed(t *testing.T) {
+	var used atomic.Int64
+	base := http.DefaultTransport
+	custom := &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		used.Add(1)
+		return base.RoundTrip(req)
+	})}
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":"v1_abc","status":"completed"}`))
+	}), WithHTTPClient(custom))
+	if _, err := c.Get(context.Background(), "v1_abc"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if used.Load() == 0 {
+		t.Error("the request bypassed the client supplied via WithHTTPClient")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestWithRequestTimeoutBoundsUnaryCalls pins C2-TEST-13 (2/2): the
+// per-call deadline matters for 60-minute research runs — a unary GET
+// against a stalled server must end in DeadlineExceeded, not hang.
+func TestWithRequestTimeoutBoundsUnaryCalls(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // stall until the test ends
+	}), WithRequestTimeout(20*time.Millisecond), WithMaxRetries(0))
+	_, err := c.Get(context.Background(), "v1_abc")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Get = %v, want context.DeadlineExceeded from the request timeout", err)
+	}
+}
