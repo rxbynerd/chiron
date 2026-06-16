@@ -1,0 +1,110 @@
+# Integration smoke test — Chiron
+#
+# Runs the real `chiron research` end-to-end against the Gemini Interactions
+# API, using the cheaper deep-research tier and a tight budget gate. This is
+# not a unit test (those use httptest fakes and never hit the real network);
+# it is a pre-release sanity check that validates the actual wire protocol
+# still works against the live API.
+#
+# Trigger manually before cutting a release, or let the weekly schedule
+# alert us to upstream drift (the Interactions API is public beta and may
+# change).
+#
+# Cost: ≈£1.58 per run (deep-research tier estimate). The --budget cap
+# prevents overruns.
+#
+# Conventions:
+#   - Actions pinned to full commit SHAs (C1-SEC-3 / SECURITY.md).
+#   - en-GB spelling throughout.
+#   - Env vars follow the project's documented contract.
+
+name: integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Research question (keep it fast)."
+        required: false
+        type: string
+        default: "What is the capital of France and its population?"
+      agent:
+        description: "Agent tier (deep-research is cheaper)."
+        required: false
+        type: choice
+        options:
+          - deep-research
+          - deep-research-max
+        default: deep-research
+      budget:
+        description: "Budget cap in GBP."
+        required: false
+        type: number
+        default: 2.00
+      timeout:
+        description: "Wall-clock timeout (Go duration)."
+        required: false
+        type: string
+        default: "10m"
+  schedule:
+    # Weekly Sunday morning — catches API drift before anyone is relying
+    # on a release.
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -o bin/chiron ./cmd/chiron
+
+      - name: Research
+        id: research
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          ./bin/chiron research \
+            --query '${{ inputs.query || 'What is the capital of France and its population?' }}' \
+            --agent ${{ inputs.agent || 'deep-research' }} \
+            --budget ${{ inputs.budget || '2.00' }} \
+            --timeout ${{ inputs.timeout || '10m' }} \
+            --out report.md \
+            --output json \
+            2>events.ndjson
+          exit_code=$?
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          exit $exit_code
+        continue-on-error: true
+
+      - name: Upload report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v6.1.1
+        with:
+          name: research-report
+          path: |
+            report.md
+            events.ndjson
+          retention-days: 14
+
+      - name: Assert success
+        if: steps.research.outputs.exit_code != '0'
+        run: |
+          echo "::error::Integration smoke test failed (exit ${{ steps.research.outputs.exit_code }})."
+          echo "See the research-report artifact for the events stream."
+          exit 1
+
+      - name: Report summary
+        if: steps.research.outputs.exit_code == '0'
+        run: |
+          echo '### Integration smoke test passed' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Query executed successfully against the live Gemini API.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Report uploaded as a run artifact (`research-report`).' >> "$GITHUB_STEP_SUMMARY"
