@@ -68,17 +68,20 @@ Read from Stirrup `main`, 2026-06-22. This is the leverage; Chiron builds the th
 above it.
 
 - **A read-only research mode, structurally enforced.** `RunConfig.mode = "research"` is
-  "read-only; investigates questions without side effects". Stirrup's own
-  `ValidateRunConfig` requires read-only modes to use a `permission_policy` of
-  `deny-side-effects` or `ask-upstream`, and a `ToolsConfig.built_in` list that **excludes
-  write tools**. This *is* Chiron's "research-only, structurally" non-negotiable —
-  enforced upstream, not just asserted (`proto/harness/v1/harness.proto`, `RunConfig.mode`
-  / `PermissionPolicyConfig` / `ToolsConfig`).
+  "read-only; investigates questions without side effects" — one of four read-only modes
+  (`planning` (the CLI default), `review`, `research`, `toil`); only `execution` is
+  read/write. Stirrup's own `ValidateRunConfig` requires read-only modes to use a
+  `permission_policy` of `deny-side-effects` or `ask-upstream`, and a `ToolsConfig.built_in`
+  list that **excludes write tools**. This *is* Chiron's "research-only, structurally"
+  non-negotiable — enforced upstream, not just asserted
+  (`proto/harness/v1/harness.proto`, `RunConfig.mode` / `PermissionPolicyConfig` /
+  `ToolsConfig`).
 - **Five hand-rolled provider adapters, no SDKs** (`docs/providers.md`): `anthropic`
   (Messages), `bedrock` (ConverseStream), `openai` (Chat Completions, configurable
   baseURL), **`openai-responses`** (`POST /v1/responses`), `gemini` (Vertex AI). Selected
-  via `provider.type`. This is "target any frontier model" — already built, already
-  no-vendor-SDK.
+  via `provider.type`; a `providers` map plus `ModelRouterConfig` (`model_router`) lets one
+  job mix cheap/expensive models and lets the lead run different workers on different
+  models. This is "target any frontier model" — already built, already no-vendor-SDK.
 - **A two-tier credential-federation layer** (`docs/credential-federation.md`):
   `TokenSource` (e.g. `gke-metadata`, `aws-irsa`, `azure-imds`, `github-actions-oidc`) →
   `credential.Source` (`static`, `gcp-workload-identity[-federation]`, **`anthropic-wif`**,
@@ -206,7 +209,7 @@ RunConfig{
   prompt:           <the worker brief>,
   provider:         { type: "openai-responses" | "anthropic" | "gemini", ... },  // any frontier model
   tools: {
-    built_in:       ["read_file"?, "web_fetch"],     // NO write_file/run_command/edit_*
+    built_in:       ["web_fetch"],                    // external-only: no workspace; NO write_file/run_command/edit_*
     mcp_servers:    [{ name: "search", uri: <web-search MCP>, api_key_ref: "secret://SEARCH_API_KEY" }],
   },
   permission_policy:{ type: "deny-side-effects" },    // required for read-only mode
@@ -240,15 +243,17 @@ deep-research model appears here — those are §8 only.
 
 ### 6.2 Keyless auth (amend 1, grounded)
 
-Stirrup's credential federation supplies keyless auth from GKE; amend 1's "OpenAI Responses
-via WIF" resolves to one of two existing-or-near shapes, decided by SP-D (§10):
-- **Azure OpenAI / Foundry Responses + `azure-workload-identity`** — wire-compatible
-  `/openai/v1/responses`, Entra-ID bearer, *available in Stirrup today*; or
-- **OpenAI-direct Responses + a new `openai-wif` credential source** — per OpenAI's GKE
-  Workload-Identity-Federation guide (a `gke-metadata` OIDC token exchanged for a
-  short-lived OpenAI token); a small addition to Stirrup's credential layer.
-Anthropic uses `anthropic-wif`; Gemini uses `gcp-workload-identity` on Vertex — both
-keyless today. No static key in the cluster, matching `V2-PLAN.md` Wave 7.
+Stirrup's credential federation supplies keyless auth from GKE. Amend 1's "OpenAI Responses
+via WIF" is resolved (author's choice) to **Azure OpenAI / Foundry Responses +
+`azure-workload-identity`** — the wire-compatible `/openai/v1/responses` surface with an
+Entra-ID bearer, *available in Stirrup today with no upstream change*. OpenAI-direct
+Responses + a new `openai-wif` credential source (per OpenAI's GKE
+Workload-Identity-Federation guide — a `gke-metadata` OIDC token exchanged for a
+short-lived OpenAI token) is kept only as an **optional future alternative**, since it
+needs a small addition to Stirrup's credential layer. Anthropic uses `anthropic-wif`;
+Gemini uses `gcp-workload-identity` on Vertex — both keyless today. No static key in the
+cluster, matching `V2-PLAN.md` Wave 7. SP-D (§10) is therefore a configuration confirmation
+of the Azure path, not an open vendor choice.
 
 ### 6.3 Findings by reference
 
@@ -263,10 +268,13 @@ interop.
 
 Per the author's choice, the managed agents are kept, demoted:
 
-- **Stopgap worker.** The existing v1 `internal/researcher/gemini` Deep Research adapter
-  becomes one routable worker the lead may dispatch instead of a Stirrup job — a fallback
-  while the homegrown agent matures, and a hedge if a question needs managed-grade depth
-  before the Stirrup path reaches parity.
+- **Stopgap — a top-level alternative researcher.** The existing v1
+  `internal/researcher/gemini` Deep Research adapter stays selectable as its own
+  `--agent gemini-deep-research` (exactly as in v1): a whole-run fallback while the
+  homegrown agent matures. It is deliberately **not** a per-subtask worker the lead routes
+  to — keeping it out of the fleet avoids a router branch and keeps the eval comparison
+  (§8) clean. A run is either the homegrown Stirrup fleet or the managed stopgap, never a
+  mix.
 - **Eval baseline.** It is the yardstick. Amend 6's "the same sort of content as Gemini's
   research agents currently produce" becomes a literal, testable target: the homegrown
   agent's report is judged against the Gemini-DR report on the same question.
@@ -280,10 +288,14 @@ The homegrown agent's risk is quality, not plumbing. Make it measurable with `st
 (the proposal already delegates evaluation to Stirrup):
 
 - An eval suite of representative external-research questions; for each, run both the
-  Chiron homegrown agent and the Gemini-DR baseline.
+  Chiron homegrown agent (`--agent fleet`, which contains no managed-DR worker — §7 — so
+  the comparison is clean) and the Gemini-DR baseline (`--agent gemini-deep-research`).
 - Judge on coverage, citation count/validity, and faithfulness — needing an **LLM-judge**
   suite judge (SP-F confirms availability in `stirrup-eval`; `docs/eval.md` lists
-  `test-command`/`file-exists`/`file-contains`/`composite`, so an llm-judge may need adding).
+  `test-command`/`file-exists`/`file-contains`/`composite`, so an llm-judge may need adding
+  upstream). **Fallback if it cannot land in `stirrup-eval` in time:** a Chiron-side judge
+  (a hand-rolled `net/http` call scoring the two reports) so the v2 quality gate is never
+  blocked on a Stirrup PR.
 - **Gate:** the homegrown agent is not the default until it meets or beats the baseline on
   the suite. Until then the cheap single-call path (one Stirrup research job, or the
   managed stopgap) stays default; the multi-worker fleet is opt-in. This is the honest
@@ -314,11 +326,15 @@ which the drifted plan wrongly deferred.
 | **SP-A** (the big one) | **Web-search tool.** MCP search server (which API: Tavily/Exa/Brave/SearxNG) vs a native `web_search` contributed to Stirrup vs a provider built-in stopgap. Confirm Stirrup research mode + MCP + `web_fetch` can sustain an iterative search→read→synthesise loop of Gemini-DR-grade. | The worker `ToolsConfig` + research prompt; the search backend decision recorded in `DECISIONS.md`. |
 | **SP-B** | **Stirrup dispatch.** Chiron as `HarnessService` server (Buf, amend 4) spawning Stirrup jobs that dial in — job provisioning on GKE (pre-warmed pool vs per-run Job), and the `task_assignment`/event mapping. | The runner↔worker integration shape; a faked-harness test harness. |
 | **SP-C** | **Lead substrate.** Lead judgement calls as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | The lead implementation decision. |
-| **SP-D** | **OpenAI Responses WIF path.** Azure OpenAI/Foundry + `azure-workload-identity` (available today) vs OpenAI-direct + a new `openai-wif` credential source (OpenAI GKE guide). | The auth binding for the OpenAI standard-model path; closes amend 1. |
+| **SP-D** | **Azure OpenAI Responses + `azure-workload-identity` (chosen, §6.2):** confirm the project can register the Azure OpenAI/Foundry resource and Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1 with no Stirrup change. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → Paddock blob plane (and the in-memory store first). | The `ContextStore`↔Stirrup offload binding. |
 | **SP-F** | **Eval judge.** Does `stirrup-eval` offer an LLM-judge for report-quality-vs-baseline, or must one be added? | The baseline eval suite + judge. |
 
 SP-A, SP-B, SP-C have no spend and run first; they define the worker and the dispatch.
+**Cross-repo rule:** where a spike's resolution would require a change in Stirrup (a native
+`web_search` for SP-A, an `openai-wif` source for SP-D, an llm-judge for SP-F), prefer the
+Chiron-only option (a search MCP, the Azure path, a Chiron-side judge respectively) so the
+v2 critical path is never blocked on an upstream Stirrup release.
 
 ## 11. Impact on docs/V2-PLAN.md (what re-seats)
 
@@ -326,24 +342,45 @@ The hybrid plan: keep `V2-PLAN.md`'s scaffolding, re-seat its researcher core on
 design. Concretely, when `V2-PLAN.md` is revised:
 
 - **D2** → researcher = Chiron lead orchestrating **Stirrup research jobs on standard
-  frontier models + a web-search tool**; managed deep-research demoted to stopgap +
-  baseline. Drop the `o3`/`o4-mini-deep-research` model bindings.
+  frontier models + a web-search tool**; managed deep research demoted to a top-level
+  stopgap researcher + the eval baseline (§7). Drop the `o3`/`o4-mini-deep-research`
+  bindings — and with them Chiron's hand-rolled `internal/researcher/openai` adapter and
+  `docs/RESPONSES-API.md`, which **are not built**: Stirrup owns the `openai-responses`
+  provider adapter, so there is no Chiron OpenAI adapter to write or document. The OpenAI
+  standard-model path is Azure OpenAI + `azure-workload-identity` via Stirrup (§6.2).
 - **D3** (await) stays poll-first for the managed stopgap and the `chiron.v1` stream;
   worker await is the `stirrup.harness.v1` event stream (`done`/`error`), not provider
-  polling.
+  polling — so the runner holds a live harness stream per worker, and the §9 / `V2-PLAN.md`
+  §4 "a broken event stream never aborts a paid run" rule extends to that worker stream.
 - **D5** → un-defer Stirrup (it is the harness); defer only internal *source tools*
-  (`file_search`/repo-MCP). External web research via Stirrup is *in* v2.
+  (`file_search`/repo-MCP). External web research via Stirrup is *in* v2. This **re-affirms
+  `PROPOSAL §6`'s `Researcher = stirrup-fleet`** (which the drifted plan wrongly marked
+  superseded); the transport is still ConnectRPC (D8).
+- **D8** → gains a **second Buf target**, `stirrup.harness.v1`, generated alongside
+  `chiron.v1`. The module wiring belongs in Wave 1 (the proto/codegen wave); the server
+  implementation lands in Wave 3.
 - **Spikes** → replace S1's OpenAI-deep-research framing with SP-A…SP-F here; S2 (Paddock)
   stays.
-- **Wave 3** → "standard-model + Stirrup-harness integration": Buf-generate
-  `stirrup.harness.v1` server stubs (amend 4), the runner-as-`HarnessService`-server, the
-  web-search MCP wiring (SP-A), and the credential-federation auth (SP-D). The v1 Gemini DR
-  adapter is retained unchanged as the stopgap/baseline. No new managed-DR adapter.
-- **Wave 4** → the fleet's workers are Stirrup research jobs; acceptance gains the
+- **Wave 1** → adds the `stirrup.harness.v1` Buf module and generated server stubs to the
+  proto/codegen deliverables (implementation deferred to Wave 3).
+- **Wave 3** → "standard-model + Stirrup-harness integration": implement the
+  runner-as-`HarnessService`-server, dispatch one research `RunConfig`, wire the web-search
+  MCP (SP-A), and bind the credential-federation auth (Azure OpenAI + `azure-workload-
+  identity`, `anthropic-wif`, Gemini; SP-D). Add a **faked Stirrup harness** as a
+  first-class test artefact (the no-real-network fake, parallel to the faked Gemini/OpenAI
+  clients). The v1 Gemini DR adapter is retained unchanged as the top-level stopgap +
+  baseline; **no Chiron OpenAI adapter and no `RESPONSES-API.md`** are created.
+- **Wave 4** → the fleet's workers are Stirrup research jobs; the router is external-web-only
+  and never routes to the managed stopgap (which is top-level, §7); acceptance gains the
   eval-vs-baseline gate (§8) and the research-only proof (§5.3).
-- **Waves 1, 2, 5, 6, 7** (ConnectRPC transport, Langfuse observability, control plane,
-  Paddock, GKE/WIF/durability) — unchanged in shape; Wave 7's WIF now also covers the
-  Stirrup workers' provider auth (already a Stirrup capability).
+- **Waves 2, 5, 6** (Langfuse observability, control plane, Paddock) — unchanged in shape;
+  Wave 5's advertised `researchers` become `["fleet","gemini-deep-research"]` (no
+  `openai-deep-research`).
+- **Wave 7** → GKE/auth/durability unchanged in shape, with two additions: the OpenAI path
+  is Azure OpenAI + `azure-workload-identity` via Stirrup (not a hand-rolled token
+  exchange), and v2 now ships and versions a **Stirrup worker image** the runner dispatches
+  jobs to (provisioning model — pre-warmed pool vs per-run Job — is SP-B). Webhook
+  completion applies to the managed stopgap only; workers complete over the harness stream.
 
 ## 12. References
 
