@@ -262,6 +262,46 @@ no `executor:"local"`/`"container"` (use `"api"` read-only or none) + the Rule o
 worker tried to reach a side-effecting tool — and a test fails the run on it. Chiron never
 sends `permission_response{allowed:true}` to a research worker.
 
+### 5.4 Dispatch and provisioning — Chiron as Stirrup's control plane (SP-B, resolved)
+
+Grounded in Stirrup `docs/deployment.md` + `docs/architecture.md` (read 2026-06-22): Stirrup
+is "designed to be deployed as a short-lived Kubernetes job that talks to a long-running
+control plane over gRPC", and "the harness *connects outbound* … there is no inbound port to
+expose, no service mesh hop to configure, and no shared filesystem". So the **Chiron runner is,
+precisely, Stirrup's `control plane`** — a long-running Deployment behind a ClusterIP Service
+with two responsibilities:
+
+1. **Wire (the `HarnessService` server).** A worker Pod runs the `stirrup job` entrypoint (no
+   flags; all from env + the `RunConfig` delivered as the first `ControlEvent`), dials
+   `CONTROL_PLANE_ADDR` (the runner's Service, e.g. `chiron-runner.chiron.svc:9090`), sends
+   `ready`, blocks ≤5 min for `task_assignment`, runs, emits `done`+`RunTrace`, exits 0.
+2. **Provisioning (K8s Job orchestration).** The runner creates one Job per worker via the K8s
+   API, setting on the Pod: `CONTROL_PLANE_ADDR` (its own Service); a
+   **`CONTROL_PLANE_SESSION_ID`** = the subtask/brief id (the worker echoes it in `ready`, so
+   the runner matches each incoming stream to the brief it dispatched — the fan-out correlation
+   key); `STIRRUP_FOLLOWUP_GRACE=0` (research workers are one-shot); and the provider/search
+   `secret://` refs the `RunConfig` resolves via credential federation.
+
+**Provisioning model: per-run Job is Stirrup's native shape** — the runner needs a K8s client
+and RBAC to create/delete Jobs in the worker namespace. A pre-warmed pool is a later latency
+optimisation, bounded by one-task-per-process and the 5-min pre-assignment timeout; default to
+per-run Jobs. The published image `ghcr.io/rxbynerd/stirrup:<tag>` (distroless, nonroot uid
+65532) is **pinned, not built by Chiron** — to a tag whose `stirrup.harness.v1` matches what
+Chiron Buf-generates against. (Cloud Run Jobs is a documented GCP alternative with the same
+outbound-dial semantics, if a non-GKE target ever matters.)
+
+**Security (Chiron owns it).** Stirrup does **not** prescribe auth on `CONTROL_PLANE_ADDR` —
+the runner's `HarnessService` endpoint must be secured by Chiron: an in-cluster `NetworkPolicy`
+limiting who may dial, plus mTLS (mesh / cert-manager) or a bootstrap token, with the
+`CONTROL_PLANE_SESSION_ID` correlation. Granting the runner RBAC to create Jobs is a real
+privilege for a research-only component — scope it to a single worker namespace and a fixed Job
+template, and flag it in the Wave 7 security review.
+
+**Testing (the faked harness).** The fake is an in-process `HarnessService` *client* over a
+bufconn / `httptest` pipe: it dials, sends `ready` (with a `CONTROL_PLANE_SESSION_ID`), waits
+for `task_assignment`, replays scripted `HarnessEvent`s (`tool_call`/`text_delta`/`done`), and
+never touches K8s — so `--agent research`/`fleet` run in CI with no cluster.
+
 ## 6. Standard-model targeting, auth, and findings-by-reference
 
 ### 6.1 Any frontier model
@@ -354,7 +394,7 @@ which the drifted plan wrongly deferred.
 | Spike | Question | Output |
 | --- | --- | --- |
 | **SP-A** (the big one) | **Web-search tool — RESOLVED (§3, 2026-06-22):** pluggable backend — an **MCP search server** (default, portable, works against Stirrup's contract today) + **OpenAI provider built-in `web_search`** (OpenAI-path option behind a Stirrup enablement); **native discounted** (datacentre CAPTCHAs). Remaining: prove the MCP search→read→synthesise loop reaches Gemini-DR grade, pick the search API (Tavily/Exa/Brave/SearxNG), and scope the Stirrup `web_search` enablement. | The worker `ToolsConfig` (MCP default) + research prompt; the Stirrup enablement work-item; recorded in `DECISIONS.md` when Wave 3 lands. |
-| **SP-B** | **Stirrup dispatch.** Chiron as `HarnessService` server (Buf, amend 4) spawning Stirrup jobs that dial in — job provisioning on GKE (pre-warmed pool vs per-run Job), and the `task_assignment`/event mapping. | The runner↔worker integration shape; a faked-harness test harness. |
+| **SP-B** | **Stirrup dispatch — RESOLVED (§5.4, 2026-06-22):** the Chiron runner IS Stirrup's "control plane" (`deployment.md`) — a long-running Deployment + ClusterIP Service that serves `HarnessService` (workers dial in) and creates one K8s Job per worker (`stirrup job` entrypoint; `CONTROL_PLANE_ADDR` = runner Service; `CONTROL_PLANE_SESSION_ID` = brief id for fan-out correlation; image `ghcr.io/rxbynerd/stirrup:<tag>` pinned, not built). Per-run Job is the native model (runner needs a K8s client + RBAC); warm pool is a later optimisation. | The runner↔worker integration shape (§5.4); a faked-harness bufconn client for tests; the K8s Job orchestration + RBAC + endpoint auth land in Wave 7. |
 | **SP-C** | **Lead substrate.** Lead judgement calls as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | The lead implementation decision. |
 | **SP-D** | **Azure OpenAI Responses + `azure-workload-identity` (chosen, §6.2):** confirm the project can register the Azure OpenAI/Foundry resource and Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1 with no Stirrup change. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → Paddock blob plane (and the in-memory store first). | The `ContextStore`↔Stirrup offload binding. |

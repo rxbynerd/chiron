@@ -226,7 +226,7 @@ confirms.
 | Spike | Question | Gates | Output |
 | --- | --- | --- | --- |
 | **SP-A** (the crux) | **Web-search tool — RESOLVED (`V2-RESEARCH-AGENT.md` §3):** pluggable backend. **MCP search server** (Tavily/Exa/Brave/SearxNG) is the **portable default** and works against Stirrup's contract today; **OpenAI provider built-in `web_search`** is an OpenAI-path option **gated on a Stirrup enablement** (a `ToolsConfig` provider-built-in surface + un-excluding `web_search` in the `openai-responses` adapter + `web_search_call`→`HarnessEvent` mapping); **native discounted** (datacentre CAPTCHAs). Remaining before Wave 3: prove the MCP loop reaches Gemini-DR grade and pick the search API; scope the Stirrup enablement. | Waves 3, 4 | The worker `ToolsConfig` (MCP default) + research prompt; the Stirrup enablement work-item; recorded in `DECISIONS.md` when Wave 3 lands. |
-| **SP-B** | **Stirrup dispatch.** The runner as `HarnessService` server (Buf, amend 4) driving Stirrup jobs that dial in: the `task_assignment`/`HarnessEvent` mapping, and GKE job provisioning (pre-warmed pool vs per-run Job, and the Stirrup worker image). | Waves 3, 4, 7 | The runner↔worker integration shape; a **faked Stirrup harness** for tests. |
+| **SP-B** | **Stirrup dispatch — RESOLVED (`V2-RESEARCH-AGENT.md` §5.4):** the Chiron runner IS Stirrup's "control plane" (`deployment.md`) — a long-running Deployment + ClusterIP Service that serves `HarnessService` (workers dial in) and creates one K8s Job per worker (`stirrup job` entrypoint; `CONTROL_PLANE_ADDR` = runner Service; `CONTROL_PLANE_SESSION_ID` = brief id for fan-out correlation; image `ghcr.io/rxbynerd/stirrup:<tag>` pinned, not built). Per-run Job is the native model (runner needs a K8s client + RBAC); warm pool is a later latency optimisation. | Waves 3, 4, 7 | The runner↔worker integration shape; a faked-harness bufconn client (Wave 3); the K8s Job orchestration + RBAC + endpoint auth (Wave 7). |
 | **SP-C** | **Lead substrate.** Lead judgement calls (decompose/synthesise/cite) as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | Wave 4 | The lead implementation decision. |
 | **SP-D** | **OpenAI auth (Azure path, chosen).** Confirm the project can register the Azure OpenAI/Foundry resource + Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. No spend. | Wave 7 | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → the in-memory `ContextStore` first, Paddock blob plane later. | Waves 4, 6 | The `ContextStore`↔Stirrup offload binding. |
@@ -448,9 +448,12 @@ dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
 - A single-worker `--agent` selectable alongside the Gemini stopgap (e.g. `--agent
   research` for one Stirrup research job); the composition root binds the standard model
   (`provider.type` = `openai-responses` | `anthropic` | `gemini`) and the search backend.
-- A **faked Stirrup harness** — an in-process fake implementing the worker side of
-  `stirrup.harness.v1` (dial, `ready`, scripted `HarnessEvent`s) — so the path runs in CI
-  with no real network or cluster, parallel to the v1 faked Gemini client.
+- A **faked Stirrup harness** — an in-process `HarnessService` *client* over a bufconn /
+  `httptest` pipe that dials, sends `ready` (with a `CONTROL_PLANE_SESSION_ID`), waits for
+  `task_assignment`, and replays scripted `HarnessEvent`s
+  (`tool_call`/`text_delta`/`done`) — so the path runs in CI with no real network or cluster
+  (the runner matches the stream to the dispatched brief by session id). Parallel to the v1
+  faked Gemini client.
 - The standard-model provider config wired with a **static-key path for local dev** via
   `secret://`; the keyless binding (Azure OpenAI + `azure-workload-identity` for the OpenAI
   path, `anthropic-wif`, Gemini Vertex `gcp-workload-identity`) is confirmed in SP-D and
@@ -732,16 +735,23 @@ Vertex), the Stirrup worker provisioning (SP-B), the deferred D3 webhook complet
 stopgap), and D4/durability are paid down.
 
 **Deliverables.**
-- Container images and GKE manifests for `chiron-control`, the runner, and the **Stirrup
-  worker image** the runner dispatches research jobs to (versioned with the
-  `stirrup.harness.v1` contract Chiron generates against).
+- GKE manifests for `chiron-control` and the runner; the runner is a **long-running
+  Deployment behind a ClusterIP Service** (the `CONTROL_PLANE_ADDR` target) that both serves
+  `HarnessService` and creates worker Jobs. The **Stirrup worker image is a pinned published
+  tag** `ghcr.io/rxbynerd/stirrup:<tag>` (distroless, nonroot uid 65532), **not built by
+  Chiron** — pinned to a tag whose `stirrup.harness.v1` matches what Chiron Buf-generates
+  against.
 - The standard-model paths **keyless via Stirrup credential federation**: Azure OpenAI +
   `azure-workload-identity` (SP-D), `anthropic-wif`, Gemini Vertex `gcp-workload-identity`
   — no static keys in the cluster. The managed Gemini DR stopgap holds its
   `generativelanguage.googleapis.com` key in a GCP Secret Manager / Workload Identity
   `Secret` backend (no Workload-Identity path for that endpoint).
-- Stirrup worker **provisioning** per SP-B: a pre-warmed pool or per-run Job that dials the
-  runner's `HarnessService`, and the search-MCP endpoint reachable from the worker.
+- Worker **provisioning** (SP-B, resolved): the runner creates **one K8s Job per worker** via
+  the K8s API (a `stirrup job` Pod), setting `CONTROL_PLANE_ADDR` (its Service),
+  `CONTROL_PLANE_SESSION_ID` (the brief id), `STIRRUP_FOLLOWUP_GRACE=0`, and the
+  provider/search `secret://` refs; the runner's ServiceAccount holds **least-privilege RBAC
+  to create/delete Jobs in the worker namespace**. A pre-warmed pool is a later latency
+  optimisation. The search-MCP endpoint is reachable from the worker.
 - **Webhook-driven completion for the managed stopgap**: the control plane (now publicly
   reachable) receives Gemini DR completion webhooks and releases the awaiting run; poll
   remains the fallback (D3). Workers complete over the harness stream, not webhooks.
@@ -762,10 +772,15 @@ stopgap), and D4/durability are paid down.
 2. New `Secret` backend: GCP Secret Manager via Workload Identity, fulfilling the
    `secret://gcp/...` resolver seam (the grammar already anticipates it) — the keyless
    mechanism for the managed Gemini DR stopgap and the search-MCP API key.
-3. Provision the Stirrup worker image and its dial-in to the runner's `HarnessService`
-   (SP-B); confirm research-mode `RunConfig`s reach workers and `HarnessEvent`s return
-   under real (non-faked) Stirrup. Version the worker image against the `stirrup.harness.v1`
-   contract.
+3. Implement the **K8s Job orchestration** (SP-B): the runner creates one `stirrup job` Job
+   per worker via the K8s API with `CONTROL_PLANE_ADDR` / `CONTROL_PLANE_SESSION_ID` / secret
+   refs, and reaps it on `done`; grant the runner ServiceAccount least-privilege RBAC to
+   create/delete Jobs in a single worker namespace. **Secure the `HarnessService` endpoint** —
+   Stirrup prescribes no control-plane connection auth, so Chiron owns it: a `NetworkPolicy`
+   restricting who may dial, plus mTLS (mesh / cert-manager) or a bootstrap token, with the
+   `CONTROL_PLANE_SESSION_ID` correlation. Confirm research-mode `RunConfig`s reach workers and
+   `HarnessEvent`s return under real (non-faked) Stirrup against the pinned
+   `ghcr.io/rxbynerd/stirrup` image.
 4. Activate the webhook receiver stubbed in Wave 5 for the managed stopgap: first extend
    `INTERACTIONS-API.md` with the Gemini DR webhook event schema
    (`interaction.completed`/`failed`/`cancelled`/`requires_action`, the `webhook-timestamp`
@@ -819,7 +834,9 @@ not reach back into the run core or the orchestrator.
 - **Security review** each wave touching the wire, auth, or the provider/worker boundary:
   research-only enforcement (the worker `RunConfig` is research-only by construction —
   `V2-RESEARCH-AGENT.md` §5.3), control-plane address/identity validation, the
-  runner↔worker (`HarnessService`) boundary and how a worker proves identity, TLS, redirect
+  runner↔worker (`HarnessService`) boundary and how a worker proves identity — the runner's
+  endpoint auth (Stirrup prescribes none — Chiron owns `NetworkPolicy` + mTLS/token, Wave 7)
+  and its least-privilege RBAC to create worker Jobs, TLS, redirect
   policy parity with v1 (bearer/api-key must not leak across redirects, on the gemini
   stopgap and the search-MCP client), webhook signature verification (Wave 7, managed
   stopgap), scrubbing across ConnectRPC, the harness stream, and traces, tenant isolation.
