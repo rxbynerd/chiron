@@ -226,7 +226,7 @@ confirms.
 | Spike | Question | Gates | Output |
 | --- | --- | --- | --- |
 | **SP-A** (the crux) | **Web-search tool.** Which backend gives Stirrup research mode iterative web search: an MCP search server (Tavily/Exa/Brave/SearxNG) — the lead candidate — vs a native `web_search` contributed upstream vs a provider built-in stopgap. Confirm `research` mode + the search tool + `web_fetch` sustain a search→read→synthesise loop of Gemini-DR grade. | Waves 3, 4 | The worker `ToolsConfig` + research prompt; the search backend recorded in `DECISIONS.md`. |
-| **SP-B** | **Stirrup dispatch.** The runner as `HarnessService` server (Buf, amend 4) driving Stirrup jobs that dial in: the `task_assignment`/`HarnessEvent` mapping, and GKE job provisioning (pre-warmed pool vs per-run Job, and the Stirrup worker image). | Waves 1, 3, 7 | The runner↔worker integration shape; a **faked Stirrup harness** for tests. |
+| **SP-B** | **Stirrup dispatch.** The runner as `HarnessService` server (Buf, amend 4) driving Stirrup jobs that dial in: the `task_assignment`/`HarnessEvent` mapping, and GKE job provisioning (pre-warmed pool vs per-run Job, and the Stirrup worker image). | Waves 3, 4, 7 | The runner↔worker integration shape; a **faked Stirrup harness** for tests. |
 | **SP-C** | **Lead substrate.** Lead judgement calls (decompose/synthesise/cite) as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | Wave 4 | The lead implementation decision. |
 | **SP-D** | **OpenAI auth (Azure path, chosen).** Confirm the project can register the Azure OpenAI/Foundry resource + Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. No spend. | Wave 7 | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → the in-memory `ContextStore` first, Paddock blob plane later. | Waves 4, 6 | The `ContextStore`↔Stirrup offload binding. |
@@ -264,8 +264,9 @@ runner.
   code (`chiron.connect.go`) — the `buf.build/connectrpc/go` plugin **added to**
   `buf.gen.yaml` at a pinned version (e.g. `v1.18.1`; pin whatever version is used and
   record it), and the existing `buf.build/grpc/go` plugin **removed** (v2 serves the
-  `Session` bidi stream over ConnectRPC, not plain gRPC, so its stubs are redundant).
-  (D8, amend 4.)
+  `Session` bidi stream over ConnectRPC, not plain gRPC, so its stubs are redundant; the
+  `google.golang.org/grpc` module itself stays in `go.mod` as a direct runtime dependency of
+  ConnectRPC's gRPC interop — only the Buf *plugin* is removed). (D8, amend 4.)
 - **Second Buf target — `stirrup.harness.v1`:** add Stirrup's `proto/harness/v1` as an
   input to `buf.gen.yaml` and commit the generated **`HarnessService` server** stubs the
   runner implements in Wave 3 (the runner is the server; the Stirrup harness dials in).
@@ -439,9 +440,10 @@ dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
 - A **faked Stirrup harness** — an in-process fake implementing the worker side of
   `stirrup.harness.v1` (dial, `ready`, scripted `HarnessEvent`s) — so the path runs in CI
   with no real network or cluster, parallel to the v1 faked Gemini client.
-- The standard-model **auth bound via Stirrup credential federation**: Azure OpenAI +
-  `azure-workload-identity` for the OpenAI path (SP-D), `anthropic-wif`, Gemini Vertex
-  `gcp-workload-identity`. Local dev keeps the static-key path via `secret://`.
+- The standard-model provider config wired with a **static-key path for local dev** via
+  `secret://`; the keyless binding (Azure OpenAI + `azure-workload-identity` for the OpenAI
+  path, `anthropic-wif`, Gemini Vertex `gcp-workload-identity`) is confirmed in SP-D and
+  **lands in Wave 7** — this wave does not require SP-D.
 - `AGENTS.md` updated: the per-package map gains the harness-server package (e.g.
   `internal/harness`), and the **security-sensitive environment variables** section gains
   any worker / search-MCP endpoint and key overrides (same loopback-only posture as
@@ -449,13 +451,15 @@ dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
 
 **Key tasks.**
 1. Implement the `HarnessService` server: lifecycle (worker dial → `ready` →
-   `task_assignment` → event consumption → `done`), with **no auto-retry on dispatch** (a
-   Stirrup job, once assigned, may already be spending — spend safety, §4). Idempotent
+   `task_assignment` → event consumption → terminal `HarnessEvent`). On a terminal
+   `done`/`error` the worker half-closes and the runner finalises and stops the
+   `ControlEvent` stream (exact teardown confirmed in SP-B). **No auto-retry on dispatch**
+   (a Stirrup job, once assigned, may already be spending — spend safety, §4): idempotent
    stream reconnects are fine; re-dispatch is not.
 2. Build the research `RunConfig`: `mode:"research"`,
    `permission_policy:"deny-side-effects"`, a `built_in` list of `web_fetch` only (no
-   write/exec tools), the search MCP in `mcp_servers`,
-   `context_strategy:"offload-to-file"`, the per-job caps
+   write/exec tools), no write `executor` (`executor:"api"` read-only or absent), the
+   search MCP in `mcp_servers`, `context_strategy:"offload-to-file"`, the per-job caps
    (`max_turns`/`max_token_budget`/`max_cost_budget`/`timeout`), and the Chiron research
    prompt. Assert the config is research-only (V2-RESEARCH-AGENT.md §5.3).
 3. Map `HarnessEvent`s to `transport.Event`s and the terminal `done`+`RunTrace` to the
@@ -505,6 +509,10 @@ that plans, decomposes, dispatches several **Stirrup research workers** in paral
 `*types.Interaction` exactly as a single researcher does, so the run core is unchanged.
 Ship the **in-memory `ContextStore`** (D4) for findings-by-reference.
 
+**Spike gate.** SP-A (web-search backend), SP-B (dispatch shape), SP-C (lead substrate),
+SP-E (findings offload → `ContextStore` binding), and SP-F (eval judge) are resolved before
+code — together they define the fleet shape, the findings flow, and the quality gate.
+
 **Deliverables.**
 - `internal/researcher/fleet` implemented: lead planner, external-web-only router, bounded
   worker pool over Stirrup research jobs (the Wave 3 harness server), synthesiser, citation
@@ -519,6 +527,8 @@ Ship the **in-memory `ContextStore`** (D4) for findings-by-reference.
 - The **eval-vs-baseline harness** (`V2-RESEARCH-AGENT.md` §8; SP-F): runs `--agent fleet`
   against the `--agent gemini-deep-research` baseline on a suite, judged for coverage /
   citations / faithfulness.
+- `AGENTS.md` updated: the per-package map gains `internal/researcher/fleet/*`,
+  `internal/memory/inmemory.go`, and the eval suite/judge.
 
 **Key tasks.**
 1. **Lead planning.** Decompose the question into 3–5 worker briefs, each with the four
@@ -606,6 +616,9 @@ stream, relays run events, stores results, and serves history/get/watch. In-memo
 - The **submission/history surface** served over ConnectRPC (D8): `SubmitResearch`
   (unary), `WatchRun` (server-stream), `GetRun`, `ListRuns` — the UI-ready surface
   specified in Wave 1.
+- A **webhook receiver stub** in the control-plane ingress (managed Gemini DR completion
+  only; activated in Wave 7 when the service is publicly reachable). Workers complete over
+  the `stirrup.harness.v1` stream, not webhooks.
 
 **Key tasks.**
 1. Runner registry keyed by `runner_id`, tracking advertised `researchers` so scheduling
@@ -718,9 +731,10 @@ stopgap), and D4/durability are paid down.
 - **Webhook-driven completion for the managed stopgap**: the control plane (now publicly
   reachable) receives Gemini DR completion webhooks and releases the awaiting run; poll
   remains the fallback (D3). Workers complete over the harness stream, not webhooks.
-- A durable substrate behind the control-plane store (NATS JetStream is the leading
-  candidate per `PROPOSAL §8`; confirm at this wave) and **rainbow deployments** so
-  in-flight runs survive a rollout.
+- A durable substrate behind the control-plane store — an **open decision settled at this
+  wave's start and recorded in `DECISIONS.md`** (NATS JetStream is the leading candidate per
+  `PROPOSAL §8`); its choice determines which new `go mod` deps land. Plus **rainbow
+  deployments** so in-flight runs survive a rollout.
 - Release-build hardening of the security-sensitive env vars.
 
 **Key tasks.**
@@ -738,9 +752,12 @@ stopgap), and D4/durability are paid down.
    (SP-B); confirm research-mode `RunConfig`s reach workers and `HarnessEvent`s return
    under real (non-faked) Stirrup. Version the worker image against the `stirrup.harness.v1`
    contract.
-4. Activate the webhook receiver stubbed in Wave 5 for the managed stopgap: verify Gemini
-   webhook signatures, correlate to the awaiting run, release it; fall back to poll if a
-   webhook is missed.
+4. Activate the webhook receiver stubbed in Wave 5 for the managed stopgap: first extend
+   `INTERACTIONS-API.md` with the Gemini DR webhook event schema
+   (`interaction.completed`/`failed`/`cancelled`/`requires_action`, the `webhook-timestamp`
+   replay-protection header, static vs dynamic configuration) so this implements against a
+   normative reference; then verify Gemini webhook signatures, correlate to the awaiting
+   run, release it; fall back to poll if a webhook is missed.
 5. Swap the Wave-5 in-memory control-plane store for the durable substrate; add
    checkpoint/resume so a run survives control-plane restart, not just the runner's /
    worker's resume handle.

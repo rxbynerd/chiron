@@ -374,8 +374,9 @@ design. Concretely, when `V2-PLAN.md` is revised:
   and never routes to the managed stopgap (which is top-level, §7); acceptance gains the
   eval-vs-baseline gate (§8) and the research-only proof (§5.3).
 - **Waves 2, 5, 6** (Langfuse observability, control plane, Paddock) — unchanged in shape;
-  Wave 5's advertised `researchers` become `["fleet","gemini-deep-research"]` (no
-  `openai-deep-research`).
+  Wave 5's advertised `researchers` capability list is
+  `["research","fleet","gemini-deep-research"]` (single Stirrup worker, the fleet, and the
+  managed stopgap; each maps to an `--agent`).
 - **Wave 7** → GKE/auth/durability unchanged in shape, with two additions: the OpenAI path
   is Azure OpenAI + `azure-workload-identity` via Stirrup (not a hand-rolled token
   exchange), and v2 now ships and versions a **Stirrup worker image** the runner dispatches
