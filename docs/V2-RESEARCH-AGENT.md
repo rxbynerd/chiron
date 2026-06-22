@@ -20,6 +20,13 @@ summary: >
 
 # Chiron v2 — the research-agent core
 
+> **Direction update (2026-06-22) — read first.** After a build-vs-buy pressure-test of the
+> Stirrup dependency (recorded in §0a), v2's **critical path is now a lean, in-process,
+> homegrown research loop on a single provider** — *not* dispatched Stirrup K8s jobs. Stirrup
+> is retained as the strategic **scale-out** path, to be adopted later as an **embedded
+> engine** (not a remote K8s-job harness). §2–§11 below describe that deferred Stirrup design
+> and remain the reference for it; read them through §0a.
+
 ## 0. Why this document exists
 
 `docs/V2-PLAN.md` (2026-06-21) drifted on its researcher core: it made *managed
@@ -45,6 +52,69 @@ Precedence is unchanged (`INTERACTIONS-API.md` > `DECISIONS.md` > `PROPOSAL.md`)
 design sits beside `V2-PLAN.md` below them. Any Stirrup contract detail it cites is
 **confirmed by spike before code** — Stirrup is a separate, evolving project and this
 document is not normative for it.
+
+## 0a. Direction — prove-first, in-process; Stirrup deferred to an embedded engine (2026-06-22)
+
+This section supersedes the *consumption model* of §2–§11. It does **not** change the
+research-agent shape (lead orchestrator, web-search loop, findings-by-reference, managed-DR
+baseline) — only *what runs the worker* and *when Stirrup enters*. It was settled with the
+author after a grounded build-vs-buy review of the Stirrup dependency.
+
+**The decision.**
+
+- **v2's critical path is a lean, homegrown, in-process research loop on one provider.** The
+  worker is Chiron code: the SP-C lead adapter (hand-rolled `net/http`, provider-native
+  structured output, OTel + `secret://` + cross-host-redirect refusal — §5.5) extended with the
+  search→read→synthesise loop (web-search MCP + `web_fetch` + context offload + per-loop
+  turn/token/cost caps). Workers run as in-process goroutines under the lead, not as pods.
+- **Stirrup is deferred, and re-cast as an embedded engine, not a remote K8s-job harness.**
+  When (a) the quality gate (§8) is met and (b) scale / multi-model justify it, Chiron adopts
+  Stirrup by importing a lean **engine** module in-process — providers + credential federation
+  + loop, split from the k8s/AWS/Cedar/container machinery, with an executor-optional factory
+  and a one-shot helper that also serves the lead (*Option D*). The remote-`stirrup.harness.v1`
+  / K8s-Job model (*Option A*, the prior plan) is demoted to "a deployment shape only if hard
+  per-worker process isolation is ever required". The author confirms Stirrup is a
+  multi-consumer **platform**; Chiron is the forcing function for that engine refactor.
+
+**Why (grounded).**
+
+- **v2's risk is quality, not plumbing** (§8). The remote-Stirrup apparatus — the
+  `HarnessService` server, K8s Jobs, image pinning, RBAC, endpoint auth (Wave 3 + most of
+  Wave 7) — is the heaviest, most expensive scaffolding in the plan, and it gates the
+  *cheapest* way to answer the only question that matters: does a homegrown web-search loop
+  reach Gemini-DR grade? Prove that first, in-process, for a fraction of the cost.
+- **Research needs no per-task sandbox.** Stirrup is a short-lived K8s job *because coding
+  needs isolated, disposable workspaces*; read-only web research executes no code and touches
+  no filesystem. The remote model pays pod-per-worker provisioning + a K8s control plane for
+  isolation v2 does not need.
+- **Stirrup's strongest assets are off the v2 critical path.** Its multi-provider adapters and
+  credential federation are real leverage — but one provider suffices to meet the quality gate
+  (author-confirmed), so that leverage is a *scale-out* concern, not a v2-critical one.
+- **In-process is already a supported Stirrup seam.** `harness/harnessapi/harnessapi.go`
+  ("public API for embedding the stirrup harness in-process") proves the loop embeds without
+  the remote machinery — so today's homegrown loop and tomorrow's embedded engine share the
+  same in-process shape; the swap is a `Researcher`-seam change, not a re-architecture. (Today,
+  importing it drags k8s/AWS/Cedar via `harness/go.mod` — exactly the dependency hygiene the
+  engine split fixes.)
+- **It composes, it is not throwaway.** The homegrown worker sits behind the **same**
+  `Researcher` seam, `ContextStore`, prompts, citation pass, and eval as a future
+  Stirrup-engine worker, so only the small inner provider+loop is interim; orchestration,
+  prompts, eval, and the findings flow carry straight over.
+
+**What changes in the plan (re-seating to follow).**
+
+- *Stays critical*: **SP-A** (web-search loop) — it **is** the homegrown worker; **SP-C** (the
+  lead adapter) — now the shared substrate for both lead and worker; **SP-F** (eval-vs-baseline
+  gate) — the decision point for everything downstream. **SP-E** simplifies to the in-process
+  `ContextStore`.
+- *Deferred to the scale-out track*: the `stirrup.harness.v1` Buf target + `HarnessService`
+  server (Wave 1 second target, Wave 3), **SP-B** (runner-as-Stirrup-control-plane / K8s Jobs),
+  **SP-D** (Azure-OpenAI WIF — single-provider auth replaces it for v2), and the Wave 7 K8s
+  worker apparatus. They remain valid as the engine/scale-out reference (§2–§11, §5.4).
+- *Unchanged*: managed Gemini DR = stopgap + eval baseline (§7); external-web-only (D5); the
+  service scaffolding — ConnectRPC control plane, Langfuse observability, Paddock, the run core
+  — is independent of the worker substrate and stands. Research-only holds **by construction**
+  (the homegrown worker has no write/exec surface at all).
 
 ## 1. The drift, precisely
 

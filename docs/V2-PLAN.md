@@ -28,6 +28,16 @@ summary: >
 
 ## 0. How to read this plan
 
+> **Direction update (2026-06-22) — read first.** This plan was written around *Option A*:
+> Stirrup research workers dispatched as remote K8s Jobs over `stirrup.harness.v1`. After a
+> build-vs-buy pressure-test of the Stirrup dependency, v2's **critical path is now a lean,
+> in-process, homegrown research loop on a single provider**, with Stirrup deferred to a later
+> **embedded-engine** adoption (not a remote harness). See `docs/V2-RESEARCH-AGENT.md` §0a for
+> the decision and grounded rationale. The waves below are being re-seated onto that direction;
+> until then, treat the `stirrup.harness.v1` / `HarnessService` / K8s-Job content (the Wave 1
+> second Buf target, Wave 3, Wave 7 worker provisioning, SP-B, SP-D) as the **deferred
+> scale-out track**, not the v2 critical path.
+
 This is the working plan for the `v2` branch. It assumes v1 is complete
 (`docs/DECISIONS.md`, "v1 complete", 2026-06-07) and that the v2 seams already
 exist as tested stubs: `internal/researcher/fleet`, `internal/transport/grpc.go`,
