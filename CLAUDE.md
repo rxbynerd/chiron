@@ -7,6 +7,17 @@ design decisions live in `docs/DECISIONS.md`; for anything touching the
 Gemini API, `docs/INTERACTIONS-API.md` is normative and wins over the
 proposal.
 
+v2 is in active planning on the `v2` branch: `docs/V2-PLAN.md` is the phased
+implementation plan and `docs/V2-RESEARCH-AGENT.md` is the research-agent core
+design (treat it as binding for the v2 researcher core). In v2 the `Researcher`
+is Chiron's own multi-agent fleet — a lead orchestrator driving **Stirrup**
+(`github.com/rxbynerd/stirrup`) research-mode jobs on **standard frontier
+models** (GPT-5.4/5.5, Claude, Gemini-Pro) equipped with a web-search tool.
+**Managed deep research (the v1 Gemini Deep Research adapter) is a stopgap +
+eval baseline only, never the product.** Stirrup owns the provider adapters;
+its wire types are Buf-generated, never `go get`. The Chiron runner is the
+`stirrup.harness.v1` `HarnessService` server (Stirrup workers dial in).
+
 Non-negotiables worth repeating:
 
 - Research-only: Chiron never gains write/execute capabilities.
