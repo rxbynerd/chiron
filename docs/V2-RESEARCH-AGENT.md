@@ -221,12 +221,11 @@ points — the v1 ethos ("use the LLM only when judgement is needed") applied to
    deduplicated `types.Citation` list the formatter already expects.
 
 The lead's three judgement calls (decompose, synthesise, cite) are themselves
-frontier-model calls. SP-C (§10) decides whether each is **a Stirrup `planning`/`research`
-job with a Chiron-authored prompt** (so Chiron hand-rolls *zero* model adapters — strongest
-"leverage Stirrup" + "no vendor SDK") or **a thin hand-rolled Chiron adapter** to one
-standard model. Lean: lead-as-Stirrup-jobs, because Stirrup already owns the adapters,
-credential federation, retries, and tracing; Chiron keeps only the orchestration control
-flow and the prompts.
+frontier-model calls. **SP-C (§5.5, resolved 2026-06-22) settles them as thin hand-rolled
+`net/http` calls to one standard model — not Stirrup jobs — and settles the cross-worker
+fan-out as Chiron-level, not `spawn_agent`.** The lead is Chiron's own control flow and
+prompts; Stirrup owns only the per-worker agentic loop. The tentative "lead-as-Stirrup-jobs"
+lean was investigated against Stirrup's actual contract and rejected; §5.5 records why.
 
 ### 5.2 Worker = a Stirrup research job
 
@@ -301,6 +300,77 @@ template, and flag it in the Wave 7 security review.
 bufconn / `httptest` pipe: it dials, sends `ready` (with a `CONTROL_PLANE_SESSION_ID`), waits
 for `task_assignment`, replays scripted `HarnessEvent`s (`tool_call`/`text_delta`/`done`), and
 never touches K8s — so `--agent research`/`fleet` run in CI with no cluster.
+
+### 5.5 Lead substrate and fan-out — Chiron owns the orchestration (SP-C, resolved)
+
+Grounded in Stirrup `main` (read 2026-06-22): `types/result.go:55-59`,
+`harness/internal/core/subagent.go:46-179`, `harness/internal/tool/builtins/subagent.go`,
+`harness/internal/prompt/systemprompts/planning.md`, `docs/deployment.md`,
+`docs/architecture.md`. Both halves of SP-C resolve the same way — **Chiron owns the
+orchestration shape; Stirrup owns only the per-worker agentic loop** — for one reason: every
+Stirrup-internal alternative *hides* the per-unit visibility and control that v2's
+spend-safety (§9) and observability (D7) are built on.
+
+**Lead judgement calls — a thin hand-rolled `net/http` adapter to one standard model, not a
+Stirrup job per call.** The lead's three calls (decompose, synthesise, cite) are *tool-less,
+single-shot* model turns: no agentic loop, no search tool, no executor. Three contract facts
+make the Stirrup-job substrate the wrong tool for them:
+
+- **A Stirrup job is one process — one K8s Pod** (`docs/deployment.md`: `stirrup job` "runs
+  the agentic loop to completion, and exits"; one Job → one Pod → one loop). Dispatching a job
+  for a single tool-less turn pays a full pod-schedule + harness-loop start for zero agentic
+  value, and serialises pod cold-start onto the lead's critical path three times per run, on
+  top of the N worker pods.
+- **Stirrup returns free text only.** `RunResult.FinalAssistantText` is the whole result, and
+  its own comment says "callers that framed their prompt for JSON output parse this field"
+  (`types/result.go:55-59`); there is no `response_format` / `output_schema` in `RunConfig`.
+  So the Stirrup-job path gives the lead *no* structured-output safety, whereas a hand-rolled
+  adapter can use the provider's **native** structured output (OpenAI Responses `json_schema`,
+  Anthropic structured tool-use, Gemini `responseSchema` + `responseMimeType:
+  application/json`) for decompose and cite — exactly the two calls that must be parsed
+  deterministically into briefs and a `types.Citation` list. The hand-rolled path is strictly
+  better on the axis that matters.
+- **Stirrup's `planning` prompt is codebase-oriented** ("a planning agent with read-only
+  access to the workspace… analyse the codebase… a numbered list… referencing the specific
+  files and functions", `harness/internal/prompt/systemprompts/planning.md`), so it must be
+  replaced with a `system_prompt_override` regardless; "leverage planning mode" buys little.
+
+The cost traded away is real and bounded: one new small `net/http` client and its own keyless
+auth (Stirrup's credential federation is not reachable from a Chiron-side HTTP client). Bound
+it — the lead runs on **one** model (it need not be the frontier OpenAI model; Claude or
+Gemini-Pro suffice), it reuses the v1 `internal/researcher/gemini` adapter's HTTP hardening
+(cross-host-redirect refusal, `secret://` + `Scrub`, create-never-retried — §9 / `V2-PLAN.md`
+§4), and its GKE auth rides the cheapest keyless path bound in Wave 7 (Gemini Vertex
+`gcp-workload-identity`, or the Gemini-DR stopgap's Secret-Manager key). It is SDK-free, so the
+"no vendor AI SDKs" non-negotiable holds. (Note the v1 Gemini adapter is *Deep-Research*-shaped
+— planner / stream / follow-up — so this is a **new plain-generate client that borrows its
+hardening**, not a reuse of the DR client itself.)
+
+**Cross-worker fan-out — Chiron-level, not `spawn_agent`.** This half is not close. Stirrup's
+`spawn_agent` (`harness/internal/core/subagent.go`) is built for a coding harness's
+"explore in a clean context" use and breaks four things v2 depends on:
+
+- **Sub-agents are invisible to the control plane.** A spawned sub-agent runs on a capture
+  transport wrapping `NullTransport` — "no streaming to the control plane"
+  (`subagent.go:46-104`). The Chiron runner *is* the control plane (SP-B); with `spawn_agent`
+  it would see only the lead job's single `HarnessEvent` stream, every worker buried inside one
+  process. That kills D7 / Langfuse per-worker spend rollup (`SpanDelegate`) and §9's "each
+  worker emits its Stirrup `run_id` early as the per-worker resume handle".
+- **Sub-agents share the parent's token/cost budget.** Per-worker structural caps
+  (`max_turns` / `max_token_budget` / `max_cost_budget` / `timeout` per job, §9) collapse into
+  one shared cap; the "bounded fan-out × per-job caps = hard ceiling" floor is lost.
+- **Sub-agents inherit the parent's provider** — only prompt/mode/max_turns are overridable,
+  and they reuse `parent.Provider` (`subagent.go:114-118,140-145`). Per-worker model choice
+  (§6.1) shrinks to whatever the parent's `model_router` allows. Coarse.
+- **It contradicts the resolved SP-B topology** (one K8s Job per worker, dialing the runner,
+  correlated by `CONTROL_PLANE_SESSION_ID`). Chiron-level fan-out *is* that topology.
+
+So the lead fans out at the Chiron level: one Stirrup `research` Job per worker (§5.2, §5.4),
+each independently streamed, budgeted, resumable, and traced. `spawn_agent` is not used in v2;
+the worker `built_in: ["web_fetch"]` list (§5.2) already excludes it structurally, keeping
+per-worker accounting exact. (It is in Stirrup's default read-only tool set and passes
+`deny-side-effects`, so the exclusion is a deliberate `ToolsConfig` choice, not a default —
+worth an assertion in the research-only proof of §5.3.)
 
 ## 6. Standard-model targeting, auth, and findings-by-reference
 
@@ -395,12 +465,13 @@ which the drifted plan wrongly deferred.
 | --- | --- | --- |
 | **SP-A** (the big one) | **Web-search tool — RESOLVED (§3, 2026-06-22):** pluggable backend — an **MCP search server** (default, portable, works against Stirrup's contract today) + **OpenAI provider built-in `web_search`** (OpenAI-path option behind a Stirrup enablement); **native discounted** (datacentre CAPTCHAs). Remaining: prove the MCP search→read→synthesise loop reaches Gemini-DR grade, pick the search API (Tavily/Exa/Brave/SearxNG), and scope the Stirrup `web_search` enablement. | The worker `ToolsConfig` (MCP default) + research prompt; the Stirrup enablement work-item; recorded in `DECISIONS.md` when Wave 3 lands. |
 | **SP-B** | **Stirrup dispatch — RESOLVED (§5.4, 2026-06-22):** the Chiron runner IS Stirrup's "control plane" (`deployment.md`) — a long-running Deployment + ClusterIP Service that serves `HarnessService` (workers dial in) and creates one K8s Job per worker (`stirrup job` entrypoint; `CONTROL_PLANE_ADDR` = runner Service; `CONTROL_PLANE_SESSION_ID` = brief id for fan-out correlation; image `ghcr.io/rxbynerd/stirrup:<tag>` pinned, not built). Per-run Job is the native model (runner needs a K8s client + RBAC); warm pool is a later optimisation. | The runner↔worker integration shape (§5.4); a faked-harness bufconn client for tests; the K8s Job orchestration + RBAC + endpoint auth land in Wave 7. |
-| **SP-C** | **Lead substrate.** Lead judgement calls as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | The lead implementation decision. |
+| **SP-C** | **Lead substrate — RESOLVED (§5.5, 2026-06-22):** the lead's decompose/synthesise/cite are **thin hand-rolled `net/http` calls to one standard model**, not a Stirrup job per call (a job is one K8s Pod — all overhead, no agentic value for a tool-less single-shot turn; Stirrup returns free text only (`result.go:55-59`), so a hand-rolled adapter's native structured output is strictly better for decompose/cite; the `planning` prompt is codebase-oriented and needs overriding regardless). Cross-worker fan-out is **Chiron-level, not `spawn_agent`** — `spawn_agent` sub-agents are invisible to the control plane (NullTransport), share the parent budget, and inherit the parent provider, breaking per-worker visibility/caps/model-choice and the SP-B topology. | The lead implementation decision (§5.5); a small plain-generate `net/http` client reusing the v1 gemini adapter's HTTP hardening; recorded in `DECISIONS.md` when Wave 4 lands. |
 | **SP-D** | **Azure OpenAI Responses + `azure-workload-identity` (chosen, §6.2):** confirm the project can register the Azure OpenAI/Foundry resource and Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1 with no Stirrup change. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → Paddock blob plane (and the in-memory store first). | The `ContextStore`↔Stirrup offload binding. |
 | **SP-F** | **Eval judge.** Does `stirrup-eval` offer an LLM-judge for report-quality-vs-baseline, or must one be added? | The baseline eval suite + judge. |
 
-SP-A, SP-B, SP-C have no spend and run first; they define the worker and the dispatch.
+SP-A, SP-B, SP-C have no spend and run first; they define the worker, the dispatch, and the
+lead — all three are now resolved (§3, §5.4, §5.5).
 **Cross-repo rule:** where a spike's resolution would require a change in Stirrup (a
 provider-built-in/native `web_search` for SP-A, an `openai-wif` source for SP-D, an llm-judge
 for SP-F), prefer the Chiron-only option (a search MCP, the Azure path, a Chiron-side judge

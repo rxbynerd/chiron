@@ -115,9 +115,10 @@ restated for a multi-agent, networked context.
   needs to touch `internal/run`, stop and re-examine the design.
 - **No vendor AI SDKs.** Chiron hand-rolls no provider adapter for the workers — Stirrup
   owns those (themselves SDK-free). What Chiron writes is the lead orchestrator's control
-  flow plus, at most, one thin `net/http` adapter for the lead's own planning/synthesis
-  calls *if* SP-C chooses a hand-rolled lead over a Stirrup `planning` job; the retained
-  v1 Gemini DR stopgap is already hand-rolled. Any embedding calls stay `net/http`.
+  flow plus one thin `net/http` adapter for the lead's own decompose/synthesise/cite calls
+  (SP-C, resolved: a hand-rolled lead over a Stirrup `planning` job — see
+  `docs/V2-RESEARCH-AGENT.md` §5.5); the retained v1 Gemini DR stopgap is already
+  hand-rolled. Any embedding calls stay `net/http`.
   Justify every new dependency in `DECISIONS.md` before adding it.
 - **Spend safety scales to N workers** (see §4). Budget *enforcement* is deferred (D6),
   but the spend-safety invariants that prevent waste, double-billing, and lost
@@ -227,7 +228,7 @@ confirms.
 | --- | --- | --- | --- |
 | **SP-A** (the crux) | **Web-search tool — RESOLVED (`V2-RESEARCH-AGENT.md` §3):** pluggable backend. **MCP search server** (Tavily/Exa/Brave/SearxNG) is the **portable default** and works against Stirrup's contract today; **OpenAI provider built-in `web_search`** is an OpenAI-path option **gated on a Stirrup enablement** (a `ToolsConfig` provider-built-in surface + un-excluding `web_search` in the `openai-responses` adapter + `web_search_call`→`HarnessEvent` mapping); **native discounted** (datacentre CAPTCHAs). Remaining before Wave 3: prove the MCP loop reaches Gemini-DR grade and pick the search API; scope the Stirrup enablement. | Waves 3, 4 | The worker `ToolsConfig` (MCP default) + research prompt; the Stirrup enablement work-item; recorded in `DECISIONS.md` when Wave 3 lands. |
 | **SP-B** | **Stirrup dispatch — RESOLVED (`V2-RESEARCH-AGENT.md` §5.4):** the Chiron runner IS Stirrup's "control plane" (`deployment.md`) — a long-running Deployment + ClusterIP Service that serves `HarnessService` (workers dial in) and creates one K8s Job per worker (`stirrup job` entrypoint; `CONTROL_PLANE_ADDR` = runner Service; `CONTROL_PLANE_SESSION_ID` = brief id for fan-out correlation; image `ghcr.io/rxbynerd/stirrup:<tag>` pinned, not built). Per-run Job is the native model (runner needs a K8s client + RBAC); warm pool is a later latency optimisation. | Waves 3, 4, 7 | The runner↔worker integration shape; a faked-harness bufconn client (Wave 3); the K8s Job orchestration + RBAC + endpoint auth (Wave 7). |
-| **SP-C** | **Lead substrate.** Lead judgement calls (decompose/synthesise/cite) as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | Wave 4 | The lead implementation decision. |
+| **SP-C** | **Lead substrate — RESOLVED (`V2-RESEARCH-AGENT.md` §5.5):** the lead's decompose/synthesise/cite are **thin hand-rolled `net/http` calls to one standard model**, not a Stirrup job per call (a job is one K8s Pod — all overhead, no agentic value for a tool-less single-shot turn; Stirrup returns free text only, so a hand-rolled adapter's native structured output is strictly better for decompose/cite; the `planning` prompt is codebase-oriented and needs overriding regardless). Fan-out is **Chiron-level, not `spawn_agent`** (sub-agents are invisible to the control plane, share the parent budget, and inherit the parent provider — breaking per-worker visibility/caps/model-choice and the SP-B topology). | Wave 4 | The lead implementation decision; a small plain-generate `net/http` client reusing the v1 gemini adapter's HTTP hardening; recorded in `DECISIONS.md` when Wave 4 lands. |
 | **SP-D** | **OpenAI auth (Azure path, chosen).** Confirm the project can register the Azure OpenAI/Foundry resource + Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. No spend. | Wave 7 | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1. |
 | **SP-E** | **Findings-by-reference interop.** Stirrup `offload-to-file` target → the in-memory `ContextStore` first, Paddock blob plane later. | Waves 4, 6 | The `ContextStore`↔Stirrup offload binding. |
 | **SP-F** | **Eval judge.** Does `stirrup-eval` offer an LLM-judge for report-quality-vs-baseline, or must one be added upstream? Fallback: a Chiron-side judge so the gate is never blocked on a Stirrup PR. | Wave 4 (eval gate) | The baseline eval suite + judge. |
@@ -424,8 +425,9 @@ forwards spans and complete cost signals to a Langfuse collector. Spend must be 
 before it scales.
 
 **Spike gate.** SP-A (web-search backend), SP-B (Stirrup dispatch), and SP-C (lead
-substrate) are resolved before code — they define the worker `ToolsConfig`/prompt, the
-dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
+substrate) are **resolved** (§5) — they define the worker `ToolsConfig`/prompt, the dispatch
+shape, and the lead substrate (a thin hand-rolled `net/http` adapter, not a Stirrup job;
+fan-out at the Chiron level, not `spawn_agent`).
 
 **Deliverables.**
 - The runner implemented as the **`HarnessService` server** (the Wave 1 generated stubs):
@@ -526,9 +528,10 @@ that plans, decomposes, dispatches several **Stirrup research workers** in paral
 `*types.Interaction` exactly as a single researcher does, so the run core is unchanged.
 Ship the **in-memory `ContextStore`** (D4) for findings-by-reference.
 
-**Spike gate.** SP-A (web-search backend), SP-B (dispatch shape), SP-C (lead substrate),
-SP-E (findings offload → `ContextStore` binding), and SP-F (eval judge) are resolved before
-code — together they define the fleet shape, the findings flow, and the quality gate.
+**Spike gate.** SP-A (web-search backend), SP-B (dispatch shape), and SP-C (lead substrate)
+are **resolved** (§5); SP-E (findings offload → `ContextStore` binding) and SP-F (eval judge)
+are resolved before code — together they define the fleet shape, the findings flow, and the
+quality gate.
 
 **Deliverables.**
 - `internal/researcher/fleet` implemented: lead planner, external-web-only router, bounded
@@ -538,9 +541,11 @@ code — together they define the fleet shape, the findings flow, and the qualit
   `ContextStore`: `Put`/`Get` content-addressed, `OpenSession` with TTL/GC in-process;
   `Remember`/`Recall` either a simple in-memory index or an explicit stub returning
   `ErrNotImplemented` (decide in-wave; recall is not load-bearing until Paddock).
-- The lead's planning/synthesis substrate per SP-C: a Stirrup `planning`/`research` job
-  with a Chiron prompt (zero Chiron model adapters; the lean) or, if SP-C chooses, one thin
-  hand-rolled `net/http` adapter — no SDK either way.
+- The lead's decompose/synthesise/cite substrate per SP-C (resolved): **one thin
+  hand-rolled `net/http` adapter** to a single standard model — a small plain-generate client
+  using the provider's native structured output for decompose/cite and reusing the v1 gemini
+  adapter's HTTP hardening (no SDK). It is **not** a Stirrup job per call, and fan-out is at
+  the Chiron level, **not** `spawn_agent` (`V2-RESEARCH-AGENT.md` §5.5).
 - The **eval-vs-baseline harness** (`V2-RESEARCH-AGENT.md` §8; SP-F): runs `--agent fleet`
   against the `--agent gemini-deep-research` baseline on a suite, judged for coverage /
   citations / faithfulness.
@@ -583,14 +588,16 @@ code — together they define the fleet shape, the findings flow, and the qualit
 
 **New packages / files.** `internal/researcher/fleet/{lead,router,worker,synthesise,
 cite}.go` (shape to taste; `worker.go` dispatches Stirrup jobs via the Wave 3
-`internal/harness` server); `internal/memory/inmemory.go`; the lead substrate per SP-C (a
-Stirrup job + prompt, or `internal/researcher/fleet/model` for a thin adapter); an eval
-suite + judge (SP-F; Chiron-side judge if `stirrup-eval` lacks one).
+`internal/harness` server); `internal/memory/inmemory.go`; the lead substrate per SP-C
+(resolved): `internal/researcher/fleet/model` — a thin plain-generate `net/http` client +
+the lead prompts; an eval suite + judge (SP-F; Chiron-side judge if `stirrup-eval` lacks
+one).
 
 **Dependencies + `DECISIONS.md`.** No `go mod` dependency on Stirrup (its wire types are
 Buf-generated, Wave 1; its binary is a runtime worker image, Wave 7). Entries: the fleet
 orchestration design over Stirrup workers; the in-memory `ContextStore` (D4) and why recall
-is deferred; the lead substrate (SP-C); the multi-worker spend-safety generalisation; the
+is deferred; the lead substrate (SP-C, resolved: a hand-rolled `net/http` lead + Chiron-level
+fan-out, not `spawn_agent`); the multi-worker spend-safety generalisation; the
 external-web-only routing table and the stopgap-stays-top-level rule (D2/D5); the
 eval-vs-baseline gate and the single-call default (SP-F, §8).
 
