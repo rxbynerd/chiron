@@ -225,7 +225,7 @@ confirms.
 
 | Spike | Question | Gates | Output |
 | --- | --- | --- | --- |
-| **SP-A** (the crux) | **Web-search tool.** Which backend gives Stirrup research mode iterative web search: an MCP search server (Tavily/Exa/Brave/SearxNG) — the lead candidate — vs a native `web_search` contributed upstream vs a provider built-in stopgap. Confirm `research` mode + the search tool + `web_fetch` sustain a search→read→synthesise loop of Gemini-DR grade. | Waves 3, 4 | The worker `ToolsConfig` + research prompt; the search backend recorded in `DECISIONS.md`. |
+| **SP-A** (the crux) | **Web-search tool — RESOLVED (`V2-RESEARCH-AGENT.md` §3):** pluggable backend. **MCP search server** (Tavily/Exa/Brave/SearxNG) is the **portable default** and works against Stirrup's contract today; **OpenAI provider built-in `web_search`** is an OpenAI-path option **gated on a Stirrup enablement** (a `ToolsConfig` provider-built-in surface + un-excluding `web_search` in the `openai-responses` adapter + `web_search_call`→`HarnessEvent` mapping); **native discounted** (datacentre CAPTCHAs). Remaining before Wave 3: prove the MCP loop reaches Gemini-DR grade and pick the search API; scope the Stirrup enablement. | Waves 3, 4 | The worker `ToolsConfig` (MCP default) + research prompt; the Stirrup enablement work-item; recorded in `DECISIONS.md` when Wave 3 lands. |
 | **SP-B** | **Stirrup dispatch.** The runner as `HarnessService` server (Buf, amend 4) driving Stirrup jobs that dial in: the `task_assignment`/`HarnessEvent` mapping, and GKE job provisioning (pre-warmed pool vs per-run Job, and the Stirrup worker image). | Waves 3, 4, 7 | The runner↔worker integration shape; a **faked Stirrup harness** for tests. |
 | **SP-C** | **Lead substrate.** Lead judgement calls (decompose/synthesise/cite) as Stirrup `planning`/`research` jobs (zero Chiron model adapters) vs a thin hand-rolled adapter; and Chiron-level fan-out vs Stirrup `spawn_agent`. | Wave 4 | The lead implementation decision. |
 | **SP-D** | **OpenAI auth (Azure path, chosen).** Confirm the project can register the Azure OpenAI/Foundry resource + Entra-ID workload-identity mapping, and that Stirrup's `azure-workload-identity` source binds it keylessly. OpenAI-direct + `openai-wif` is a recorded future alternative only. No spend. | Wave 7 | The (configuration) auth binding for the OpenAI standard-model path; closes amend 1. |
@@ -236,9 +236,11 @@ confirms.
 **Sequencing.** SP-A, SP-B, SP-C have no spend and run first — they define the worker, the
 dispatch, and the lead, and gate Waves 3–4. SP-D (no spend) gates Wave 7; SP-E gates the
 findings flow in Waves 4 and 6; SP-F gates the Wave 4 eval. **Cross-repo rule:** where a
-spike's resolution would need a change in Stirrup (a native `web_search`, an `openai-wif`
-source, an llm-judge), prefer the Chiron-only option (a search MCP, the Azure path, a
-Chiron-side judge) so the v2 critical path is never blocked on an upstream Stirrup release.
+spike's resolution would need a change in Stirrup (a provider-built-in/native `web_search`, an
+`openai-wif` source, an llm-judge), prefer the Chiron-only option (a search MCP, the Azure
+path, a Chiron-side judge) for the critical path so v2 is never blocked on an upstream Stirrup
+release — the Stirrup change rides alongside as a parallel track (e.g. the OpenAI `web_search`
+enablement for SP-A).
 The Langfuse OTLP ingestion path (endpoint, auth) is verified inside Wave 2 against
 Langfuse's docs rather than as a standalone spike.
 
@@ -431,9 +433,18 @@ dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
   `RunConfig`, consume `HarnessEvent`s (`text_delta`/`tool_call`/`tool_result`/`done`+
   `RunTrace`), map the result to the domain types (`Interaction`, `Output`, `Citation`,
   `Usage`).
-- A **web-search tool** wired into the worker `RunConfig` per SP-A — the lead candidate is
-  a Streamable-HTTP MCP search server attached via `ToolsConfig.mcp_servers`, paired with
-  `web_fetch` and a Chiron-authored research `system_prompt_override` / `composed` prompt.
+- A **pluggable web-search backend** wired into the worker `RunConfig` (SP-A, resolved): the
+  **default is a Streamable-HTTP MCP search server** attached via `ToolsConfig.mcp_servers`
+  (portable across every model; works against Stirrup today), paired with `web_fetch` and a
+  Chiron-authored research `system_prompt_override` / `composed` prompt. The `RunConfig`
+  builder takes a `search_backend` selector so **OpenAI provider built-in `web_search`** can
+  be chosen on `openai-responses` workers once its Stirrup enablement lands (parallel
+  work-item, below). Native scraping is excluded (datacentre CAPTCHAs).
+- (Parallel, **Stirrup-side**) the **`web_search` enablement work-item**, pursued for the
+  provider-built-in path: a `ToolsConfig` provider-built-in surface, un-excluding
+  `web_search` in the `openai-responses` adapter, and `web_search_call`→`HarnessEvent`
+  mapping. Tracked in Stirrup (our repo); the MCP default means Wave 3 does **not** block on
+  it.
 - A single-worker `--agent` selectable alongside the Gemini stopgap (e.g. `--agent
   research` for one Stirrup research job); the composition root binds the standard model
   (`provider.type` = `openai-responses` | `anthropic` | `gemini`) and the search backend.
@@ -458,8 +469,8 @@ dispatch shape, and whether the lead is a Stirrup job or a thin adapter.
    stream reconnects are fine; re-dispatch is not.
 2. Build the research `RunConfig`: `mode:"research"`,
    `permission_policy:"deny-side-effects"`, a `built_in` list of `web_fetch` only (no
-   write/exec tools), no write `executor` (`executor:"api"` read-only or absent), the
-   search MCP in `mcp_servers`, `context_strategy:"offload-to-file"`, the per-job caps
+   write/exec tools), no write `executor` (`executor:"api"` read-only or absent), the chosen
+   search backend (MCP server by default, via `mcp_servers`), `context_strategy:"offload-to-file"`, the per-job caps
    (`max_turns`/`max_token_budget`/`max_cost_budget`/`timeout`), and the Chiron research
    prompt. Assert the config is research-only (V2-RESEARCH-AGENT.md §5.3).
 3. Map `HarnessEvent`s to `transport.Event`s and the terminal `done`+`RunTrace` to the
@@ -493,11 +504,14 @@ lives in Stirrup's `openai-responses` provider.
 - A dispatch failure yields exactly one dispatch attempt (no auto-retry; pinned by test).
 - The Gemini stopgap path still works unchanged; worker tokens/cost forward to Langfuse.
 
-**Risks.** The web-search backend (SP-A) is the single highest-leverage unknown — quality
-hinges on it; the MCP route keeps it a Chiron-only concern (no Stirrup change). Stirrup is a
-separate evolving project; pin the `stirrup.harness.v1` contract by spike and the faked
-harness, and treat real Stirrup integration behind the fake. Output-shape differences
-between providers are normalised **inside Stirrup**, not in Chiron's core or formatter.
+**Risks.** The web-search backend (SP-A) is resolved to a pluggable MCP-default with an
+OpenAI-built-in option; quality still hinges on the search loop reaching Gemini-DR grade
+(proven in SP-A and the Wave 4 eval). The MCP default keeps the critical path Chiron-only (no
+Stirrup change); the provider-built-in track adds a bounded Stirrup work-item that must not
+gate Wave 3. Stirrup is a separate evolving project; pin the `stirrup.harness.v1` contract by
+spike and the faked harness, and treat real Stirrup integration behind the fake. Output-shape
+differences between providers are normalised **inside Stirrup**, not in Chiron's core or
+formatter.
 
 ---
 
