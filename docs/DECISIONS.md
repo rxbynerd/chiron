@@ -709,3 +709,122 @@ worker and lead chunks can reuse one fake model transport for CI
 the deliberate trade for cross-chunk reuse of a single scripted transport,
 and the package is a test-support-heavy adapter. Callers own the fake's
 lifecycle (build at the call site, `defer Close`).
+
+## 2026-07-01 — Search MCP client and its assumed tool-result shape
+
+Wave 3 needs the first of the worker's two read-only network tools
+(docs/V2-RESEARCH-AGENT §5): `internal/researcher/fleet/search`, a
+hand-rolled `net/http` client for a web-search tool exposed over MCP
+(JSON-RPC 2.0 over "Streamable HTTP"). No vendor SDK; standard library
+`net/http` + `encoding/json` + `bufio` (for the SSE path) only. No new
+dependency.
+
+**Minimal flow, not a general MCP client.** The client implements only
+`initialize` → `notifications/initialized` → `tools/call` for one configured
+search tool. It captures any `Mcp-Session-Id` from the initialize response
+and echoes it on the following requests. There is no resources/prompts/
+sampling surface, no server-initiated request handling, and no session
+resumption beyond echoing the id — adding any of that would re-open this
+decision. `initialize`/`initialized`/`tools/call` are each single-attempt:
+`tools/call` may drive a billable upstream search, so it is not auto-retried
+(the same reasoning the model adapter applies to its paid POST); the cheap
+handshake calls are not retried either, keeping the flow's cost ceiling
+obvious.
+
+**Two reply framings, both bounded.** A Streamable-HTTP `tools/call` POST may
+return `application/json` (one JSON-RPC message) or `text/event-stream` (SSE
+frames carrying JSON-RPC messages). Both are handled: the JSON path is the
+common case; the SSE path is read with a minimally reimplemented reader that
+mirrors the line-oriented scan / `data:` accumulation / blank-line dispatch
+discipline of `internal/interactions.Stream` but only extracts the single
+response frame (this transport needs one reply, not a reconnecting feed).
+Every read — JSON body and SSE aggregate — is bounded by `MaxBodyBytes`; an
+oversize reply is an error, not a silent truncation (contrast the fetch
+client below, where truncation is acceptable).
+
+**Assumed tool-result shape.** The search tool's `tools/call` result is
+assumed to carry a JSON document shaped
+`{"results":[{"title","url","snippet"}, ...]}`, either as `structuredContent`
+or serialised inside a `text` content block. The client prefers
+`structuredContent`, then scans text blocks. **Graceful degradation:** if
+neither carries a recognised results document, the first non-empty text
+content block is surfaced as a single `Result{Snippet: ...}` rather than
+erroring, so a differently-shaped-but-useful reply still feeds the worker
+something. An empty `results` array is treated as a valid zero-hit success
+(distinguished from "no results key" so arbitrary JSON is not mistaken for a
+zero-hit reply); `isError: true` on the tool result is surfaced as an error.
+Downstream (worker/lead) code must respect this shape and this
+degrade-don't-error posture.
+
+**Security mirrors the sibling adapters.** The endpoint is validated in `New`
+(absolute `https://`, `http://` loopback only) defensively even though config
+validates it too, because the seam must not trust its caller; the search key
+travels only in the `Authorization: Bearer` header and is scrubbed from every
+diagnostic by exact match plus `secret.Scrub`; cross-host redirects carrying
+the credential are refused. `allowedEndpointScheme`, `refuseCrossHostRedirects`
+and `readBounded` are reimplemented here, the same accepted duplication noted
+for the model adapter pending a shared `internal/httpx` helper.
+
+**Fake shipped in `fake.go`, not `_test.go`.** As with the model adapter, an
+`httptest.Server`-backed `FakeServer` lives in the non-test build so the later
+worker/lead chunks reuse one fake search MCP for CI (docs/V2-RESEARCH-AGENT
+§8). It scripts results, records requests, exposes total and `tools/call`-only
+call counts, and has options for an assigned session id, an SSE reply framing,
+and a verbatim tool result (for unexpected-shape / oversize cases). Callers
+own its lifecycle.
+
+## 2026-07-01 — web_fetch client: SSRF posture and oversize truncation
+
+Wave 3's second read-only worker tool (docs/V2-RESEARCH-AGENT §5) is
+`internal/researcher/fleet/fetch`, a hand-rolled `net/http` client that
+retrieves the content of an UNTRUSTED external URL discovered by the search
+tool. No vendor SDK; `net/http` only. No new dependency. This is the first
+Chiron component to fetch arbitrary URLs, so the security posture is recorded
+in full.
+
+**SSRF guard (CWE-918).** Unlike the model and search clients — which POST a
+credential to one configured, validated endpoint — web_fetch dials hosts
+chosen by an upstream search result and carries NO Chiron credential, so the
+dominant risk is server-side request forgery. Only `http`/`https` schemes are
+accepted (`file:`, `ftp:`, `data:`, `javascript:`, `gopher:`, ... are
+rejected). Before the request and again after every redirect, the destination
+host is resolved and refused if any resolved address is loopback, private
+(RFC1918 / RFC4193), link-local (unicast or multicast, covering 169.254/16 and
+fe80::/10), or unspecified — refusing on the union of resolved addresses is
+the safe default. Re-checking on redirect is essential: a public URL that
+302s to `http://169.254.169.254/…` must be caught.
+
+**`AllowLoopback` narrows, it does not blanket-disable.** The `AllowLoopback`
+option (default false; tests set it true to reach loopback `httptest` servers)
+exempts *only* loopback and the unspecified address. It deliberately does NOT
+relax the refusal of private or link-local addresses, so a loopback test
+harness — or a loopback page that redirects onward — still cannot reach an
+internal production or cloud-metadata address. Production configuration leaves
+it false.
+
+**Connection-time IP pinning is a deliberate follow-up, not implemented
+here.** The guard is resolve-then-check: it does not pin the checked IP for
+the actual dial. Between the guard's `LookupIP` and the connection the name
+could re-resolve to a different address (DNS rebinding), and a redirect target
+is re-checked but likewise not pinned. Closing that race requires a custom
+`DialContext` that validates and pins the connecting IP. That hardening is
+recorded here as a follow-up and is explicitly out of scope for this chunk;
+the resolve-then-check guard is the baseline it will build on.
+
+**Oversize body is truncated-and-marked, not an error.** `MaxContentBytes`
+bounds the body read. A source exceeding it yields `Page.Content` = the
+bounded prefix with `Page.Truncated = true`, rather than the error the model
+and search adapters return on oversize. The justification: those adapters read
+a structured message whose clipped form is meaningless or a smuggling risk,
+whereas a partial page is still useful research text for the worker to reason
+over, and truncation is flagged so the caller knows it is a prefix. A redirect
+depth cap and a per-call `RequestTimeout` (yielding to a tighter caller
+deadline) bound the call otherwise.
+
+**No credentials, but userinfo is still scrubbed.** web_fetch sends no Chiron
+key. But a fetched URL may carry userinfo (`user:pass@host`); that is stripped
+from the returned `Page.URL` and from every diagnostic (parse-and-restrip,
+with a coarse fallback for an unparseable URL) so an embedded credential
+cannot leak through a log, citation, or error. Reads are idempotent, so a
+caller MAY retry a failed fetch knowingly, but the client itself does not
+retry — keeping one call's cost and time ceiling obvious.
