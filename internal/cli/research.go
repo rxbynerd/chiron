@@ -16,6 +16,10 @@ import (
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/planner"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/gemini"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/secret"
@@ -64,13 +68,24 @@ func (e *ExitError) Error() string { return e.Err.Error() }
 
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// runResearch executes `chiron research` end-to-end: gate the budget,
-// optionally review the plan (--plan), then hand off to the run core.
-// M2 awaits by polling; the M5 streaming surface arrives with --stream
-// support.
+// runResearch executes `chiron research` end-to-end: select the
+// researcher for the chosen agent, gate the budget, optionally review the
+// plan (--plan), then hand off to the run core. The deep-research tiers
+// bind the Gemini adapter; --agent worker binds Chiron's in-process
+// worker (runWorkerResearch); --agent fleet is not wired yet. M2 awaits by
+// polling; the M5 streaming surface arrives with --stream support.
 func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	if cfg.Query == "" {
 		return errors.New("research: a query is required (--query or the positional argument)")
+	}
+	// Fail fast on an agent whose researcher is not constructed at this
+	// composition root (fleet, until Wave 4), before any seam is built or
+	// secret resolved — a clear typed error, not a nil researcher.
+	if err := checkResearcherWired(cfg.Agent); err != nil {
+		return err
+	}
+	if cfg.Agent == config.AgentWorker {
+		return runWorkerResearch(cmd, cfg)
 	}
 
 	return withRunSeams(cmd, cfg, func(ctx context.Context, apiKey string, deps run.Deps) error {
@@ -104,6 +119,111 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 			PreviousInteractionID: previousID,
 		})
 		return concludeRun(result, err)
+	})
+}
+
+// runWorkerResearch runs `chiron research --agent worker`: build the
+// in-process worker researcher from cfg.Fleet, then drive the unchanged run
+// core. It resolves the fleet key references (model and search) at this
+// composition root — never inside the loop — and maps the fleet caps onto
+// the worker's per-call timeouts and structural caps. --plan and --budget
+// are Gemini-tier levers (a planning round and a per-tier cost estimate);
+// the worker has neither, so they do not apply here.
+func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
+		res, err := buildWorker(ctx, cfg, deps.Tracer)
+		if err != nil {
+			return err
+		}
+		deps.Researcher = res
+		result, err := run.Run(ctx, deps, run.Params{
+			Query: cfg.Query,
+			Agent: cfg.Agent,
+		})
+		return concludeRun(result, err)
+	})
+}
+
+// buildWorker constructs the in-process worker researcher from the resolved
+// config. It resolves the model and search key references here, at the
+// composition root — never inside the worker loop — and fails before any
+// request if either endpoint or key is missing or unresolvable, so a
+// misconfigured worker never emits a resume handle for a run that cannot
+// proceed. WorkerTimeout bounds both the whole run (Caps.Timeout) and each
+// individual model/search/fetch call (their RequestTimeout): no one call may
+// outlast the worker's own wall-clock budget. The fetch client keeps
+// AllowLoopback false — production must not reach loopback or internal
+// destinations; only tests flip it on to reach loopback fakes.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer) (*fleet.Worker, error) {
+	fc := cfg.Fleet
+	if fc.ModelEndpoint == "" {
+		return nil, errors.New("research --agent worker: fleet.model_endpoint is required")
+	}
+	if fc.ModelName == "" {
+		// The model client mandates an explicit model identifier — it carries
+		// no default of its own — so require it here rather than sending an
+		// empty model field and failing deeper in the adapter.
+		return nil, errors.New("research --agent worker: fleet.model_name is required")
+	}
+	if fc.ModelKeyRef == "" {
+		return nil, errors.New("research --agent worker: fleet.model_key_ref is required")
+	}
+	if fc.SearchEndpoint == "" {
+		return nil, errors.New("research --agent worker: fleet.search_endpoint is required")
+	}
+
+	modelKey, err := secret.Default().Resolve(ctx, fc.ModelKeyRef)
+	if err != nil {
+		return nil, err
+	}
+	// The search MCP may be keyless; resolve only when a reference is set, so
+	// an empty ref sends no Authorization header rather than failing.
+	var searchKey string
+	if fc.SearchKeyRef != "" {
+		searchKey, err = secret.Default().Resolve(ctx, fc.SearchKeyRef)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	callTimeout := time.Duration(fc.WorkerTimeout)
+
+	modelClient, err := model.New(model.Options{
+		Endpoint:       fc.ModelEndpoint,
+		Model:          fc.ModelName,
+		APIKey:         modelKey,
+		RequestTimeout: callTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	searchClient, err := search.New(search.Options{
+		Endpoint:       fc.SearchEndpoint,
+		APIKey:         searchKey,
+		RequestTimeout: callTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	fetchClient, err := fetch.New(fetch.Options{
+		RequestTimeout: callTimeout,
+		AllowLoopback:  false,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return fleet.NewWorker(fleet.WorkerDeps{
+		Model:  modelClient,
+		Search: searchClient,
+		Fetch:  fetchClient,
+		Tracer: tracer,
+		Caps: fleet.Caps{
+			MaxTurns:   fc.MaxTurns,
+			MaxTokens:  fc.MaxTokens,
+			CeilingGBP: fc.CeilingGBP,
+			Timeout:    time.Duration(fc.WorkerTimeout),
+		},
 	})
 }
 
@@ -159,28 +279,34 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID strin
 	})
 }
 
-// withRunSeams owns the lifecycle every API-bound command shares: the
-// timeout context, the resolved API key, the tracer (flushed on exit),
-// and the transport and sink seams. The Researcher field is left for
-// the caller — research, get and follow-up bind different modes of the
-// gemini adapter.
+// withRunSeams owns the lifecycle the Gemini-bound commands share: the
+// timeout context, the resolved Gemini API key, the tracer (flushed on
+// exit), and the transport and sink seams. The Researcher field is left
+// for the caller — research, get and follow-up bind different modes of
+// the gemini adapter. The in-process worker/fleet agents do not use this
+// helper: they resolve their own key references and run under
+// withRunLifecycle directly, so a worker run does not require the Gemini
+// key.
 func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, apiKey string, deps run.Deps) error) error {
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
+		apiKey, err := secret.Default().Resolve(ctx, cfg.APIKeyRef)
+		if err != nil {
+			return err
+		}
+		return f(ctx, apiKey, deps)
+	})
+}
+
+// withRunLifecycle owns the seam lifecycle every research command shares,
+// independent of which Researcher binds: the timeout context, the tracer
+// (flushed on exit), and the transport and sink seams. It resolves no
+// credential — key resolution belongs to the researcher-specific callback
+// (the Gemini key in withRunSeams, the fleet key refs in the worker
+// binding), so each agent requires only the secrets it actually uses. The
+// Researcher field of the passed Deps is unset; the callback binds it.
+func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps) error) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
-
-	// Researcher selection: the deep-research tiers bind the Gemini
-	// adapter (the callback constructs it); the in-process worker/fleet
-	// agents are not wired yet, so fail here before resolving any secret
-	// or touching a seam. A later chunk replaces this with real
-	// construction.
-	if err := checkResearcherWired(cfg.Agent); err != nil {
-		return err
-	}
-
-	apiKey, err := secret.Default().Resolve(ctx, cfg.APIKeyRef)
-	if err != nil {
-		return err
-	}
 
 	tracer, shutdown, err := newTracer(ctx)
 	if err != nil {
@@ -199,7 +325,7 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 	events := transport.NewStdio(cmd.ErrOrStderr())
 	defer events.Close()
 
-	return f(ctx, apiKey, run.Deps{
+	return f(ctx, run.Deps{
 		Formatter: formatter.NewMarkdown(),
 		Sink:      buildSink(cmd, cfg),
 		Transport: events,
@@ -209,16 +335,17 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 
 // checkResearcherWired reports whether the selected agent has a researcher
 // implementation bound at this composition root. The deep-research tiers
-// bind the Gemini adapter; the in-process worker and fleet agents pass
-// config validation but their researchers are not constructed yet (v2 Wave
-// 3/4), so they return a clear typed error rather than a nil researcher or
-// a Gemini fallback. A later chunk flips this to real construction.
+// bind the Gemini adapter and the worker agent binds the in-process worker
+// (both construct real researchers); the fleet orchestrator passes config
+// validation but is not constructed yet (v2 Wave 4), so it returns a clear
+// typed error rather than a nil researcher or a Gemini fallback. Wave 4
+// flips fleet to real construction.
 func checkResearcherWired(agent string) error {
 	switch agent {
-	case config.AgentDeepResearch, config.AgentDeepResearchMax:
+	case config.AgentDeepResearch, config.AgentDeepResearchMax, config.AgentWorker:
 		return nil
 	default:
-		return fmt.Errorf("agent %q: not yet wired (v2 Wave 3/4 in progress)", agent)
+		return fmt.Errorf("agent %q: not yet wired (v2 Wave 4 in progress)", agent)
 	}
 }
 

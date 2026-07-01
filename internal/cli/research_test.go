@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -369,29 +370,75 @@ func TestResearchRequiresQuery(t *testing.T) {
 	}
 }
 
-// TestInProcessAgentsNotYetWired pins the interim composition-root
-// contract (V2-RESEARCH-AGENT §4): worker and fleet pass config validation
-// but their researchers are not constructed yet, so the run fails with a
-// clear typed error at the seam-selection point — never a nil researcher
-// or a silent Gemini fallback. The guard fires before any secret is
-// resolved or any request is made, so no fake server is needed. A later
-// chunk replaces this with real construction.
-func TestInProcessAgentsNotYetWired(t *testing.T) {
-	for _, tt := range []string{"worker", "fleet"} {
-		t.Run(tt, func(t *testing.T) {
-			_, _, err := execute(t, "research", "--query", "q", "--agent", tt, "-o", "none")
-			if err == nil {
-				t.Fatalf("--agent %s must fail until the researcher is wired", tt)
-			}
-			if !strings.Contains(err.Error(), "not yet wired") {
-				t.Errorf("err = %v, want the not-yet-wired message", err)
-			}
-			// It is an infrastructure/usage error, not a research
-			// outcome — no ExitError, so no research exit code.
-			if _, ok := errors.AsType[*ExitError](err); ok {
-				t.Errorf("a not-yet-wired agent is a usage error, not a research outcome: %v", err)
-			}
-		})
+// TestFleetAgentNotYetWired pins the interim composition-root contract
+// (V2-RESEARCH-AGENT §6): the fleet orchestrator passes config validation
+// but is not constructed yet (Wave 4), so the run fails with a clear typed
+// error at the seam-selection point — never a nil researcher or a silent
+// Gemini fallback. The guard fires before any secret is resolved or any
+// request is made, so no fake server is needed. Wave 4 replaces this with
+// real construction. The worker agent is now wired (see
+// TestWorkerAgentIsWired), so only fleet is asserted here.
+func TestFleetAgentNotYetWired(t *testing.T) {
+	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "-o", "none")
+	if err == nil {
+		t.Fatal("--agent fleet must fail until the researcher is wired")
+	}
+	if !strings.Contains(err.Error(), "not yet wired") {
+		t.Errorf("err = %v, want the not-yet-wired message", err)
+	}
+	// It is an infrastructure/usage error, not a research outcome — no
+	// ExitError, so no research exit code.
+	if _, ok := errors.AsType[*ExitError](err); ok {
+		t.Errorf("a not-yet-wired agent is a usage error, not a research outcome: %v", err)
+	}
+}
+
+// TestWorkerAgentIsWired proves --agent worker now constructs a real
+// in-process worker researcher at the composition root: the run reaches and
+// completes the worker loop through the unchanged run core, rather than
+// returning the not-yet-wired error. The model is scripted to answer
+// immediately with a final action (no search/fetch), so the run needs only a
+// loopback model MCP-style endpoint and a search endpoint; the report lands
+// on stdout with the worker's front matter. This is the composition-root
+// smoke test for the wiring; the fuller golden-report assertion lives in the
+// fleet package (through run.Run) with a search + loopback-fetch script.
+func TestWorkerAgentIsWired(t *testing.T) {
+	modelSrv := model.NewFakeServer(model.FakeReply{
+		Content:      `{"action":"final","answer":"# Worker answer\n\nThe sky is blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
+		FinishReason: "stop",
+		Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
+	})
+	defer modelSrv.Close()
+	// The search endpoint need only be a valid loopback URL: this script never
+	// searches, so no MCP handler is exercised. A bare server suffices.
+	searchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer searchSrv.Close()
+	t.Setenv("MODEL_KEY", "test-model-key")
+
+	stdout, stderr, err := execute(t,
+		"research", "--query", "why is the sky blue",
+		"--agent", "worker", "-o", "text",
+		"--fleet-model-endpoint", modelSrv.URL(),
+		"--fleet-model-name", "test-model",
+		"--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-search-endpoint", searchSrv.URL,
+	)
+	if err != nil {
+		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+	}
+	if strings.Contains(stderr, "not yet wired") {
+		t.Fatalf("--agent worker must be wired now:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "# Worker answer") {
+		t.Errorf("stdout missing the worker's report body:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "agent: worker") {
+		t.Errorf("stdout missing the worker agent in front matter:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "https://example.org/sky") {
+		t.Errorf("stdout missing the cited source:\n%s", stdout)
 	}
 }
 
