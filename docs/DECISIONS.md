@@ -828,3 +828,99 @@ with a coarse fallback for an unparseable URL) so an embedded credential
 cannot leak through a log, citation, or error. Reads are idempotent, so a
 caller MAY retry a failed fetch knowingly, but the client itself does not
 retry — keeping one call's cost and time ceiling obvious.
+
+## 2026-07-01 — In-process worker loop: action schema, Wave 4 factoring, cost signal
+
+Wave 3's capstone (docs/V2-RESEARCH-AGENT §5) is the in-process research
+worker: `internal/researcher/fleet/worker.go` plus its prompt
+(`worker_prompt.go`), action schema (`worker_action.go`) and single-query
+Researcher binding (`worker_researcher.go`). It ties the landed model, search
+and web_fetch clients into a bounded search -> read -> reason -> synthesise
+loop and maps the result onto one `types.Interaction` the existing formatter
+renders. No new dependency; no vendor SDK. This entry records the three
+decisions the plan called out.
+
+**The action schema is a closed three-verb vocabulary, enforced twice.** Each
+turn the model is asked for exactly one action via provider-native structured
+output (`model.Request.JSONSchema` + `SchemaName`, i.e. `response_format`
+`json_schema` with `strict: true`). The schema is an object with a required
+`action` discriminator constrained by `enum` to exactly three values, plus the
+per-action fields:
+
+- `search` — `{ "action": "search", "query": string }`
+- `fetch` — `{ "action": "fetch", "url": string }`
+- `final` — `{ "action": "final", "answer": string, "citations": [ { "url": string, "title"?: string } ] }`
+
+`additionalProperties` is false at the top level and on each citation. The
+prompt restates the same contract in prose so a model that only reads
+instructions and one that only obeys the schema agree. This is the ONLY surface
+through which the model can influence the world, and it is enforced twice: the
+provider `enum` bars a fourth kind on the wire, and `parseAction` decodes
+strictly (`DisallowUnknownFields`) and rejects any unrecognised kind — `shell`,
+`write`, `exec`, or anything else — and any known kind missing its required
+field. The loop's dispatch is a closed `switch` with no default execution
+branch, so a side-effecting or malformed action can only be *refused* (the run
+ends `failed` with a scrubbed detail and no side effect), never run. This is
+the research-only-by-construction guarantee (V2-RESEARCH-AGENT §1), pinned by
+`TestRunWorkerRefusesSideEffectingActions`. `fetch` is further scoped to URLs
+that appeared in a prior search result (a per-run allow-list), defence in depth
+over the fetch client's own SSRF guard; a fetch of an unseen URL is a
+recoverable nudge back to the model, not a fatal error.
+
+**`RunWorker(ctx, WorkerDeps, Brief) Finding` is factored for Wave 4 reuse.**
+The plan requires the lead to reuse the worker per brief, so the loop is a
+free function over three small types, not a method on the single-query adapter:
+
+- `Brief{ Objective, OutputFormat, SourceGuidance, Boundaries string }` — one
+  unit of work; blank fields fall back to instructive defaults so a minimal
+  brief still yields a coherent prompt.
+- `Finding{ Text string; Citations []types.Citation; Usage types.Usage; Status types.Status; Detail string }`
+  — the outcome; already-deduplicated citations, accumulated usage, a terminal
+  status and a diagnostic detail.
+- `WorkerDeps{ Model *model.Client; Search *search.Client; Fetch *fetch.Client; Tracer trace.Tracer; Caps Caps }`
+  — the shared collaborators; the lead and every worker share one set of
+  clients, only the `Brief` and `Caps` differ per run.
+- `Caps{ MaxTurns int; MaxTokens int; CeilingGBP float64; Timeout time.Duration }`
+  — the structural caps.
+
+`RunWorker` never returns an error: every outcome — a final answer
+(`completed`), a cap stop (`incomplete`), or a tool/model failure (`failed`) —
+is expressed as a `Finding`, so a caller gets a uniform result to map or store.
+Partial citations gathered before any stop are preserved on all outcomes, so a
+bounded or failed run never discards the sources it found. Wave 4's lead
+dispatches one `RunWorker` per decomposed brief under its own fan-out and
+concurrency caps, stores each `Finding` by reference, and synthesises over the
+references — it does not need the single-query `Worker` type, which is one
+caller of the same loop. The `Worker` Researcher allocates an opaque local
+`wkr_<128-bit-hex>` id, launches `RunWorker` in a goroutine, returns the id
+immediately (§3), and maps the `Finding` onto one `types.Interaction`
+(`agent="worker"`, `tools=[web_search, web_fetch]`, one text output, the
+citations, the accumulated usage). The local id is a handle, not a durable
+resume token: a crashed in-process run cannot be recovered by `chiron get`
+(§3), the accepted limitation until control-plane durability lands.
+
+**The cost signal is tokens and search count; GBP is best-effort.** Usage
+accumulates across turns: input/output tokens summed from each model turn, and
+a search count incremented per `search` action. `EstimatedCostGBP` stays 0
+unless a rate is wired in — there is no price table in CI, and inventing one
+would make the cost cap non-deterministic. The token and search counters are
+therefore the primary spend signal; the token cap (`MaxTokens`) bounds a run
+deterministically without any pricing, and the GBP ceiling (`CeilingGBP`)
+expresses operator intent for when a rate exists (both are honoured: exceeding
+either ends the loop `incomplete`). A single turn's completion is capped to the
+remaining token budget so no one turn overshoots the accumulated cap by a full
+max-completion. Best-effort worker spans and search/token/cost metrics are
+emitted through the shared trace vocabulary (`SpanWorker` added to
+`internal/trace/names.go`; the fixed run-core span names are unchanged) when a
+tracer is injected; a failed emission never fails the run.
+
+**Composition-root wiring.** `--agent worker` is flipped to real construction
+in `internal/cli/research.go`; `--agent fleet` still returns the not-yet-wired
+error (Wave 4). The seam lifecycle is split so a worker run resolves only the
+fleet key references (`fleet.model_key_ref`, and `fleet.search_key_ref` when
+set) at the composition root — never inside the loop — and does not require the
+Gemini key. `fleet.worker_timeout` maps onto both the whole-run cap and each
+per-call timeout (no single call outlasts the worker's budget). The fetch
+client keeps `AllowLoopback` false in production; only tests flip it on to
+reach loopback fakes. The model client mandates an explicit model identifier,
+so `fleet.model_name` is required at the root rather than sent empty.
