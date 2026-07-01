@@ -168,6 +168,15 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
 
+	// Researcher selection: the deep-research tiers bind the Gemini
+	// adapter (the callback constructs it); the in-process worker/fleet
+	// agents are not wired yet, so fail here before resolving any secret
+	// or touching a seam. A later chunk replaces this with real
+	// construction.
+	if err := checkResearcherWired(cfg.Agent); err != nil {
+		return err
+	}
+
 	apiKey, err := secret.Default().Resolve(ctx, cfg.APIKeyRef)
 	if err != nil {
 		return err
@@ -196,6 +205,21 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 		Transport: events,
 		Tracer:    tracer,
 	})
+}
+
+// checkResearcherWired reports whether the selected agent has a researcher
+// implementation bound at this composition root. The deep-research tiers
+// bind the Gemini adapter; the in-process worker and fleet agents pass
+// config validation but their researchers are not constructed yet (v2 Wave
+// 3/4), so they return a clear typed error rather than a nil researcher or
+// a Gemini fallback. A later chunk flips this to real construction.
+func checkResearcherWired(agent string) error {
+	switch agent {
+	case config.AgentDeepResearch, config.AgentDeepResearchMax:
+		return nil
+	default:
+		return fmt.Errorf("agent %q: not yet wired (v2 Wave 3/4 in progress)", agent)
+	}
 }
 
 // geminiOptions maps the resolved config onto the adapter's options —

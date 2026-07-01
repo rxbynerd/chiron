@@ -369,6 +369,32 @@ func TestResearchRequiresQuery(t *testing.T) {
 	}
 }
 
+// TestInProcessAgentsNotYetWired pins the interim composition-root
+// contract (V2-RESEARCH-AGENT §4): worker and fleet pass config validation
+// but their researchers are not constructed yet, so the run fails with a
+// clear typed error at the seam-selection point — never a nil researcher
+// or a silent Gemini fallback. The guard fires before any secret is
+// resolved or any request is made, so no fake server is needed. A later
+// chunk replaces this with real construction.
+func TestInProcessAgentsNotYetWired(t *testing.T) {
+	for _, tt := range []string{"worker", "fleet"} {
+		t.Run(tt, func(t *testing.T) {
+			_, _, err := execute(t, "research", "--query", "q", "--agent", tt, "-o", "none")
+			if err == nil {
+				t.Fatalf("--agent %s must fail until the researcher is wired", tt)
+			}
+			if !strings.Contains(err.Error(), "not yet wired") {
+				t.Errorf("err = %v, want the not-yet-wired message", err)
+			}
+			// It is an infrastructure/usage error, not a research
+			// outcome — no ExitError, so no research exit code.
+			if _, ok := errors.AsType[*ExitError](err); ok {
+				t.Errorf("a not-yet-wired agent is a usage error, not a research outcome: %v", err)
+			}
+		})
+	}
+}
+
 func TestResearchUnresolvableSecret(t *testing.T) {
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
