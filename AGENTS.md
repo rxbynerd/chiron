@@ -111,3 +111,25 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   themselves are visible to whatever endpoint is configured: treat the
   collector address as deployment configuration, not a user-settable
   knob. In GKE v2, restrict both to operator-supplied Secrets.
+
+## Security-sensitive configuration (in-process research agents)
+
+The `--agent worker`/`fleet` paths add a `fleet` config block
+(`internal/config` `FleetConfig`) whose endpoint and key fields are as
+security-sensitive as `CHIRON_GEMINI_BASE_URL`, for the same reason: the
+standard-model and search-MCP keys travel to whatever endpoint the config
+names, so whoever controls those fields receives the credentials.
+
+- `fleet.model_endpoint` / `fleet.search_endpoint` — validated at
+  `ResearchConfig.Validate` with the `CHIRON_GEMINI_BASE_URL` rule:
+  absolute `https://`, `http://` for loopback hosts only, so a cleartext
+  or internal-network endpoint can never receive a key. The check is a
+  mirror of `internal/cli`'s `allowedBaseScheme` (the reverse import would
+  cycle); keep the two in step.
+- `fleet.model_key_ref` / `fleet.search_key_ref` — must be `secret://`
+  references; literals are rejected and never echoed in the error.
+
+Wave 3 keeps these as config fields, not new environment variables — they
+are per-run research configuration, not process-wide test hooks. If a
+later wave adds a model/search endpoint override *env var*, validate it
+exactly like `CHIRON_GEMINI_BASE_URL` and list it in the section above.

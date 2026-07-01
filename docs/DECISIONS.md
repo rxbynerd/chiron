@@ -571,3 +571,63 @@ Remediation makes the lint contract explicit instead of inherited:
 Peppering the 28 sites with `_ =` assignments was rejected — it adds
 noise at call sites the Go ecosystem conventionally leaves bare, and
 the next linter default change would simply produce a different batch.
+
+## 2026-07-01 — Config surface for the in-process research agents (worker/fleet)
+
+V2-RESEARCH-AGENT §4 extends `ResearchConfig.Agent` with two Chiron-owned
+in-process agents beside the Gemini Deep Research stopgap: `worker` (a
+single search → read → synthesise loop) and `fleet` (a lead orchestrator
+over bounded workers). This chunk adds the config and CLI surface only; the
+researchers themselves are wired in a later chunk, so the composition root
+recognises the two values and returns a clear typed "not yet wired" error
+rather than a nil researcher or a silent Gemini fallback. No new dependency
+is introduced.
+
+The Wave 3/4 knobs live in a nested `Fleet FleetConfig` block rather than
+being flattened onto `ResearchConfig`, so the deep-research paths ignore
+them wholesale and a zero `Fleet` never invalidates a deep-research run.
+`Fleet.validate` runs only when `Agent` is `worker`/`fleet`. Fields:
+
+- Standard model: `ModelEndpoint` (URL), `ModelName`, `ModelKeyRef`
+  (`secret://`). `ModelName` is deliberately distinct from the pre-existing
+  `ResearchConfig.Model`, which selects the Gemini *follow-up* model
+  (docs/INTERACTIONS-API.md §3) — conflating them would couple two
+  unrelated model choices.
+- Search MCP: `SearchEndpoint` (URL), `SearchKeyRef` (`secret://`).
+- Worker caps: `MaxTurns` (int, positive — the primary runaway guard),
+  `MaxTokens` (int) and `CeilingGBP` (float) as the spend ceiling,
+  `WorkerTimeout` (the config `Duration`).
+- Fleet caps: `MaxWorkers` and `Concurrency` (both positive; concurrency
+  must not exceed max-workers), enforced for `fleet` only — a lone worker
+  has no fan-out to bound.
+- `Memory`: `noop` | `inmemory` (default `noop`); `paddock-embedded` waits
+  for Wave 6.
+
+Both a token ceiling *and* a GBP ceiling are kept rather than picking one.
+`MaxTokens` bounds a single worker loop deterministically in tests with no
+price table (the CI fakes have no cost), while `CeilingGBP` expresses the
+operator's spend intent in the same GBP unit and zero-means-uncapped
+semantics as the existing `BudgetGBP`. Both default to zero (uncapped on
+that dimension); the turn and time caps still bound the loop, so a bare
+`--agent worker` run is never unbounded. Defaults: `MaxTurns` 8,
+`WorkerTimeout` 5m, `MaxWorkers` 5, `Concurrency` 3, `Memory` noop.
+
+Endpoint overrides are validated with the exact `CHIRON_GEMINI_BASE_URL`
+rule (C1-SEC-1): an absolute `https://` URL, `http://` admitted for
+loopback hosts only. Credentials travel to whatever endpoint is
+configured, so an unvalidated override is a key-exfiltration and SSRF
+channel (CWE-918, CWE-319). The scheme check is mirrored in
+`internal/config` rather than shared with the `internal/cli` copy, because
+`internal/cli` imports `internal/config` and the reverse import would
+cycle; both are kept in step by comment. Key references, when set, must be
+`secret://` and the "literal key" error never echoes the value, matching
+the `api_key_ref` rule. Endpoint and key fields are optional at the config
+layer (a later wave resolves and requires them); the caps are validated
+eagerly.
+
+Wave 3 prefers config fields to new environment variables for the model
+and search overrides — the endpoints are per-run research configuration,
+not process-wide test hooks like `CHIRON_GEMINI_BASE_URL`. No new
+security-sensitive env var is added; `AGENTS.md` records the `Fleet`
+endpoint/key fields as security-sensitive configuration on the same
+rationale (credentials are sent to the configured endpoint).
