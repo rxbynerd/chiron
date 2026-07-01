@@ -631,3 +631,81 @@ not process-wide test hooks like `CHIRON_GEMINI_BASE_URL`. No new
 security-sensitive env var is added; `AGENTS.md` records the `Fleet`
 endpoint/key fields as security-sensitive configuration on the same
 rationale (credentials are sent to the configured endpoint).
+
+## 2026-07-01 — Standard-model adapter: OpenAI-compatible Chat Completions
+
+Wave 3 needs a model substrate for the in-process research lead and workers
+(docs/V2-RESEARCH-AGENT §5). `internal/researcher/fleet/model` is a small,
+hand-rolled `net/http` client for one standard frontier model. No vendor AI
+SDK; standard library `net/http` + `encoding/json` only. No new dependency.
+
+**Wire choice: minimal OpenAI-compatible Chat Completions, not a full
+Responses adapter.** The adapter targets the bare `POST /chat/completions`
+request/response: a `model`, a `messages` array of `{role, content}`, an
+optional `max_tokens`, and an optional `response_format` for structured
+output; the reply is read from `choices[0].message.content`,
+`choices[0].finish_reason`, and `usage`. This satisfies the "one standard
+frontier model" deliverable while staying inside the V2-RESEARCH-AGENT
+non-negotiable "no full OpenAI Responses adapter in Chiron": the Responses
+API's item/output/tool-call surface, streaming event taxonomy, and
+stateful conversation objects are all absent. All wire structs are
+unexported and internal to the package; callers see only `Request`,
+`Response`, `Usage`, `Message`/`Role`, and `Generate`. Adding provider
+surface beyond what the lead/worker need would re-open this decision.
+
+**Base-URL/path convention.** `Options.Endpoint` is a base URL (e.g.
+`https://api.openai.com/v1`); the client appends `/chat/completions`. This
+mirrors the Gemini adapter's `BaseURL` treatment and lets tests point at an
+`httptest.Server` root. Auth is `Authorization: Bearer <key>` header only —
+never a URL, query, log, error, or trace. `Options.APIKey` is the
+already-resolved literal value; this adapter never dereferences `secret://`
+(resolution stays at the CLI composition root), and it does not import
+`internal/secret` for resolution — only `secret.Scrub` for diagnostics.
+
+**Structured output is provider-native, via a `Request.JSONSchema` field.**
+Setting it (with `SchemaName`) emits `response_format: {type: json_schema,
+json_schema: {name, schema, strict: true}}`; `Response.Content` is then the
+JSON string the model returns, which the caller parses. A single `Generate`
+method covers both text and structured paths so the hardening lives in one
+place; the lead's decompose/cite calls set the field, worker
+reasoning/synthesis calls leave it nil.
+
+**No auto-retry of the paid POST.** An ambiguous 5xx may already have billed
+a model turn, so `Generate` makes exactly one attempt — the same reasoning
+the Gemini adapter applies to `POST /interactions`. This adapter only POSTs,
+so there is no retry path at all (contrast the idempotent GETs in
+`internal/interactions`, which do retry). A test asserts request count == 1
+on a 5xx.
+
+**Duplicated hardening is accepted pending a shared helper.** Three pieces
+of security logic are reimplemented here rather than shared:
+`allowedEndpointScheme` (absolute `https://`, `http://` loopback only) is
+copied from `internal/config` / `internal/cli` — the C3A precedent for the
+endpoint validator — because this seam cannot import the CLI/config layer
+without inverting the dependency; and `refuseCrossHostRedirects` +
+`readBounded` are reimplemented from `internal/interactions`, where they are
+unexported. Config already validates the endpoint, but the adapter
+re-validates in `New` because it is a reusable seam that must not trust its
+caller to have checked. Extracting a shared `internal/httpx` (or similar)
+helper for redirect policy, bounded reads, and the loopback scheme rule is
+deferred; when a third consumer lands it should be revisited.
+
+**Credential-scrub belt-and-braces.** The key is only ever in the
+`Authorization` header, so Chiron never puts it in a request body or URL.
+But a provider *error body* (a 401 in particular) can echo the submitted
+key back, and `secret.Scrub`'s high-entropy backstop is heuristic — an
+`sk-`-style key with structured segments can fall below its entropy bar. So
+diagnostics are scrubbed by exact match against the client's own key first,
+then through `secret.Scrub` for any other credential shape. A test feeds a
+401 body containing the key and asserts it is absent from the returned
+error.
+
+**Test fake shipped as exported package code, not a `_test.go` helper.**
+`FakeServer` (an `httptest.Server`-backed fake with scripted replies and
+request recording) lives in `fake.go` — non-test build — so the later
+worker and lead chunks can reuse one fake model transport for CI
+(docs/V2-RESEARCH-AGENT §8 requires a shared fake). The cost is that
+`net/http/httptest` becomes an import of the package's normal build; this is
+the deliberate trade for cross-chunk reuse of a single scripted transport,
+and the package is a test-support-heavy adapter. Callers own the fake's
+lifecycle (build at the call site, `defer Close`).
