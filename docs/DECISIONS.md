@@ -320,6 +320,11 @@ idempotent. A test pins "exactly one create attempt" on a 502.
 
 ## 2026-06-07 — Estimated cost is a tier-table planning figure
 
+> **Superseded in part** by the 2026-09-25 entry "Reported cost is priced
+> from usage": the tier midpoints described here remain the `--budget`
+> gate's pre-run figure, but `Usage.EstimatedCostGBP` — what the finished
+> run reports — is now priced from the run's own usage counters.
+
 `Usage.EstimatedCostGBP` is derived in `researcher/gemini/cost.go` from
 the per-tier USD envelope Google publishes (INTERACTIONS-API.md §7:
 deep-research $1.00–$3.00, deep-research-max $3.00–$7.00): the midpoint
@@ -1278,3 +1283,68 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-25 — Reported cost is priced from usage; the tier estimate is planning only
+
+> **Supersedes** the reporting half of "Estimated cost is a tier-table
+> planning figure" above. The tier table stands, but only where that
+> entry's own reasoning holds: ahead of the spend.
+
+Scope: the deep-research tiers (the Gemini adapter). The in-process
+worker already prices its own counters from the configured fleet rates
+("In-process worker loop: action schema, Wave 4 factoring, cost signal")
+and is unaffected.
+
+The v1 shape put one number in two jobs. The tier midpoint is a
+*pre-run* figure — it has to be, because the `--budget` gate decides
+before any usage exists — but it was also what the finished run
+reported, in the `cost_summary` event, the front matter and the
+`estimated_cost_gbp` metric. So every `deep-research-max` run reported
+£3.95, unchanged by what it consumed, printed beside the genuine token
+counters. Presented in that company a constant reads as a measurement,
+and the gap is not small: the run that prompted this reported £3.95
+against £3.43 of list-rate usage.
+
+The two figures are now separated by role. The planning estimate keeps
+the budget gate (and says "planning estimate" when it blocks a run).
+The finished run reports `derivedCostGBP(usage)`: the counters the API
+returned, priced at published list rates.
+
+Holding a rate table at all is a reversal of this log's earlier "Chiron
+holds no pricing tables beyond this constant pair". The earlier
+position deferred pricing to Stint, which remains right for *billing* —
+invoicing, live FX, attribution. It is the wrong place to defer an
+estimate that Chiron already has every input for: it reads the usage
+counters, it reports them, and refusing to price them does not avoid
+publishing a cost figure — it only means publishing a worse one.
+
+Rate choice and its evidence: the deep research agents have no rate
+card of their own; Google bills them at "standard Gemini list rates,
+including input, output, and intermediate input / reasoning tokens
+generated during agentic loops", plus tools at their own rates. Chiron
+prices at the paid-tier card for `gemini-3.1-pro-preview` — the model
+this adapter already pins for follow-up Q&A. The evidence that this is
+the right card is that it reproduces both published *cost* envelopes
+($1–3, $3–7) from the published *token* envelopes; `cost_test.go` pins
+that agreement, so a rate drift that breaks it fails a test instead of
+quietly shifting every figure Chiron prints. Thought tokens bill as
+output ("output, including thinking"), tool-use tokens as input,
+cached tokens as the cheaper subset of the input total, and every
+search is priced (the 5,000/month free allowance is an account-level
+balance Chiron cannot see, so assuming it would under-report).
+
+The rate card's higher >200k column is deliberately never used. Its
+threshold is per request; a research task issues many requests, each far
+smaller than the run's token total, so choosing the column from that
+total over-prices — enough that the `deep-research` envelope only fits
+at the standard column. The residual is that a run whose individual
+requests did cross 200k is under-reported, which is the acceptable
+direction here: this figure reports a finished run, while the figure
+that guards spend is the conservative planning estimate.
+
+Falling out of the change: `estimateForAgentID` is gone. Resumed
+interactions (`chiron get`) and follow-ups no longer need an estimate
+guessed from the wire agent id or hardcoded to zero — usage is on the
+resource, so both are priced like any other run, and an interaction
+that reports no usage costs zero rather than inheriting a tier constant
+it never earned.

@@ -115,9 +115,19 @@ front and centre:
 
 The estimates are the midpoints of Google's published per-tier USD
 envelopes ($1.00–$3.00 and $3.00–$7.00) converted at a **fixed planning
-rate** of 0.79 USD→GBP. They are pre-run planning figures for the budget
-gate and the report's front matter — not billing. Real pricing, live FX,
-and attribution belong to Stint.
+rate** of 0.79 USD→GBP. They are what the budget gate weighs before a
+run, because nothing measured exists yet.
+
+What a *finished* deep-research run reports — `estimated_cost_gbp` in
+the front matter, the `cost_summary` event and the metric of the same
+name — is not that constant. It prices the usage the API actually
+returned (input, cached, output, thought and tool-use tokens, plus
+searches) at Google's published list rates, so it moves with the run.
+Still an estimate, not a bill: it assumes the standard rate column and
+the public list price, ignores any account-level free allowance, and
+predates any discount. Invoicing, live FX and attribution belong to
+Stint. A worker run prices its tokens at the `--fleet-price-*` rates
+instead, and reports zero when none is set.
 
 - `--budget <gbp>` blocks the run client-side, before any interaction is
   created, when the tier's estimate exceeds the cap (exit code 4). The

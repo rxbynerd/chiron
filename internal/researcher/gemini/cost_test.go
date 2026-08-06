@@ -17,9 +17,9 @@ func TestPlanningEstimatesAreTierMidpoints(t *testing.T) {
 		{"", 0},
 		{"deep-research-ultra", 0},
 	}
-	for _, c := range cases {
-		if got := estimatedCostGBP(c.tier); got != c.want {
-			t.Errorf("estimatedCostGBP(%q) = %v, want %v", c.tier, got, c.want)
+	for _, tt := range cases {
+		if got := estimatedCostGBP(tt.tier); got != tt.want {
+			t.Errorf("estimatedCostGBP(%q) = %v, want %v", tt.tier, got, tt.want)
 		}
 	}
 }
@@ -59,13 +59,13 @@ func TestDerivedCostReproducesPublishedEnvelopes(t *testing.T) {
 			lowUSD: 3.00, hiUSD: 7.00,
 		},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			gbp := derivedCostGBP(c.usage)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			gbp := derivedCostGBP(tt.usage)
 			usd := gbp / usdToGBPPlanningRate
-			if usd < c.lowUSD || usd > c.hiUSD {
+			if usd < tt.lowUSD || usd > tt.hiUSD {
 				t.Errorf("derived cost = £%.2f (~$%.2f), outside the published $%.2f–$%.2f envelope",
-					gbp, usd, c.lowUSD, c.hiUSD)
+					gbp, usd, tt.lowUSD, tt.hiUSD)
 			}
 		})
 	}
@@ -105,11 +105,11 @@ func TestDerivedCostPricesEachCounterAtItsRate(t *testing.T) {
 		{"tool use bills as input", types.Usage{ToolUseTokens: 1_000_000}, 2.00},
 		{"searches", types.Usage{SearchCount: 1000}, 14.00},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			want := c.wantUSD * usdToGBPPlanningRate
-			if got := derivedCostGBP(c.usage); !within(got, want, 0.005) {
-				t.Errorf("cost = %v, want ~%v ($%.2f at the planning FX rate)", got, want, c.wantUSD)
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			want := tt.wantUSD * usdToGBPPlanningRate
+			if got := derivedCostGBP(tt.usage); !within(got, want, 0.005) {
+				t.Errorf("cost = %v, want ~%v ($%.2f at the planning FX rate)", got, want, tt.wantUSD)
 			}
 		})
 	}
