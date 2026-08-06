@@ -419,14 +419,16 @@ func (r *Researcher) Result(ctx context.Context, id string) (*types.Interaction,
 // chart images become Outputs, annotations become deduplicated
 // Citations, the usage block flattens into cost signals, and the
 // adapter contributes what the wire cannot — the original query, the
-// resolved tool set, the poll count, and the planning cost estimate.
+// resolved tool set, the poll count, and the cost estimate derived from
+// the reported usage.
 //
 // Query and tool set are recorded only for interactions this adapter
 // started: a resumed interaction (chiron get) ran with whatever was
 // requested at its creation, which the API does not echo back, and the
 // recorded set must be the used set — so it stays absent rather than
-// guessed. The estimate likewise falls back to the wire agent id for
-// resumed interactions.
+// guessed. The cost estimate needs no such fallback: it is priced from
+// the usage counters on the resource itself, so a resumed interaction
+// and a follow-up cost what they used, like any other run.
 func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 	out := &types.Interaction{
 		ID:           in.ID,
@@ -444,15 +446,12 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 	started, query := r.started, r.lastQuery
 	r.mu.Unlock()
 
-	estimate := r.estimate
 	if started {
 		out.Query = query
 		out.Tools = r.toolNames
 		if out.Agent == "" {
 			out.Agent = r.agentID
 		}
-	} else {
-		estimate = estimateForAgentID(in.Agent)
 	}
 	if in.Status.Terminal() {
 		out.CompletedAt = in.Updated
@@ -481,16 +480,20 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 	}
 
 	out.Usage = types.Usage{
-		InputTokens:      in.Usage.TotalInputTokens,
-		CachedTokens:     in.Usage.TotalCachedTokens,
-		OutputTokens:     in.Usage.TotalOutputTokens,
-		ToolUseTokens:    in.Usage.TotalToolUseTokens,
-		ThoughtTokens:    in.Usage.TotalThoughtTokens,
-		SearchCount:      searchCount(in.Usage.GroundingToolCount),
-		PollCount:        int(r.pollCount.Load()),
-		ReconnectCount:   int(r.reconnectCount.Load()),
-		EstimatedCostGBP: estimate,
+		InputTokens:    in.Usage.TotalInputTokens,
+		CachedTokens:   in.Usage.TotalCachedTokens,
+		OutputTokens:   in.Usage.TotalOutputTokens,
+		ToolUseTokens:  in.Usage.TotalToolUseTokens,
+		ThoughtTokens:  in.Usage.TotalThoughtTokens,
+		SearchCount:    searchCount(in.Usage.GroundingToolCount),
+		PollCount:      int(r.pollCount.Load()),
+		ReconnectCount: int(r.reconnectCount.Load()),
 	}
+	// Priced from the counters above, not from the tier: the planning
+	// estimate is a pre-run figure for the budget gate (cost.go), and
+	// reporting it as the finished run's cost would state the same
+	// number whatever the run actually consumed.
+	out.Usage.EstimatedCostGBP = derivedCostGBP(out.Usage)
 	return out
 }
 
