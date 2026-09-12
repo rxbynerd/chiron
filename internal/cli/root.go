@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rxbynerd/chiron/internal/secret"
+	"github.com/rxbynerd/chiron/internal/version"
 )
 
 // Execute runs the chiron command tree and returns the process exit
@@ -38,6 +39,7 @@ func NewRootCommand() *cobra.Command {
 		Long: `Chiron investigates a topic with a long-running research agent and
 returns a cited, structured Markdown report. It is research-only: it never
 mutates a workspace, runs no shell, and applies no edits.`,
+		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
