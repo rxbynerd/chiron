@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Audit backslash-adjacent HTML in citation titles
 agent: deep-research-preview-04-2026

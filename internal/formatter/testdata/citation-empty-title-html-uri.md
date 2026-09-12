@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Audit fallback link text against raw HTML
 agent: deep-research-preview-04-2026

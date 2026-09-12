@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/types"
+	"github.com/rxbynerd/chiron/internal/version"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files in testdata/")
@@ -452,6 +453,31 @@ func TestWebLinkDestination(t *testing.T) {
 				t.Errorf("webLinkDestination.Replace(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestMarkdownFormatVersionComment pins the provenance comment to the
+// chiron build version, independent of the golden fixtures (which all
+// build at the default "dev" version): a refresh script needs it as
+// the document's first line, matching what --version reports.
+func TestMarkdownFormatVersionComment(t *testing.T) {
+	old := version.Version
+	version.Version = "v9.9.9-test"
+	defer func() { version.Version = old }()
+
+	in := &types.Interaction{
+		ID:      "v1_version",
+		Status:  types.StatusCompleted,
+		Outputs: []types.Output{{Type: types.OutputText, Text: "Body."}},
+	}
+	got, err := NewMarkdown().Format(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+
+	want := "<!-- chiron-version: v9.9.9-test -->\n"
+	if !strings.HasPrefix(string(got.Markdown), want) {
+		t.Errorf("markdown does not start with provenance comment %q:\n%s", want, got.Markdown)
 	}
 }
 
