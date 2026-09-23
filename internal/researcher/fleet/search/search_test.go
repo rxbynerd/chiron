@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -344,10 +345,16 @@ func TestSearchEmptyQueryRejected(t *testing.T) {
 
 func TestSearchCallerContextDeadlineWins(t *testing.T) {
 	// A tighter caller deadline must fire even though RequestTimeout is
-	// generous — WithTimeout keeps whichever is sooner.
+	// generous — WithTimeout keeps whichever is sooner. net/http cancels
+	// r.Context() on client disconnect only once the body has been read, so
+	// the handler drains it first; the 2s backstop keeps server.Close from
+	// hanging if cancellation is never observed.
+	aborted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		select {
 		case <-r.Context().Done():
+			close(aborted)
 		case <-time.After(2 * time.Second):
 		}
 	}))
@@ -364,6 +371,11 @@ func TestSearchCallerContextDeadlineWins(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Errorf("Search took %s — the caller's 100ms deadline should have won over the 10s RequestTimeout", elapsed)
+	}
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		t.Error("the server never observed the request being aborted")
 	}
 }
 

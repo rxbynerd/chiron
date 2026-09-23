@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -577,12 +578,15 @@ func TestErrorNeverLeaksKey(t *testing.T) {
 func TestCallerContextDeadlineWins(t *testing.T) {
 	// A tighter caller-supplied deadline must fire even though the client's
 	// RequestTimeout is generous — WithTimeout keeps whichever is sooner.
-	// The handler either observes the request being cancelled (the client
-	// aborted) or, as a backstop, returns after a bounded sleep — so the
-	// server can always Close without deadlocking on a stuck handler.
+	// net/http cancels r.Context() on client disconnect only once the body
+	// has been read, so the handler drains it first; the 2s backstop keeps
+	// server.Close from hanging if cancellation is never observed.
+	aborted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
 		select {
 		case <-r.Context().Done():
+			close(aborted)
 		case <-time.After(2 * time.Second):
 		}
 	}))
@@ -601,6 +605,11 @@ func TestCallerContextDeadlineWins(t *testing.T) {
 	// RequestTimeout (and comfortably under the handler's 2s backstop).
 	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Errorf("Generate took %s — the caller's 100ms deadline should have won over the 10s RequestTimeout", elapsed)
+	}
+	select {
+	case <-aborted:
+	case <-time.After(time.Second):
+		t.Error("the server never observed the request being aborted")
 	}
 }
 
