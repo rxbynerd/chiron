@@ -285,16 +285,22 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 		"interaction_id", id, "ref", loc)
 }
 
-// rememberedFinding is the Memory saved for a finding: a provenance header,
-// the objective, the answer, and the cited locators, scrubbed and bounded to
+// rememberedFinding is the Memory saved for a finding: the objective on one
+// line, a provenance line, the objective in full when it does not fit on that
+// line, the answer, and the cited locators, scrubbed and bounded to
 // maxRememberBytes. The header leads the text because a store may keep only
-// the text, dropping the labels, and a reader must still see that the memory
+// the text, dropping the labels, and name a memory from its first line: the
+// first line must be the objective and the second must say that the memory
 // is an unreviewed worker finding and which run produced it.
 func rememberedFinding(id, objective string, f Finding, saved time.Time) memory.Memory {
+	objective = secret.Scrub(objective)
+	name := boundRunes(oneLine(objective), maxRememberName)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Chiron worker finding\ninteraction: %s\nsaved: %s\n\n", id, saved.UTC().Format(time.RFC3339))
-	b.WriteString(strings.TrimSpace(objective))
-	b.WriteString("\n\n")
+	fmt.Fprintf(&b, "%s\n(Chiron worker finding; interaction %s; saved %s)\n\n", name, id, saved.UTC().Format(time.RFC3339))
+	if full := strings.TrimSpace(objective); full != name {
+		b.WriteString(full)
+		b.WriteString("\n\n")
+	}
 	b.WriteString(strings.TrimSpace(f.Text))
 	if len(f.Citations) > 0 {
 		b.WriteString("\n\nSources:")
@@ -306,7 +312,7 @@ func rememberedFinding(id, objective string, f Finding, saved time.Time) memory.
 	return memory.Memory{
 		Text: boundBytes(secret.Scrub(b.String()), maxRememberBytes),
 		Meta: memory.ArtifactMeta{
-			Name: boundRunes(oneLine(secret.Scrub(objective)), maxRememberName),
+			Name: name,
 			Labels: map[string]string{
 				"kind":           "fact",
 				"agent":          agentWorker,

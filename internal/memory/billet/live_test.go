@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestLiveBillet(t *testing.T) {
 	const (
 		ns    = memory.Namespace("chiron-interop")
 		fact1 = "The Chiron interop canary is saffron-coloured."
-		fact2 = "Billet stores memories for the Equestrianism suite."
+		fact2 = "Billet stores memories for the Equestrianism suite.\n(Chiron worker finding; interaction wkr_interop; saved 2026-09-24T00:00:00Z)"
 	)
 	fact := memory.ArtifactMeta{Labels: map[string]string{"kind": "fact"}}
 	ref1, err := c.Remember(ctx, ns, memory.Memory{Text: fact1, Meta: fact})
@@ -96,6 +97,19 @@ func TestLiveBillet(t *testing.T) {
 	}
 	if hit.Score <= 0 {
 		t.Errorf("score = %v, want a positive match score", hit.Score)
+	}
+
+	// A multi-line memory recalls under its first line, which is why a saved
+	// finding leads with the objective.
+	hits, err = c.Recall(ctx, ns, memory.Query{Text: "Equestrianism suite", Limit: 1})
+	if err != nil {
+		t.Fatalf("Recall fact 2: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Reference != ref2 {
+		t.Fatalf("got %+v, want the suite fact", hits)
+	}
+	if first, _, _ := strings.Cut(fact2, "\n"); hits[0].Memory.Text != fact2 || hits[0].Memory.Meta.Name != first {
+		t.Errorf("hit memory = %+v, want the full text and the first line as name", hits[0].Memory)
 	}
 }
 

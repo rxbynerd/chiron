@@ -352,24 +352,24 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
 `rememberFinding` when `deps.Remember != nil` and the finding is
 `Completed` with non-empty text:
 
-- `Memory.Text` is: a provenance header, the objective, a blank line, the
-  answer and, when the finding has citations, a blank line, `Sources:` and
-  one locator per line; the whole bounded to `maxRememberBytes` (32 KiB,
-  rune-safe, `[truncated]` marker). The header comes first, so truncation
-  never removes it, and reads:
+- `Memory.Text` is: the objective on one line (the same value as
+  `Meta.Name`), a provenance line, a blank line, the objective in full when
+  it does not fit on the first line, the answer and, when the finding has
+  citations, a blank line, `Sources:` and one locator per line; the whole
+  bounded to `maxRememberBytes` (32 KiB, rune-safe, `[truncated]` marker).
+  The header comes first, so truncation never removes it, and reads:
 
   ```text
-  Chiron worker finding
-  interaction: wkr_<hex>
-  saved: <RFC 3339 UTC time>
+  <objective>
+  (Chiron worker finding; interaction wkr_<hex>; saved <RFC 3339 UTC time>)
 
   ```
 
-  It is in the text because Billet keeps only content and kind: without it
-  a saved finding, built from public-web content, would be
-  indistinguishable from a human-written memory to every other consumer of
-  the store. Billet names a recalled memory from its first line, so a saved
-  finding recalls under the name "Chiron worker finding".
+  The provenance is in the text because Billet keeps only content and
+  kind: without it a saved finding, built from public-web content, would
+  be indistinguishable from a human-written memory to every other consumer
+  of the store. The objective leads because Billet names a recalled memory
+  from its first line, so a saved finding recalls under its objective.
   `Meta.Name` is the objective bounded to 120 runes; `Labels` carry
   `kind: fact`, `agent: worker`, `interaction_id`, for stores that keep
   them.

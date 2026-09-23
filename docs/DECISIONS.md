@@ -1222,8 +1222,12 @@ and the `recalls` front-matter field make recall visible.
 
 **Save-back is an opt-in write to the suite's memory store.** With
 `fleet.knowledge_remember` (Billet only), a Completed finding with a
-non-empty answer is saved as one bounded memory: the objective, the answer
-and the cited locators, scrubbed and cut to 32 KiB. It is named on the
+non-empty answer is saved as one bounded memory: the objective on the
+first line, a provenance line naming the run, the answer and the cited
+locators, scrubbed and cut to 32 KiB. The provenance lives in the text
+because Billet keeps only content and kind, so the `agent` and
+`interaction_id` labels do not survive there; the objective leads because
+Billet names a memory from its first line. It is named on the
 Interaction's tool list as `knowledge_remember`. This qualifies
 `docs/V2-RESEARCH-AGENT.md` §1 ("exactly two read-only network tools",
 "external web only") and V2-AMENDS amend 6, both amended in place with a

@@ -110,8 +110,8 @@ func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
 	if len(saved) != 1 {
 		t.Fatalf("saved contents = %d, want exactly one save-back", len(saved))
 	}
-	if !strings.HasPrefix(saved[0], "Chiron worker finding\ninteraction: wkr_") {
-		t.Errorf("saved content lacks the provenance header:\n%s", saved[0])
+	if !strings.HasPrefix(saved[0], "why is the sky blue\n(Chiron worker finding; interaction wkr_") {
+		t.Errorf("saved content lacks the objective line and the provenance line:\n%s", saved[0])
 	}
 	for _, want := range []string{"why is the sky blue", "Rayleigh scattering"} {
 		if !strings.Contains(saved[0], want) {

@@ -447,12 +447,16 @@ func TestWorkerRemembersCompletedFinding(t *testing.T) {
 	s := saved[0]
 	header, body, _ := strings.Cut(s.mem.Text, "\n\n")
 	lines := strings.Split(header, "\n")
-	if len(lines) != 3 || lines[0] != "Chiron worker finding" || lines[1] != "interaction: "+in.ID || !strings.HasPrefix(lines[2], "saved: ") {
-		t.Errorf("saved text lacks the provenance header:\n%s", s.mem.Text)
-	} else if at, err := time.Parse(time.RFC3339, strings.TrimPrefix(lines[2], "saved: ")); err != nil || at.Location() != time.UTC || time.Since(at) > time.Minute {
-		t.Errorf("provenance timestamp %q is not a recent RFC 3339 UTC time: %v", lines[2], err)
+	prefix := "(Chiron worker finding; interaction " + in.ID + "; saved "
+	if len(lines) != 2 || lines[0] != "which PHY vendor did we choose" || !strings.HasPrefix(lines[1], prefix) || !strings.HasSuffix(lines[1], ")") {
+		t.Errorf("saved text lacks the objective line and the provenance line:\n%s", s.mem.Text)
+	} else {
+		stamp := strings.TrimSuffix(strings.TrimPrefix(lines[1], prefix), ")")
+		if at, err := time.Parse(time.RFC3339, stamp); err != nil || at.Location() != time.UTC || time.Since(at) > time.Minute {
+			t.Errorf("provenance timestamp %q is not a recent RFC 3339 UTC time: %v", stamp, err)
+		}
 	}
-	wantBody := "which PHY vendor did we choose\n\n# Vendors\n\nVendor A.\n\nSources:\nhttps://example.org/phy"
+	wantBody := "# Vendors\n\nVendor A.\n\nSources:\nhttps://example.org/phy"
 	if body != wantBody {
 		t.Errorf("saved text after the header = %q, want %q", body, wantBody)
 	}
@@ -592,8 +596,9 @@ func TestWorkerAwaitKeepsFindingDuringSlowSave(t *testing.T) {
 	}
 }
 
-// TestRememberedFindingBounds: the saved content starts with the provenance
-// header, is scrubbed and is cut to maxRememberBytes on a rune boundary with
+// TestRememberedFindingBounds: the saved content starts with the objective
+// line and the provenance line, carries the full objective when it does not
+// fit on one line, is scrubbed and is cut to maxRememberBytes on a rune boundary with
 // the marker; the name is the objective on one line, cut to maxRememberName
 // runes.
 func TestRememberedFindingBounds(t *testing.T) {
@@ -604,8 +609,8 @@ func TestRememberedFindingBounds(t *testing.T) {
 	saved := time.Date(2026, 9, 23, 10, 4, 5, 0, time.FixedZone("BST", 3600))
 	m := rememberedFinding("wkr_x", objective, f, saved)
 
-	if want := "Chiron worker finding\ninteraction: wkr_x\nsaved: 2026-09-23T09:04:05Z\n\nvendors\n"; !strings.HasPrefix(m.Text, want) {
-		t.Errorf("a truncated finding lost its provenance header: %.120q", m.Text)
+	if want := m.Meta.Name + "\n(Chiron worker finding; interaction wkr_x; saved 2026-09-23T09:04:05Z)\n\nvendors\nand "; !strings.HasPrefix(m.Text, want) {
+		t.Errorf("a truncated finding lost its provenance header: %.160q", m.Text)
 	}
 	if len(m.Text) > maxRememberBytes || !strings.HasSuffix(m.Text, truncatedMarker) || !utf8.ValidString(m.Text) {
 		t.Errorf("text is %d bytes (valid UTF-8 %v), want at most %d ending in the marker", len(m.Text), utf8.ValidString(m.Text), maxRememberBytes)
