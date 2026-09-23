@@ -49,6 +49,8 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error) {
 	if err != nil {
 		return Page{}, fmt.Errorf("fetch: building request for %s: %v", sanitizeURL(u), err)
 	}
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", acceptHeader)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

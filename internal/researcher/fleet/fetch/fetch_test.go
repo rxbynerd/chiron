@@ -145,6 +145,48 @@ func TestFetchHappyPath(t *testing.T) {
 	}
 }
 
+func TestFetchSendsIdentifyingHeaders(t *testing.T) {
+	// Every request, redirect hops included, identifies Chiron (or the
+	// configured agent) and prefers textual content.
+	tests := []struct {
+		name      string
+		userAgent string
+		want      string
+	}{
+		{"default agent", "", defaultUserAgent},
+		{"configured agent", "chiron-test/1", "chiron-test/1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			type headers struct{ userAgent, accept string }
+			seen := make(chan headers, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case seen <- headers{r.UserAgent(), r.Header.Get("Accept")}:
+				default:
+				}
+				if r.URL.Path == "/start" {
+					http.Redirect(w, r, "/final", http.StatusFound)
+					return
+				}
+				_, _ = w.Write([]byte("ok"))
+			}))
+			defer server.Close()
+
+			c := newClient(t, func(o *Options) { o.UserAgent = tt.userAgent })
+			if _, err := c.Fetch(context.Background(), server.URL+"/start"); err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			want := headers{tt.want, acceptHeader}
+			for hop := range 2 {
+				if got := <-seen; got != want {
+					t.Errorf("request %d headers = %+v, want %+v", hop, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestFetchLoopbackRefusedWithoutAllow(t *testing.T) {
 	// Without AllowLoopback the SSRF guard refuses a loopback destination
 	// before any connection is made.

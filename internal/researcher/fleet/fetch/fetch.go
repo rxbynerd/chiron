@@ -32,8 +32,12 @@ import (
 const (
 	defaultRequestTimeout  = 30 * time.Second
 	defaultMaxContentBytes = 8 << 20
+	defaultUserAgent       = "chiron/2 (+https://github.com/rxbynerd/chiron; research-only web_fetch)"
 	maxRedirects           = 5
 )
+
+// acceptHeader prefers the textual formats the worker can read.
+const acceptHeader = "text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.5"
 
 // Options configures a Client.
 type Options struct {
@@ -57,6 +61,9 @@ type Options struct {
 	// partial page text is still useful (docs/DECISIONS.md), unlike the model
 	// adapter where oversize is an error.
 	MaxContentBytes int64
+	// UserAgent is sent on every request. Empty uses a descriptive Chiron
+	// agent string.
+	UserAgent string
 	// AllowLoopback, when true, permits fetching loopback and unspecified
 	// destinations (127.0.0.0/8, ::1, 0.0.0.0, ::). It exists ONLY so tests
 	// can reach loopback httptest servers; production configuration must
@@ -74,6 +81,7 @@ type Client struct {
 	guard           guard
 	requestTimeout  time.Duration
 	maxContentBytes int64
+	userAgent       string
 }
 
 // New builds a Client. It fails only if Options.HTTPClient has a transport
@@ -111,12 +119,17 @@ func New(opts Options) (*Client, error) {
 	if maxContentBytes <= 0 {
 		maxContentBytes = defaultMaxContentBytes
 	}
+	userAgent := opts.UserAgent
+	if userAgent == "" {
+		userAgent = defaultUserAgent
+	}
 
 	return &Client{
 		httpClient:      &hc,
 		guard:           g,
 		requestTimeout:  requestTimeout,
 		maxContentBytes: maxContentBytes,
+		userAgent:       userAgent,
 	}, nil
 }
 
