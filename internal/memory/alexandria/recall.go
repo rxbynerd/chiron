@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -21,8 +22,22 @@ const (
 	maxErrorBodyBytes  = 4 << 10
 	maxExcerptBytes    = 512
 	maxRetryAfterBytes = 64
-	unitFragment       = "fragment"
+	maxTitleRunes      = 200
+	maxSnippetBytes    = 4 << 10
 	mediaTypeMarkdown  = "text/markdown"
+	truncatedMarker    = " [truncated]"
+)
+
+// Alexandria's ref grammar: a fragment is kb://fragment/<uuid>; a source is
+// kb://source/<uuid> with an optional line (#L<a>-L<b>) or character
+// (#C<a>+<n>, #C<a>-C<b>) locator. A hit whose ref does not match is dropped,
+// so a store cannot make an arbitrary URL citable.
+const uuidPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`
+
+var (
+	fragmentRef = regexp.MustCompile(`^kb://fragment/(` + uuidPattern + `)$`)
+	sourceRef   = regexp.MustCompile(`^kb://source/` + uuidPattern +
+		`(?:#(?:L[0-9]{1,9}-L[0-9]{1,9}|C[0-9]{1,9}\+[0-9]{1,9}|C[0-9]{1,9}-C[0-9]{1,9}))?$`)
 )
 
 // SearchResponse models Alexandria's GET /v1/search response document, as
@@ -146,15 +161,18 @@ func (c *Client) limit(requested int) int {
 }
 
 // mapResults maps the first n usable hits onto memory.Recalled per
-// docs/KNOWLEDGE.md §2. A hit without a ref has no stable handle and is
-// skipped.
+// docs/KNOWLEDGE.md §2. A hit whose ref is missing or outside Alexandria's
+// ref grammar has no trustworthy handle and is skipped before the limit is
+// applied. Titles and snippets are bounded here so no single hit can crowd
+// out the rest.
 func (c *Client) mapResults(ns memory.Namespace, env searchEnvelope, n int) []memory.Recalled {
 	out := make([]memory.Recalled, 0, min(n, len(*env.Results)))
 	for _, r := range *env.Results {
 		if len(out) == n {
 			break
 		}
-		if r.Ref == "" {
+		loc, ok := c.locator(r.Ref)
+		if !ok {
 			continue
 		}
 		space := memory.Namespace(r.Space)
@@ -178,12 +196,12 @@ func (c *Client) mapResults(ns memory.Namespace, env searchEnvelope, n int) []me
 			Reference: memory.Reference{
 				Namespace: space,
 				Digest:    r.Ref,
-				Locator:   c.locator(r),
+				Locator:   loc,
 			},
 			Memory: memory.Memory{
-				Text: r.Snippet,
+				Text: boundBytes(r.Snippet, maxSnippetBytes),
 				Meta: memory.ArtifactMeta{
-					Name:      r.Title,
+					Name:      boundRunes(r.Title, maxTitleRunes),
 					MediaType: mediaTypeMarkdown,
 					Labels:    labels,
 				},
@@ -194,13 +212,41 @@ func (c *Client) mapResults(ns memory.Namespace, env searchEnvelope, n int) []me
 	return out
 }
 
-// locator is the web UI route for a fragment hit and the ref itself for a
-// chunk (or any hit whose fragment id is missing).
-func (c *Client) locator(r SearchResult) string {
-	if r.Unit == unitFragment && r.ID != "" {
-		return c.origin + "/f/" + url.PathEscape(r.ID)
+// locator validates ref and returns the hit's locator: the web UI route for
+// a fragment ref, built from the validated UUID alone, and the ref itself for
+// a source ref. ok is false for any other ref.
+func (c *Client) locator(ref string) (loc string, ok bool) {
+	if m := fragmentRef.FindStringSubmatch(ref); m != nil {
+		return c.origin + "/f/" + m[1], true
 	}
-	return r.Ref
+	if sourceRef.MatchString(ref) {
+		return ref, true
+	}
+	return "", false
+}
+
+// boundBytes cuts s to at most maxBytes, marker included, on a rune boundary.
+func boundBytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes - len(truncatedMarker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + truncatedMarker
+}
+
+// boundRunes cuts s to at most n runes.
+func boundRunes(s string, n int) string {
+	i := 0
+	for pos := range s {
+		if i == n {
+			return s[:pos]
+		}
+		i++
+	}
+	return s
 }
 
 func setLabel(labels map[string]string, key, value string) {

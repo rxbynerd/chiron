@@ -92,10 +92,10 @@ Field mapping for a `Recalled` hit:
 | `memory` field | Billet `search_memory` record | Alexandria `GET /v1/search` result |
 | --- | --- | --- |
 | `Reference.Namespace` | the `Namespace` passed to `Recall` (Billet binds its namespace server-side; the value is informational) | the `space` field of the result, else the `Namespace` passed |
-| `Reference.Digest` | `memory_id` | `ref` (`kb://fragment/<uuid>` or `kb://source/<uuid>#L..`) |
-| `Reference.Locator` | `billet://memory/<memory_id>` | `<endpoint origin>/f/<id>` for a fragment hit (the web UI route); the `ref` itself for a chunk hit |
-| `Memory.Text` | `content` | `snippet` |
-| `Memory.Meta.Name` | first line of `content`, bounded to 120 runes (Billet has no title) | `title` |
+| `Reference.Digest` | `memory_id` | `ref`, validated: `kb://fragment/<uuid>`, or `kb://source/<uuid>` with an optional `#L<a>-L<b>`, `#C<a>+<n>` or `#C<a>-C<b>` locator; any other ref drops the hit |
+| `Reference.Locator` | `billet://memory/<memory_id>` | `<endpoint origin>/f/<uuid>` for a fragment ref (the web UI route, built from the ref's UUID alone); the `ref` itself for a source ref |
+| `Memory.Text` | `content` | `snippet`, bounded to 4 KiB (rune-safe, `[truncated]` marker) |
+| `Memory.Meta.Name` | first line of `content`, bounded to 120 runes (Billet has no title) | `title`, bounded to 200 runes |
 | `Memory.Meta.MediaType` | `text/plain` | `text/markdown` |
 | `Memory.Meta.Labels` | `created_at` | `kind`, `unit`, `space`, `stale` ("true" only when set), `updated_at` when present |
 | `Score` | `score` | `score` |
@@ -246,7 +246,10 @@ var _ memory.Recaller = (*Client)(nil)
   `Retry-After` value in the error text; `401/403` errors never echo the
   token; the response is decoded strictly enough to reject a non-object.
 - Results are mapped per §2. Both `fragment` and `chunk` units are
-  returned; the first `DefaultLimit` (or `Query.Limit`) results are kept.
+  returned; a hit whose `ref` is outside Alexandria's ref grammar is dropped
+  before the limit applies, so the store cannot make an arbitrary URL
+  citable; the first `DefaultLimit` (or `Query.Limit`) remaining results are
+  kept.
   `degraded` is surfaced as `Labels["degraded"]` on every hit so the worker
   transcript can say the store fell back to lexical search.
 - No `Rememberer`: `kb_write_fragment` needs a citation model Chiron does

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 )
@@ -127,12 +128,8 @@ func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
 			},
 			{Ref: "", Unit: "chunk", Snippet: "no handle"},
 			{
-				Ref: "kb://fragment/weird", Unit: "fragment", ID: "a/../b?c", Space: "team-notes",
-				Kind: "fact", Snippet: "escaped", Score: 0.1,
-			},
-			{
-				Ref: "kb://fragment/no-id", Unit: "fragment", Space: "team-notes",
-				Kind: "fact", Snippet: "no id", Score: 0.05,
+				Ref: "kb://fragment/33333333-3333-3333-3333-333333333333", Unit: "fragment", ID: "a/../b?c",
+				Space: "team-notes", Kind: "fact", Snippet: "id ignored", Score: 0.1,
 			},
 		},
 	})
@@ -183,32 +180,17 @@ func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
 		{
 			Reference: memory.Reference{
 				Namespace: "team-notes",
-				Digest:    "kb://fragment/weird",
-				Locator:   fake.URL() + "/f/a%2F..%2Fb%3Fc",
+				Digest:    "kb://fragment/33333333-3333-3333-3333-333333333333",
+				Locator:   fake.URL() + "/f/33333333-3333-3333-3333-333333333333",
 			},
 			Memory: memory.Memory{
-				Text: "escaped",
+				Text: "id ignored",
 				Meta: memory.ArtifactMeta{
 					MediaType: "text/markdown",
 					Labels:    map[string]string{"kind": "fact", "unit": "fragment", "space": "team-notes"},
 				},
 			},
 			Score: 0.1,
-		},
-		{
-			Reference: memory.Reference{
-				Namespace: "team-notes",
-				Digest:    "kb://fragment/no-id",
-				Locator:   "kb://fragment/no-id",
-			},
-			Memory: memory.Memory{
-				Text: "no id",
-				Meta: memory.ArtifactMeta{
-					MediaType: "text/markdown",
-					Labels:    map[string]string{"kind": "fact", "unit": "fragment", "space": "team-notes"},
-				},
-			},
-			Score: 0.05,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -234,6 +216,83 @@ func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
 		if got := r.Query.Get(k); got != v {
 			t.Errorf("query %s = %q, want %q", k, got, v)
 		}
+	}
+}
+
+// TestRecallRefGrammar: only refs in Alexandria's grammar become hits; any
+// other ref, a hostile URL included, is dropped before the limit applies, so
+// it never reaches a Recalled and never displaces a valid hit.
+func TestRecallRefGrammar(t *testing.T) {
+	const id = "0f2e4d6c-1111-2222-3333-444455556666"
+	for _, tt := range []struct {
+		name string
+		ref  string
+		ok   bool
+	}{
+		{"fragment", "kb://fragment/" + id, true},
+		{"source", "kb://source/" + id, true},
+		{"source lines", "kb://source/" + id + "#L10-L20", true},
+		{"source characters by length", "kb://source/" + id + "#C120+40", true},
+		{"source character range", "kb://source/" + id + "#C120-C160", true},
+		{"https URL", "https://attacker.example/phish?x=1", false},
+		{"billet locator", "billet://memory/m1", false},
+		{"fragment not a UUID", "kb://fragment/weird", false},
+		{"fragment with a path", "kb://fragment/" + id + "/../x", false},
+		{"fragment with a locator", "kb://fragment/" + id + "#L1-L2", false},
+		{"uppercase UUID", "kb://fragment/0F2E4D6C-1111-2222-3333-444455556666", false},
+		{"source with a query", "kb://source/" + id + "?x=1", false},
+		{"source with a free-form locator", "kb://source/" + id + "#<img>", false},
+		{"source with half a line range", "kb://source/" + id + "#L10", false},
+		{"unknown kind", "kb://space/" + id, false},
+		{"leading space", " kb://fragment/" + id, false},
+		{"trailing newline", "kb://fragment/" + id + "\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const valid = "kb://source/22222222-2222-2222-2222-222222222222#L1-L2"
+			fake := NewFakeServer(SearchResponse{Results: []SearchResult{
+				{Ref: tt.ref, Unit: "chunk", ID: id, Title: "candidate", Snippet: "candidate"},
+				{Ref: valid, Unit: "chunk", Title: "valid"},
+			}})
+			defer fake.Close()
+
+			got, err := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "x", Limit: 1})
+			if err != nil {
+				t.Fatalf("Recall: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("hits = %d, want 1", len(got))
+			}
+			if accepted := got[0].Reference.Digest == tt.ref; accepted != tt.ok {
+				t.Errorf("ref %q accepted = %v, want %v (got %+v)", tt.ref, accepted, tt.ok, got[0].Reference)
+			}
+			if !tt.ok && got[0].Reference.Locator != valid {
+				t.Errorf("the rejected hit displaced the valid one: %+v", got[0].Reference)
+			}
+		})
+	}
+}
+
+// TestRecallBoundsTitleAndSnippet: a hit's title is cut to maxTitleRunes and
+// its snippet to maxSnippetBytes, both on rune boundaries.
+func TestRecallBoundsTitleAndSnippet(t *testing.T) {
+	fake := NewFakeServer(SearchResponse{Results: []SearchResult{{
+		Ref:     "kb://source/22222222-2222-2222-2222-222222222222",
+		Unit:    "chunk",
+		Title:   strings.Repeat("ü", 10<<10),
+		Snippet: strings.Repeat("é", 64<<10),
+	}}})
+	defer fake.Close()
+
+	got, err := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "x"})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Recall = %d hits, %v; want 1", len(got), err)
+	}
+	m := got[0].Memory
+	if n := utf8.RuneCountInString(m.Meta.Name); n != maxTitleRunes {
+		t.Errorf("title is %d runes, want %d", n, maxTitleRunes)
+	}
+	if len(m.Text) > maxSnippetBytes || !utf8.ValidString(m.Text) || !strings.HasSuffix(m.Text, truncatedMarker) {
+		t.Errorf("snippet is %d bytes (valid UTF-8 %v), want at most %d ending in the marker", len(m.Text), utf8.ValidString(m.Text), maxSnippetBytes)
 	}
 }
 
@@ -623,8 +682,8 @@ func TestRecallStrictDecode(t *testing.T) {
 		{name: "null results", body: `{"results":null}`, wantErr: "no results array"},
 		{name: "results not an array", body: `{"results":{}}`, wantErr: "decoding response"},
 		{name: "trailing data", body: `{"results":[]} {}`, wantErr: "decoding response"},
-		{name: "unknown fields ignored", body: `{"results":[{"ref":"kb://fragment/a","unit":"fragment","id":"a","reranked":true,"contradicted_by":[{"ref":"kb://fragment/b"}],"citations":[{"ref":"kb://source/c","verified":true}]}],"next_cursor":null,"usage":{"tokens":10},"space_context":{"slug":"a"}}`, wantHits: 1},
-		{name: "null optional fields", body: `{"results":[{"ref":"kb://fragment/a","unit":"fragment","id":"a","title":null,"updated_at":null,"stale":null,"score":null}],"degraded":null}`, wantHits: 1},
+		{name: "unknown fields ignored", body: `{"results":[{"ref":"kb://fragment/0f2e4d6c-1111-2222-3333-444455556666","unit":"fragment","id":"a","reranked":true,"contradicted_by":[{"ref":"kb://fragment/b"}],"citations":[{"ref":"kb://source/c","verified":true}]}],"next_cursor":null,"usage":{"tokens":10},"space_context":{"slug":"a"}}`, wantHits: 1},
+		{name: "null optional fields", body: `{"results":[{"ref":"kb://fragment/0f2e4d6c-1111-2222-3333-444455556666","unit":"fragment","id":"a","title":null,"updated_at":null,"stale":null,"score":null}],"degraded":null}`, wantHits: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
