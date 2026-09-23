@@ -52,6 +52,12 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Int("fleet-max-workers", d.Fleet.MaxWorkers, "maximum workers the fleet lead may dispatch")
 	fs.Int("fleet-concurrency", d.Fleet.Concurrency, "maximum workers running at once (<= fleet-max-workers)")
 	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q (%q is reserved and not yet implemented)", MemoryNoop, MemoryInMemory))
+	fs.String("fleet-knowledge-provider", "", fmt.Sprintf("knowledge store the worker recalls from: %q or %q (unset disables recall)", KnowledgeBillet, KnowledgeAlexandria))
+	fs.String("fleet-knowledge-endpoint", "", "knowledge store base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-knowledge-key-ref", "", "secret:// reference to the knowledge store key (never a literal; required for alexandria)")
+	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
+	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
+	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet only)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -142,6 +148,18 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.Concurrency, _ = fs.GetInt(f.Name)
 		case "fleet-memory":
 			cfg.Fleet.Memory = mustString(fs, f.Name)
+		case "fleet-knowledge-provider":
+			cfg.Fleet.KnowledgeProvider = mustString(fs, f.Name)
+		case "fleet-knowledge-endpoint":
+			cfg.Fleet.KnowledgeEndpoint = mustString(fs, f.Name)
+		case "fleet-knowledge-key-ref":
+			cfg.Fleet.KnowledgeKeyRef = mustString(fs, f.Name)
+		case "fleet-knowledge-space":
+			cfg.Fleet.KnowledgeSpace = mustString(fs, f.Name)
+		case "fleet-knowledge-limit":
+			cfg.Fleet.KnowledgeLimit, _ = fs.GetInt(f.Name)
+		case "fleet-knowledge-remember":
+			cfg.Fleet.KnowledgeRemember = mustBool(fs, f.Name)
 		}
 	})
 

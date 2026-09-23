@@ -189,3 +189,89 @@ func TestWorkerMissingFleetFieldsFailBeforeAnyRequest(t *testing.T) {
 		t.Error("a misconfigured worker must not dial any endpoint")
 	}
 }
+
+// TestWorkerKnowledgeCompositionChecks: the knowledge requirements fail the
+// run before any secret is resolved or endpoint dialled. The model key ref
+// names an unset variable, so an error that reached secret resolution would
+// name it instead of the knowledge field.
+func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
+	modelSrv := model.NewFakeServer()
+	defer modelSrv.Close()
+	const unsetModelKey = "CHIRON_TEST_UNSET_MODEL_KEY"
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"provider without endpoint", []string{"--fleet-knowledge-provider", "billet"}, "fleet.knowledge_endpoint is required"},
+		{"alexandria without key", []string{
+			"--fleet-knowledge-provider", "alexandria",
+			"--fleet-knowledge-endpoint", "https://alexandria.example",
+		}, "fleet.knowledge_key_ref is required"},
+		{"stray endpoint without provider", []string{"--fleet-knowledge-endpoint", "https://billet.internal/"}, "fleet.knowledge_provider is empty"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := workerArgs(modelSrv, searchSrv, append([]string{"-o", "none", "--fleet-model-key-ref", "secret://" + unsetModelKey}, tt.args...)...)
+			_, _, err := execute(t, args...)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), unsetModelKey) {
+				t.Errorf("a secret was resolved before the knowledge check: %v", err)
+			}
+		})
+	}
+	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
+		t.Error("a misconfigured knowledge store must not dial any endpoint")
+	}
+}
+
+// TestWorkerKnowledgeKeyResolution: a knowledge key ref is resolved only when
+// set, its failure stops the run before any request, and a fully specified
+// provider reaches adapter construction.
+func TestWorkerKnowledgeKeyResolution(t *testing.T) {
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
+	modelSrv := model.NewFakeServer()
+	defer modelSrv.Close()
+	t.Setenv("MODEL_KEY", "test-model-key")
+	t.Setenv("KB_KEY", "test-kb-key")
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unresolvable key", []string{
+			"--fleet-knowledge-provider", "billet",
+			"--fleet-knowledge-endpoint", "http://127.0.0.1:1/",
+			"--fleet-knowledge-key-ref", "secret://CHIRON_TEST_UNSET_KB_KEY",
+		}, "CHIRON_TEST_UNSET_KB_KEY"},
+		{"keyless billet", []string{
+			"--fleet-knowledge-provider", "billet",
+			"--fleet-knowledge-endpoint", "http://127.0.0.1:1/",
+		}, "knowledge provider wiring is not linked"},
+		{"alexandria with key", []string{
+			"--fleet-knowledge-provider", "alexandria",
+			"--fleet-knowledge-endpoint", "https://alexandria.example",
+			"--fleet-knowledge-key-ref", "secret://KB_KEY",
+			"--fleet-knowledge-space", "notes",
+		}, "knowledge provider wiring is not linked"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := execute(t, workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, tt.args...)...)...)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want it to contain %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), "test-kb-key") {
+				t.Errorf("the resolved key leaked into the error: %v", err)
+			}
+		})
+	}
+	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
+		t.Error("a worker that cannot build its knowledge store must not dial any endpoint")
+	}
+}

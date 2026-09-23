@@ -15,6 +15,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/interactions"
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/planner"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
@@ -149,11 +150,12 @@ const fetchRequestTimeout = 30 * time.Second
 const fetchMaxContentBytes = 1 << 20
 
 // buildWorker constructs the in-process worker researcher from the resolved
-// config. It resolves the model and search key references here, at the
-// composition root, and fails before any request if either endpoint or key
-// is missing or unresolvable, so a misconfigured worker never emits a resume
-// handle for a run that cannot proceed. WorkerTimeout bounds the whole run
-// and each model/search call; fetch has its own tighter per-call bound.
+// config. It resolves the model, search and knowledge key references here, at
+// the composition root, and fails before any request if a required endpoint
+// or key is missing or unresolvable, so a misconfigured worker never emits a
+// resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
+// run and each model, search and knowledge call; fetch has its own tighter
+// per-call bound.
 func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer) (*fleet.Worker, error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
@@ -167,6 +169,9 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	}
 	if fc.SearchEndpoint == "" {
 		return nil, errors.New("research --agent worker: fleet.search_endpoint is required")
+	}
+	if err := requireKnowledge(fc); err != nil {
+		return nil, err
 	}
 
 	modelKey, err := secret.Default().Resolve(ctx, fc.ModelKeyRef)
@@ -211,6 +216,13 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	if err != nil {
 		return nil, err
 	}
+	recaller, rememberer, err := buildKnowledge(ctx, fc, callTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if !fc.KnowledgeRemember {
+		rememberer = nil
+	}
 	fetchClient, err := fetch.New(fetch.Options{
 		RequestTimeout:  fetchTimeout,
 		MaxContentBytes: fetchMaxContentBytes,
@@ -221,10 +233,13 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	}
 
 	return fleet.NewWorker(fleet.WorkerDeps{
-		Model:  modelClient,
-		Search: searchClient,
-		Fetch:  fetchClient,
-		Tracer: tracer,
+		Model:              modelClient,
+		Search:             searchClient,
+		Fetch:              fetchClient,
+		Knowledge:          recaller,
+		Remember:           rememberer,
+		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
+		Tracer:             tracer,
 		Caps: fleet.Caps{
 			MaxTurns:         fc.MaxTurns,
 			MaxTokens:        fc.MaxTokens,
@@ -233,6 +248,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 			OutputGBPPerMTok: fc.PriceOutputGBPPerMTok,
 			Timeout:          time.Duration(fc.WorkerTimeout),
 			MaxPageBytes:     fc.MaxPageBytes,
+			RecallLimit:      fc.KnowledgeLimit,
 		},
 	})
 }

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,6 +48,25 @@ const (
 	MemoryNoop     = "noop"
 	MemoryInMemory = "inmemory"
 )
+
+// Knowledge store providers for the in-process research agents
+// (docs/KNOWLEDGE.md). An empty provider disables recall and save-back.
+const (
+	KnowledgeBillet     = "billet"
+	KnowledgeAlexandria = "alexandria"
+)
+
+// Knowledge recall limits: hits per recall by default and at most.
+const (
+	DefaultKnowledgeLimit = 5
+	MaxKnowledgeLimit     = 20
+)
+
+// knowledgeSpace is Alexandria's space slug grammar; slugs are at most 64
+// bytes.
+var knowledgeSpace = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+const maxKnowledgeSpaceLen = 64
 
 // Run output modes, mirroring Stirrup's output surface.
 const (
@@ -176,6 +196,22 @@ type FleetConfig struct {
 	Concurrency int `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
 	// Memory selects the ContextStore binding: noop (inmemory is reserved).
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	// KnowledgeProvider selects the knowledge store the worker recalls from:
+	// empty (none), billet or alexandria.
+	KnowledgeProvider string `json:"knowledge_provider,omitempty" yaml:"knowledge_provider,omitempty"`
+	// KnowledgeEndpoint is the knowledge store base URL, validated like
+	// ModelEndpoint; the composition root requires it with a provider.
+	KnowledgeEndpoint string `json:"knowledge_endpoint,omitempty" yaml:"knowledge_endpoint,omitempty"`
+	// KnowledgeKeyRef is a secret:// reference to the knowledge store key —
+	// never a literal. Optional for billet, required for alexandria.
+	KnowledgeKeyRef string `json:"knowledge_key_ref,omitempty" yaml:"knowledge_key_ref,omitempty"`
+	// KnowledgeSpace is the Alexandria space slug recalls are scoped to.
+	KnowledgeSpace string `json:"knowledge_space,omitempty" yaml:"knowledge_space,omitempty"`
+	// KnowledgeLimit is the hits per recall, 1 to MaxKnowledgeLimit.
+	KnowledgeLimit int `json:"knowledge_limit,omitempty" yaml:"knowledge_limit,omitempty"`
+	// KnowledgeRemember saves each completed finding back to the store
+	// (billet only).
+	KnowledgeRemember bool `json:"knowledge_remember,omitempty" yaml:"knowledge_remember,omitempty"`
 }
 
 // Default returns the documented defaults (PROPOSAL §4.3). The Fleet
@@ -196,16 +232,18 @@ func Default() ResearchConfig {
 // per-worker turn budget, a token cap that bounds spend without a price
 // table, a page bound small relative to a model context window, a
 // per-worker timeout well inside the run's own limit, a bounded fan-out,
-// and the no-op memory binding. Endpoints and key references stay empty.
+// the no-op memory binding, and the recall limit a knowledge provider would
+// use. Endpoints, key references and the provider stay empty.
 func defaultFleet() FleetConfig {
 	return FleetConfig{
-		MaxTurns:      8,
-		MaxTokens:     400_000,
-		MaxPageBytes:  64 << 10,
-		WorkerTimeout: Duration(5 * time.Minute),
-		MaxWorkers:    5,
-		Concurrency:   3,
-		Memory:        MemoryNoop,
+		MaxTurns:       8,
+		MaxTokens:      400_000,
+		MaxPageBytes:   64 << 10,
+		WorkerTimeout:  Duration(5 * time.Minute),
+		MaxWorkers:     5,
+		Concurrency:    3,
+		Memory:         MemoryNoop,
+		KnowledgeLimit: DefaultKnowledgeLimit,
 	}
 }
 
@@ -300,7 +338,7 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 		{"model", c.Model != "", "use fleet.model_name"},
 		{"visualise", c.Visualise, "the in-process agents produce no charts"},
 		{"tools", len(c.Tools) > 0, "the in-process agents use fleet.search_endpoint and web_fetch only"},
-		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint"},
+		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint or the fleet.knowledge_* fields"},
 		{"file_search", len(c.FileSearch) > 0, "the in-process agents search the external web only"},
 		{"inputs", len(c.Inputs) > 0, "the in-process agents take no input documents"},
 		{"template", c.Template != "", "the in-process agents do not take an output template"},
@@ -372,6 +410,58 @@ func (f FleetConfig) validate(agent string) error {
 		return fmt.Errorf("fleet.memory: %q is not implemented yet; use %q", f.Memory, MemoryNoop)
 	default:
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
+	}
+	return f.validateKnowledge()
+}
+
+// validateKnowledge checks the knowledge store fields. Without a provider
+// every other knowledge field must be empty or default, so a stray endpoint
+// is never silently ignored. The endpoint and key reference follow the same
+// rules as the model and search pair: the key travels to the endpoint.
+func (f FleetConfig) validateKnowledge() error {
+	switch f.KnowledgeProvider {
+	case "":
+		stray := []struct {
+			name string
+			set  bool
+		}{
+			{"fleet.knowledge_endpoint", f.KnowledgeEndpoint != ""},
+			{"fleet.knowledge_key_ref", f.KnowledgeKeyRef != ""},
+			{"fleet.knowledge_space", f.KnowledgeSpace != ""},
+			{"fleet.knowledge_limit", f.KnowledgeLimit != 0 && f.KnowledgeLimit != DefaultKnowledgeLimit},
+			{"fleet.knowledge_remember", f.KnowledgeRemember},
+		}
+		for _, s := range stray {
+			if s.set {
+				return fmt.Errorf("%s: is set but fleet.knowledge_provider is empty; set a provider (%q or %q) or remove it",
+					s.name, KnowledgeBillet, KnowledgeAlexandria)
+			}
+		}
+		return nil
+	case KnowledgeBillet, KnowledgeAlexandria:
+	default:
+		return fmt.Errorf("fleet.knowledge_provider: %q is not %q or %q", f.KnowledgeProvider, KnowledgeBillet, KnowledgeAlexandria)
+	}
+	if err := validEndpoint("fleet.knowledge_endpoint", f.KnowledgeEndpoint); err != nil {
+		return err
+	}
+	if err := validKeyRef("fleet.knowledge_key_ref", f.KnowledgeKeyRef); err != nil {
+		return err
+	}
+	if f.KnowledgeSpace != "" {
+		if f.KnowledgeProvider != KnowledgeAlexandria {
+			return fmt.Errorf("fleet.knowledge_space: applies to %q only; %q binds its namespace server-side", KnowledgeAlexandria, f.KnowledgeProvider)
+		}
+		if len(f.KnowledgeSpace) > maxKnowledgeSpaceLen || !knowledgeSpace.MatchString(f.KnowledgeSpace) {
+			return fmt.Errorf("fleet.knowledge_space: %q is not a space slug (lower-case letters, digits and inner hyphens, at most %d)",
+				f.KnowledgeSpace, maxKnowledgeSpaceLen)
+		}
+	}
+	if f.KnowledgeLimit < 1 || f.KnowledgeLimit > MaxKnowledgeLimit {
+		return fmt.Errorf("fleet.knowledge_limit: %d is outside 1..%d", f.KnowledgeLimit, MaxKnowledgeLimit)
+	}
+	if f.KnowledgeRemember && f.KnowledgeProvider != KnowledgeBillet {
+		return fmt.Errorf("fleet.knowledge_remember: applies to %q only; %q has no save path Chiron can use", KnowledgeBillet, f.KnowledgeProvider)
 	}
 	return nil
 }
