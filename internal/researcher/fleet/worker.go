@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/memory"
@@ -475,12 +476,14 @@ func (w *workerRun) failed(detail string) Finding {
 }
 
 // addCitation appends a citation, deduplicated by URI. A citation with an
-// empty URI is dropped. The first title seen for a URI wins, except that an
-// empty title is replaced by a later non-empty one.
+// empty URI is dropped. The title passes through citationTitle; the first
+// title seen for a URI wins, except that an empty title is replaced by a
+// later non-empty one.
 func (w *workerRun) addCitation(uri, title string) {
 	if uri == "" {
 		return
 	}
+	title = citationTitle(title)
 	for i, c := range w.citations {
 		if c.URI == uri {
 			if c.Title == "" && title != "" {
@@ -490,6 +493,20 @@ func (w *workerRun) addCitation(uri, title string) {
 		}
 	}
 	w.citations = append(w.citations, types.Citation{URI: uri, Title: title})
+}
+
+// maxCitationTitleRunes bounds a citation title, which the report, the
+// Interaction and a saved finding all carry.
+const maxCitationTitleRunes = 200
+
+// angleSpan matches anything between a '<' and the next '>'.
+var angleSpan = regexp.MustCompile(`<[^<>]*>`)
+
+// citationTitle makes a store-, search- or model-supplied title safe to
+// carry: markup-like spans removed, flattened to one line, and bounded to
+// maxCitationTitleRunes.
+func citationTitle(s string) string {
+	return boundRunes(oneLine(angleSpan.ReplaceAllString(s, "")), maxCitationTitleRunes)
 }
 
 // accumulateModelUsage folds one model turn's usage into the running totals

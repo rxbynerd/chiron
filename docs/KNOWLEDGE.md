@@ -327,7 +327,10 @@ with each hit's `Locator`. `finalise` admits a citation whose URL is in
 `seenURLs`: a knowledge hit is citable but not fetchable, so the model cannot
 spend a fetch (and a failure strike) on a page behind the store's own
 authentication. `titles` is populated from `Meta.Name` so a cited locator
-carries its title. The system prompt's citation rule says so.
+carries its title. Every citation title, whether from a search result, a
+recalled hit or the model, has anything between `<` and `>` removed, is
+flattened to one line and is bounded to 200 runes before it is stored. The
+system prompt's citation rule says so.
 
 `types.Citation.URI` is already scheme-agnostic. The Markdown formatter
 renders web URIs as links and, new here, renders a `billet://` or `kb://`

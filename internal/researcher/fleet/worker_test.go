@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -401,5 +402,36 @@ func TestRunWorkerTimeoutIsIncomplete(t *testing.T) {
 	}
 	if got := modelSrv.CallCount(); got != 0 {
 		t.Errorf("model call count = %d, want 0 — a cancelled context stops before spending", got)
+	}
+}
+
+// TestAddCitation: citations are deduplicated by URI, the first non-empty
+// title wins, and every title is stripped of markup, flattened and bounded.
+func TestAddCitation(t *testing.T) {
+	type add struct{ uri, title string }
+	long := strings.Repeat("ü", 10<<10)
+	for _, tt := range []struct {
+		name string
+		adds []add
+		want []types.Citation
+	}{
+		{"empty URI dropped", []add{{"", "t"}}, nil},
+		{"first title wins", []add{{"https://a", "one"}, {"https://a", "two"}}, []types.Citation{{URI: "https://a", Title: "one"}}},
+		{"empty title replaced", []add{{"https://a", ""}, {"https://a", "later"}}, []types.Citation{{URI: "https://a", Title: "later"}}},
+		{"markup-only title replaced", []add{{"https://a", "<b></b>"}, {"https://a", "later"}}, []types.Citation{{URI: "https://a", Title: "later"}}},
+		{"markup stripped", []add{{"https://a", `Policy <img src="https://beacon.example/p.gif"> [x]`}}, []types.Citation{{URI: "https://a", Title: "Policy [x]"}}},
+		{"multi-line tag stripped", []add{{"https://a", "a<img\nsrc=x>b"}}, []types.Citation{{URI: "https://a", Title: "ab"}}},
+		{"flattened", []add{{"https://a", "line one\n\tline two"}}, []types.Citation{{URI: "https://a", Title: "line one line two"}}},
+		{"bounded", []add{{"https://a", "<img src=x>" + long}}, []types.Citation{{URI: "https://a", Title: long[:maxCitationTitleRunes*len("ü")]}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &workerRun{}
+			for _, a := range tt.adds {
+				w.addCitation(a.uri, a.title)
+			}
+			if !reflect.DeepEqual(w.citations, tt.want) {
+				t.Errorf("citations = %.300q, want %.300q", w.citations, tt.want)
+			}
+		})
 	}
 }
