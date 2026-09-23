@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,49 @@ func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client 
 	return c
 }
 
+// answerHandshake reads one request in full and answers it when it belongs to
+// the MCP handshake, as a minimal stateless server whose initialize result
+// names no protocol version. It returns the decoded request and whether it
+// was answered; the caller answers anything else (tools/call).
+func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
+	t.Helper()
+	var req rpcRequest
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("reading request body: %v", err)
+		return req, true
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Errorf("decoding request body: %v", err)
+		return req, true
+	}
+	switch req.Method {
+	case "initialize":
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID))
+		return req, true
+	case "notifications/initialized":
+		w.WriteHeader(http.StatusAccepted)
+		return req, true
+	}
+	return req, false
+}
+
+// sseWrite writes frames as a text/event-stream reply and flushes them.
+func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	for _, f := range frames {
+		if _, err := fmt.Fprint(w, f); err != nil {
+			t.Errorf("writing SSE frame: %v", err)
+		}
+	}
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
 func TestSearchHappyPath(t *testing.T) {
 	want := []Result{
 		{Title: "Rayleigh scattering", URL: "https://example.com/rayleigh", Snippet: "why the sky is blue"},
@@ -54,15 +98,16 @@ func TestSearchHappyPath(t *testing.T) {
 	}
 
 	// The flow is initialize -> notifications/initialized -> tools/call, in
-	// order, and the key rides only the Authorization header.
+	// order, with no DELETE for a stateless server, and the key rides only the
+	// Authorization header.
 	reqs := fake.Requests()
 	if len(reqs) != 3 {
 		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call)", len(reqs))
 	}
 	wantMethods := []string{"initialize", "notifications/initialized", "tools/call"}
 	for i, m := range wantMethods {
-		if reqs[i].Method != m {
-			t.Errorf("request[%d].Method = %q, want %q", i, reqs[i].Method, m)
+		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].Method != m {
+			t.Errorf("request[%d] = %s %q, want POST %q", i, reqs[i].HTTPMethod, reqs[i].Method, m)
 		}
 		if reqs[i].Authorization != "Bearer "+testKey {
 			t.Errorf("request[%d].Authorization = %q, want the bearer key header", i, reqs[i].Authorization)
@@ -98,9 +143,9 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 	}
 }
 
-func TestSearchSessionEchoed(t *testing.T) {
+func TestSearchSessionEchoedAndEnded(t *testing.T) {
 	// A stateful server assigns a session on initialize and requires it on
-	// tools/call; the client must echo it.
+	// tools/call; the client echoes it, then ends it with a DELETE.
 	fake := NewFakeServer(
 		[]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
 		WithSessionID("sess-abc-123"),
@@ -112,15 +157,207 @@ func TestSearchSessionEchoed(t *testing.T) {
 		t.Fatalf("Search with a session server: %v", err)
 	}
 	reqs := fake.Requests()
-	// initialize is sent without a session; initialized and tools/call carry
-	// the assigned one.
+	if len(reqs) != 4 {
+		t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
+	}
+	// initialize is sent without a session; every later request carries the
+	// assigned one.
 	if reqs[0].SessionID != "" {
 		t.Errorf("initialize carried a session header %q, want none", reqs[0].SessionID)
 	}
-	for _, i := range []int{1, 2} {
+	for i := 1; i < len(reqs); i++ {
 		if reqs[i].SessionID != "sess-abc-123" {
 			t.Errorf("request[%d] session = %q, want the assigned session echoed", i, reqs[i].SessionID)
 		}
+	}
+	end := reqs[3]
+	if end.HTTPMethod != http.MethodDelete {
+		t.Fatalf("last request = %s %q, want the session DELETE", end.HTTPMethod, end.Method)
+	}
+	if end.Authorization != "Bearer "+testKey {
+		t.Errorf("DELETE Authorization = %q, want the bearer key header", end.Authorization)
+	}
+	if end.ProtocolVersion != mcpProtocolVersion {
+		t.Errorf("DELETE MCP-Protocol-Version = %q, want %q", end.ProtocolVersion, mcpProtocolVersion)
+	}
+}
+
+func TestSearchSessionEndedAfterToolError(t *testing.T) {
+	// The session is ended even when the search itself fails.
+	fake := NewFakeServer(nil,
+		WithSessionID("sess-err"),
+		WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
+	)
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	if _, err := c.Search(context.Background(), "q"); err == nil {
+		t.Fatal("Search should fail when the tool reports isError")
+	}
+	reqs := fake.Requests()
+	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {
+		t.Errorf("last request = %s with session %q, want a DELETE of sess-err", last.HTTPMethod, last.SessionID)
+	}
+}
+
+func TestSearchFailedSessionDeleteIgnored(t *testing.T) {
+	// A server may refuse or fail the DELETE; the search result stands.
+	var deletes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set(mcpSessionHeader, "sess-1")
+		req, answered := answerHandshake(t, w, r)
+		if answered {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[{"type":"text","text":"{\"results\":[{\"title\":\"t\",\"url\":\"https://e.com\",\"snippet\":\"s\"}]}"}]}}`, deref(req.ID))
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	got, err := c.Search(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Search should ignore a failed session DELETE, got: %v", err)
+	}
+	if len(got) != 1 || got[0].URL != "https://e.com" {
+		t.Errorf("results = %+v, want the one scripted result", got)
+	}
+	if n := deletes.Load(); n != 1 {
+		t.Errorf("DELETE count = %d, want 1", n)
+	}
+}
+
+func TestSearchProtocolVersionHeader(t *testing.T) {
+	// Every request after initialize carries the revision the server chose.
+	fake := NewFakeServer(
+		[]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
+		WithProtocolVersion("2025-03-26"),
+	)
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	if _, err := c.Search(context.Background(), "q"); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	reqs := fake.Requests()
+	if reqs[0].ProtocolVersion != "" {
+		t.Errorf("initialize carried MCP-Protocol-Version %q, want none", reqs[0].ProtocolVersion)
+	}
+	for i := 1; i < len(reqs); i++ {
+		if reqs[i].ProtocolVersion != "2025-03-26" {
+			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
+		}
+	}
+}
+
+func TestSearchProtocolVersionDefaultsWhenUnnamed(t *testing.T) {
+	// An initialize result naming no revision falls back to the client's own.
+	var toolCallVersion atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, answered := answerHandshake(t, w, r)
+		if answered {
+			return
+		}
+		toolCallVersion.Store(r.Header.Get(mcpProtocolVersionHeader))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[]}}`, deref(req.ID))
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	if _, err := c.Search(context.Background(), "q"); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got, _ := toolCallVersion.Load().(string); got != mcpProtocolVersion {
+		t.Errorf("tools/call MCP-Protocol-Version = %q, want the client default %q", got, mcpProtocolVersion)
+	}
+}
+
+func TestSearchToolCallRPCError(t *testing.T) {
+	// A JSON-RPC error on tools/call is surfaced, scrubbed, and not retried.
+	// A null id is how JSON-RPC reports an error it could not attribute.
+	tests := []struct {
+		name    string
+		reply   string
+		wantErr string
+	}{
+		{"error echoing the key", `{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"auth failed for key ` + testKey + `"}}`, "rpc error -32000: auth failed for key"},
+		{"error with null id", `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}`, "rpc error -32600: invalid request"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var toolCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				toolCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.reply)
+			}))
+			defer server.Close()
+
+			c := newClient(t, server.URL)
+			_, err := c.Search(context.Background(), "q")
+			if err == nil {
+				t.Fatal("Search should fail on a JSON-RPC error reply")
+			}
+			if !strings.Contains(err.Error(), "tools/call rejected") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want a tools/call rejection containing %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), testKey) {
+				t.Errorf("error leaked the API key: %v", err)
+			}
+			if n := toolCalls.Load(); n != 1 {
+				t.Errorf("tools/call count = %d, want exactly 1", n)
+			}
+		})
+	}
+}
+
+func TestSearchMismatchedResponseID(t *testing.T) {
+	// A reply that does not carry the request's id is rejected, whichever
+	// framing carries it.
+	const result = `"result":{"content":[{"type":"text","text":"{\"results\":[]}"}]}`
+	tests := []struct {
+		name  string
+		sse   bool
+		reply string
+	}{
+		{"json wrong id", false, `{"jsonrpc":"2.0","id":99,` + result + `}`},
+		{"json string id", false, `{"jsonrpc":"2.0","id":"2",` + result + `}`},
+		{"json missing id on a result", false, `{"jsonrpc":"2.0",` + result + `}`},
+		{"sse wrong id", true, `{"jsonrpc":"2.0","id":7,` + result + `}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				if tt.sse {
+					sseWrite(t, w, "data: "+tt.reply+"\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.reply)
+			}))
+			defer server.Close()
+
+			c := newClient(t, server.URL)
+			_, err := c.Search(context.Background(), "q")
+			if err == nil {
+				t.Fatal("Search should reject a reply with a mismatched id")
+			}
+			if !strings.Contains(err.Error(), "does not answer request id 2") {
+				t.Errorf("error = %v, want an id-mismatch error", err)
+			}
+		})
 	}
 }
 

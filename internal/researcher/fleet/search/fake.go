@@ -5,26 +5,30 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 )
 
 // FakeServer is an httptest-backed stand-in for a Streamable-HTTP MCP search
-// server, shared by this package's tests and the later worker/lead chunks
+// server, shared by every package that drives a search in tests
 // (docs/V2-RESEARCH-AGENT §8 requires a fake search MCP for CI). It answers
 // initialize / notifications/initialized / tools/call with scripted results,
-// records the requests it received, and never touches the real network.
-// Callers own its lifecycle: build it at the call site and defer Close.
+// accepts a session DELETE, records the requests it received, and never
+// touches the real network. Callers own its lifecycle: build it at the call
+// site and defer Close.
 //
 // The zero value is not usable; construct with NewFakeServer. Point a Client
-// at it via Options{Endpoint: fake.URL(), ...}; the Client POSTs JSON-RPC to
-// that URL, which the fake serves.
+// at it via Options{Endpoint: fake.URL(), ...}; the Client sends every request
+// to that URL, which the fake serves.
 type FakeServer struct {
 	server *httptest.Server
 
-	// SessionID, when non-empty, is returned on the initialize reply as the
-	// Mcp-Session-Id header; the fake then requires it on tools/call. Leave
-	// empty to model a stateless server.
+	// sessionID, when non-empty, is returned on the initialize reply as the
+	// Mcp-Session-Id header; the fake then requires it on tools/call and
+	// DELETE. Empty models a stateless server.
 	sessionID string
+	// protocolVersion is the revision the initialize result names.
+	protocolVersion string
 	// useSSE returns tools/call as a text/event-stream reply instead of
 	// application/json, exercising the SSE read path.
 	useSSE bool
@@ -35,20 +39,26 @@ type FakeServer struct {
 	requests []FakeRequest
 }
 
-// FakeRequest is one decoded JSON-RPC request the fake received, exposed so
-// tests (and reusing chunks) can assert on the method, the Authorization
-// header, the session header, and the tools/call arguments.
+// FakeRequest is one request the fake received, exposed so tests can assert
+// on the method, the credential, the transport headers, and the tools/call
+// arguments.
 type FakeRequest struct {
+	// HTTPMethod is the HTTP method: POST for JSON-RPC, DELETE to end a
+	// session.
+	HTTPMethod string
 	// Method is the JSON-RPC method ("initialize", "notifications/initialized",
-	// "tools/call").
+	// "tools/call"); "" for a DELETE.
 	Method string
 	// Authorization is the raw Authorization header value.
 	Authorization string
 	// SessionID is the Mcp-Session-Id request header value ("" when absent).
 	SessionID string
+	// ProtocolVersion is the MCP-Protocol-Version request header value (""
+	// when absent).
+	ProtocolVersion string
 	// ToolName is the tools/call params.name ("" for other methods).
 	ToolName string
-	// Arguments is the tools/call params.arguments ("" for other methods).
+	// Arguments is the tools/call params.arguments (nil for other methods).
 	Arguments map[string]interface{}
 }
 
@@ -56,9 +66,15 @@ type FakeRequest struct {
 type FakeOption func(*FakeServer)
 
 // WithSessionID makes the fake assign a session on initialize and require it
-// on tools/call, modelling a stateful server.
+// on tools/call and DELETE, modelling a stateful server.
 func WithSessionID(id string) FakeOption {
 	return func(f *FakeServer) { f.sessionID = id }
+}
+
+// WithProtocolVersion makes the fake's initialize result name version instead
+// of the client's default revision, modelling a server that negotiates down.
+func WithProtocolVersion(version string) FakeOption {
+	return func(f *FakeServer) { f.protocolVersion = version }
 }
 
 // WithSSE makes the fake return tools/call as a text/event-stream reply,
@@ -77,7 +93,7 @@ func WithRawToolResult(raw string) FakeOption {
 // NewFakeServer starts a fake MCP search server that answers tools/call with
 // the given results. Call Close when done.
 func NewFakeServer(results []Result, opts ...FakeOption) *FakeServer {
-	f := &FakeServer{results: results}
+	f := &FakeServer{results: results, protocolVersion: mcpProtocolVersion}
 	for _, o := range opts {
 		o(f)
 	}
@@ -91,8 +107,8 @@ func (f *FakeServer) URL() string { return f.server.URL }
 // Close shuts the server down. Callers should defer this at the call site.
 func (f *FakeServer) Close() { f.server.Close() }
 
-// Requests returns a copy of the decoded requests the fake has received, in
-// arrival order.
+// Requests returns a copy of the requests the fake has received, in arrival
+// order.
 func (f *FakeServer) Requests() []FakeRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -102,7 +118,8 @@ func (f *FakeServer) Requests() []FakeRequest {
 }
 
 // CallCount reports how many requests the fake has received across the whole
-// flow (initialize + initialized + tools/call = 3 for one successful Search).
+// flow: initialize + initialized + tools/call = 3 for one successful Search,
+// plus the closing DELETE when the fake issues a session.
 func (f *FakeServer) CallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -125,37 +142,57 @@ func (f *FakeServer) ToolCallCount() int {
 }
 
 func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	rec := FakeRequest{
+		HTTPMethod:      r.Method,
+		Authorization:   r.Header.Get("Authorization"),
+		SessionID:       r.Header.Get(mcpSessionHeader),
+		ProtocolVersion: r.Header.Get(mcpProtocolVersionHeader),
+	}
+
+	if r.Method == http.MethodDelete {
+		f.record(rec)
+		switch {
+		case f.sessionID == "":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case rec.SessionID != f.sessionID:
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+		return
+	}
+
 	var req rpcRequest
 	// Decode best-effort: the Client always sends valid JSON-RPC.
 	_ = json.NewDecoder(r.Body).Decode(&req)
-
-	rec := FakeRequest{
-		Method:        req.Method,
-		Authorization: r.Header.Get("Authorization"),
-		SessionID:     r.Header.Get(mcpSessionHeader),
-	}
-	// params is re-decoded from the raw request for tools/call so the fake can
-	// expose name/arguments without the client's param structs.
+	rec.Method = req.Method
+	// params arrives as generic JSON, so name/arguments are pulled out
+	// without the client's param structs.
 	if req.Method == "tools/call" {
 		if name, args, ok := decodeCallParams(req.Params); ok {
 			rec.ToolName = name
 			rec.Arguments = args
 		}
 	}
-
-	f.mu.Lock()
-	f.requests = append(f.requests, rec)
-	f.mu.Unlock()
+	f.record(rec)
 
 	switch req.Method {
 	case "initialize":
 		if f.sessionID != "" {
 			w.Header().Set(mcpSessionHeader, f.sessionID)
 		}
+		result, err := json.Marshal(map[string]any{
+			"protocolVersion": f.protocolVersion,
+			"capabilities":    map[string]any{},
+			"serverInfo":      map[string]string{"name": "fake-search", "version": "0"},
+		})
+		if err != nil {
+			panic(fmt.Sprintf("fake: encoding initialize result: %v", err))
+		}
 		f.writeJSON(w, rpcResponse{
 			JSONRPC: jsonRPCVersion,
-			ID:      req.ID,
-			Result:  json.RawMessage(`{"protocolVersion":"` + mcpProtocolVersion + `","capabilities":{},"serverInfo":{"name":"fake-search","version":"0"}}`),
+			ID:      json.RawMessage(strconv.Itoa(deref(req.ID))),
+			Result:  result,
 		})
 	case "notifications/initialized":
 		// A notification: acknowledge with 202 and no body.
@@ -172,6 +209,12 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32601,"message":"method not found"}}`))
 	}
+}
+
+func (f *FakeServer) record(rec FakeRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, rec)
 }
 
 // writeToolResult writes the scripted tools/call result, as either plain JSON

@@ -19,10 +19,19 @@ import (
 
 const jsonRPCVersion = "2.0"
 
-// mcpSessionHeader is the response header a Streamable-HTTP MCP server may set
-// on the initialize reply to bind the session; it must be echoed on every
-// subsequent request (MCP transport spec).
-const mcpSessionHeader = "Mcp-Session-Id"
+// MCP Streamable-HTTP transport headers. A server may set mcpSessionHeader on
+// the initialize reply to bind a session; the client echoes it, and sends the
+// negotiated mcpProtocolVersionHeader, on every later request.
+const (
+	mcpSessionHeader         = "Mcp-Session-Id"
+	mcpProtocolVersionHeader = "MCP-Protocol-Version"
+)
+
+// session is the state initialize establishes for the rest of one Search.
+type session struct {
+	id              string // empty for a stateless server
+	protocolVersion string
+}
 
 // rpcRequest is a JSON-RPC request or notification. A notification omits ID
 // (JSON-RPC distinguishes the two by the presence of the member); Params is
@@ -34,14 +43,34 @@ type rpcRequest struct {
 	Params  interface{} `json:"params,omitempty"`
 }
 
-// rpcResponse is a JSON-RPC response. Exactly one of Result / Error is set on
-// a well-formed reply. Result is kept raw so each method decodes its own
-// shape.
+// rpcResponse is a JSON-RPC response, or a server-initiated request or
+// notification (which carries Method) read off an SSE stream. Exactly one of
+// Result / Error is set on a well-formed reply. ID and Result are kept raw:
+// server requests may use string ids, and each method decodes its own result.
 type rpcResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      *int            `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *rpcError       `json:"error"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+// isResponse reports whether the message is a response rather than a
+// server-initiated request or notification.
+func (r rpcResponse) isResponse() bool {
+	return r.Method == ""
+}
+
+// answers reports whether r is the reply to the request with the given id. A
+// null or absent id is accepted only on an error reply, which JSON-RPC 2.0
+// uses when the server could not read the request id.
+func (r rpcResponse) answers(id int) bool {
+	raw := bytes.TrimSpace(r.ID)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return r.Error != nil
+	}
+	var got int
+	return json.Unmarshal(raw, &got) == nil && got == id
 }
 
 // rpcError is the JSON-RPC error object.
@@ -56,11 +85,12 @@ func (e *rpcError) Error() string {
 }
 
 // doRequest POSTs one JSON-RPC request and returns the matching response plus
-// any Mcp-Session-Id the server set. sessionID, when non-empty, is echoed on
-// the request. The reply may be application/json (a single JSON-RPC message)
-// or text/event-stream (SSE frames carrying JSON-RPC messages); both are read
-// under maxBodyBytes and reduced to the one response message.
-func (c *Client) doRequest(ctx context.Context, sessionID string, req rpcRequest) (rpcResponse, string, error) {
+// any Mcp-Session-Id the server set. The session's headers are sent when set;
+// initialize passes the zero session. The reply may be application/json (a
+// single JSON-RPC message) or text/event-stream (SSE frames carrying JSON-RPC
+// messages); both are read under maxBodyBytes and reduced to the one response
+// message, whose id must match the request's.
+func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (rpcResponse, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return rpcResponse{}, "", fmt.Errorf("search: encoding %s request: %s", req.Method, c.scrub(err.Error()))
@@ -74,12 +104,7 @@ func (c *Client) doRequest(ctx context.Context, sessionID string, req rpcRequest
 	// A Streamable-HTTP client must accept both reply framings so the server
 	// may choose either per request (MCP transport spec).
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	if sessionID != "" {
-		httpReq.Header.Set(mcpSessionHeader, sessionID)
-	}
+	c.setSessionHeaders(httpReq, sess)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -108,7 +133,40 @@ func (c *Client) doRequest(ctx context.Context, sessionID string, req rpcRequest
 	if err != nil {
 		return rpcResponse{}, newSession, err
 	}
+	if !rpc.answers(*req.ID) {
+		return rpcResponse{}, newSession, fmt.Errorf("search: %s reply does not answer request id %d", req.Method, *req.ID)
+	}
 	return rpc, newSession, nil
+}
+
+// setSessionHeaders sets the credential and the session's transport headers.
+func (c *Client) setSessionHeaders(req *http.Request, sess session) {
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	if sess.id != "" {
+		req.Header.Set(mcpSessionHeader, sess.id)
+	}
+	if sess.protocolVersion != "" {
+		req.Header.Set(mcpProtocolVersionHeader, sess.protocolVersion)
+	}
+}
+
+// endSession sends the DELETE that asks the server to discard the session. It
+// is best effort: a server may refuse client-initiated termination with 405,
+// and no outcome of the DELETE affects the search result.
+func (c *Client) endSession(ctx context.Context, sess session) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.endpoint, nil)
+	if err != nil {
+		return
+	}
+	c.setSessionHeaders(req, sess)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = readBounded(resp.Body, maxErrorBodyBytes)
 }
 
 // readResponse extracts the single JSON-RPC response from a 2xx reply,
@@ -137,8 +195,9 @@ func (c *Client) readResponse(resp *http.Response) (rpcResponse, error) {
 }
 
 // readEventStream reads a text/event-stream reply and returns the first
-// JSON-RPC response message it carries — the one correlating to the request
-// just sent. It mirrors the SSE reading discipline in
+// JSON-RPC response message it carries, without waiting for the stream to
+// end; doRequest checks that it answers the request. It mirrors the SSE
+// reading discipline in
 // internal/interactions.Stream (line-oriented scan, data: accumulation across
 // continuation lines, blank-line frame dispatch) but is reimplemented
 // minimally: this transport only needs the one response frame, not a
@@ -168,11 +227,9 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 		if err := json.Unmarshal(data, &rpc); err != nil {
 			return rpcResponse{}, false, fmt.Errorf("search: decoding SSE response: %s", c.scrub(err.Error()))
 		}
-		// A JSON-RPC message on the stream that is not a response (e.g. a
-		// server-initiated request or notification, which have a "method")
-		// is skipped: we want the reply frame. A response has no method and
-		// carries result or error.
-		if rpc.Method() {
+		// Server-initiated requests and notifications are skipped; this
+		// client answers neither and waits for the reply frame.
+		if !rpc.isResponse() {
 			return rpcResponse{}, false, nil
 		}
 		return rpc, true, nil
@@ -227,13 +284,6 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 		return rpc, nil
 	}
 	return rpcResponse{}, fmt.Errorf("search: SSE stream carried no JSON-RPC response")
-}
-
-// Method reports whether the decoded message is a request/notification rather
-// than a response — used to skip non-reply frames on an SSE stream. A message
-// with neither result nor error and no id is treated as a non-response.
-func (r rpcResponse) Method() bool {
-	return r.Result == nil && r.Error == nil && r.ID == nil
 }
 
 // errorFromResponse builds an error from a non-2xx response, bounding the

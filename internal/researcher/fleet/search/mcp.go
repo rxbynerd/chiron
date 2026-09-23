@@ -25,6 +25,10 @@ type clientInfo struct {
 	Version string `json:"version"`
 }
 
+type initializeResult struct {
+	ProtocolVersion string `json:"protocolVersion"`
+}
+
 type callToolParams struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
@@ -61,8 +65,10 @@ type resultsDoc struct {
 
 // Search runs the minimal MCP flow — initialize, an initialized notification,
 // then a tools/call for the configured tool — and returns the parsed results.
-// The whole exchange is bounded by RequestTimeout (a tighter caller deadline
-// wins), and every response body is bounded by MaxBodyBytes.
+// When the server issued a session, a best-effort DELETE ends it before
+// Search returns, whatever the outcome. The whole exchange is bounded by
+// RequestTimeout (a tighter caller deadline wins), and every response body is
+// bounded by MaxBodyBytes.
 //
 // The three round-trips are NOT individually retried. tools/call may invoke a
 // billable upstream search, so it is single-attempt like the model adapter's
@@ -77,21 +83,26 @@ func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
 
-	sessionID, err := c.initialize(ctx)
+	sess, err := c.initialize(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.notifyInitialized(ctx, sessionID); err != nil {
+	if sess.id != "" {
+		defer c.endSession(ctx, sess)
+	}
+	if err := c.notifyInitialized(ctx, sess); err != nil {
 		return nil, err
 	}
-	return c.callSearch(ctx, sessionID, query)
+	return c.callSearch(ctx, sess, query)
 }
 
-// initialize performs the MCP initialize handshake and returns any
-// Mcp-Session-Id the server assigned (empty when the server is stateless).
-func (c *Client) initialize(ctx context.Context) (string, error) {
+// initialize performs the MCP initialize handshake and returns the session
+// for later requests: any Mcp-Session-Id the server assigned (empty when the
+// server is stateless) and the protocol version it chose, falling back to
+// mcpProtocolVersion when the result names none.
+func (c *Client) initialize(ctx context.Context) (session, error) {
 	id := 1
-	rpc, sessionID, err := c.doRequest(ctx, "", rpcRequest{
+	rpc, sessionID, err := c.doRequest(ctx, session{}, rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		ID:      &id,
 		Method:  "initialize",
@@ -102,18 +113,23 @@ func (c *Client) initialize(ctx context.Context) (string, error) {
 		},
 	})
 	if err != nil {
-		return "", err
+		return session{}, err
 	}
 	if rpc.Error != nil {
-		return "", fmt.Errorf("search: initialize rejected: %s", c.scrub(rpc.Error.Error()))
+		return session{}, fmt.Errorf("search: initialize rejected: %s", c.scrub(rpc.Error.Error()))
 	}
-	return sessionID, nil
+	sess := session{id: sessionID, protocolVersion: mcpProtocolVersion}
+	var result initializeResult
+	if json.Unmarshal(rpc.Result, &result) == nil && result.ProtocolVersion != "" {
+		sess.protocolVersion = result.ProtocolVersion
+	}
+	return sess, nil
 }
 
 // notifyInitialized sends the notifications/initialized notification that
 // completes the handshake. A notification has no reply to correlate.
-func (c *Client) notifyInitialized(ctx context.Context, sessionID string) error {
-	_, _, err := c.doRequest(ctx, sessionID, rpcRequest{
+func (c *Client) notifyInitialized(ctx context.Context, sess session) error {
+	_, _, err := c.doRequest(ctx, sess, rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		Method:  "notifications/initialized",
 	})
@@ -122,9 +138,9 @@ func (c *Client) notifyInitialized(ctx context.Context, sessionID string) error 
 
 // callSearch issues the tools/call for the configured search tool and parses
 // its result.
-func (c *Client) callSearch(ctx context.Context, sessionID, query string) ([]Result, error) {
+func (c *Client) callSearch(ctx context.Context, sess session, query string) ([]Result, error) {
 	id := 2
-	rpc, _, err := c.doRequest(ctx, sessionID, rpcRequest{
+	rpc, _, err := c.doRequest(ctx, sess, rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		ID:      &id,
 		Method:  "tools/call",

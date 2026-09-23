@@ -9,7 +9,9 @@
 // initialized notification, then a tools/call — and parses the tool result
 // into a flat []Result. It is deliberately not a general MCP client: there
 // is no resources/prompts/sampling surface, no server-initiated request
-// handling, and no session resumption beyond echoing an Mcp-Session-Id.
+// handling, and a session lives for one Search: its Mcp-Session-Id and
+// negotiated MCP-Protocol-Version are echoed, then the session is ended with
+// a best-effort DELETE.
 //
 // Money-safety and security follow the Gemini adapter (internal/interactions,
 // internal/researcher/gemini) and the sibling model adapter
@@ -42,10 +44,11 @@ const (
 	defaultToolName    = "search"
 	defaultQueryArgKey = "query"
 
-	// mcpProtocolVersion is the protocol revision advertised in initialize.
-	// It is a date-stamped string per the MCP spec; a server that speaks a
-	// different revision still answers, and this client only relies on the
-	// JSON-RPC envelope, so a mismatch is tolerated rather than fatal.
+	// mcpProtocolVersion is the protocol revision advertised in initialize,
+	// and sent as MCP-Protocol-Version when the initialize result names no
+	// revision. A server that picks a different revision is tolerated, since
+	// this client relies only on the JSON-RPC envelope; its choice is echoed
+	// on every later request.
 	mcpProtocolVersion = "2025-06-18"
 )
 
