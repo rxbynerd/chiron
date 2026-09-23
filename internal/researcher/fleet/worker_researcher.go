@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
+	"github.com/rxbynerd/chiron/internal/secret"
+	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -22,9 +26,11 @@ import (
 // returning the id immediately so the run core can emit it before awaiting.
 // Await blocks on that run; if Await's context ends first the run is
 // cancelled, because an in-process run nobody is waiting for can only waste
-// paid turns. Result maps the Finding. Unlike the Gemini adapter, the id is a
-// local handle, not a durable resume token: a crashed in-process run cannot be
-// recovered by `chiron get <id>`.
+// paid turns. Result maps the Finding. When deps.Remember is set, a Completed
+// finding is saved to the knowledge store before Await returns (bounded by
+// rememberTimeout). Unlike the Gemini adapter, the id is a local handle, not
+// a durable resume token: a crashed in-process run cannot be recovered by
+// `chiron get <id>`.
 type Worker struct {
 	deps WorkerDeps
 
@@ -113,9 +119,12 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	w.mu.Unlock()
 
 	brief := Brief{Objective: task.Query}
+	remember := func(ctx context.Context, f Finding, span trace.Span) {
+		w.rememberFinding(ctx, id, brief.Objective, f, span)
+	}
 	go func() {
 		defer cancel()
-		st.finding = RunWorker(runCtx, w.deps, brief)
+		st.finding = runWorker(runCtx, w.deps, brief, remember)
 		st.completed = time.Now()
 		close(st.done)
 	}()
@@ -157,7 +166,7 @@ func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error
 			ID:        id,
 			Agent:     agentWorker,
 			Query:     st.query,
-			Tools:     workerTools(),
+			Tools:     workerTools(w.deps),
 			Status:    types.StatusInProgress,
 			CreatedAt: st.started,
 		}, nil
@@ -174,7 +183,7 @@ func (w *Worker) mapInteraction(id string, st *workerState) *types.Interaction {
 		ID:           id,
 		Agent:        agentWorker,
 		Query:        st.query,
-		Tools:        workerTools(),
+		Tools:        workerTools(w.deps),
 		Status:       f.Status,
 		StatusDetail: f.Detail,
 		Citations:    f.Citations,
@@ -203,9 +212,98 @@ func (w *Worker) state(id string) (*workerState, error) {
 const agentWorker = "worker"
 
 // workerTools is the tool set recorded on a worker Interaction: the read-only
-// web tools the loop dispatches.
-func workerTools() []string {
-	return []string{"web_search", "web_fetch"}
+// web tools the loop dispatches, the knowledge store recall when configured,
+// and knowledge_remember when the finding is saved back, so an operator
+// reading the Interaction sees the write.
+func workerTools(deps WorkerDeps) []string {
+	tools := []string{"web_search", "web_fetch"}
+	if deps.Knowledge != nil {
+		tools = append(tools, "knowledge_recall")
+	}
+	if deps.Remember != nil {
+		tools = append(tools, "knowledge_remember")
+	}
+	return tools
+}
+
+// Save-back bounds. rememberTimeout also bounds how long a slow store can
+// delay Await.
+const (
+	rememberTimeout  = 30 * time.Second
+	maxRememberBytes = 32 << 10
+	maxRememberName  = 120
+)
+
+// rememberFinding saves a Completed, non-empty finding to deps.Remember under
+// its own timeout, detached from the run's cancellation. The outcome is
+// recorded on span and logged, both scrubbed; a failure never changes the
+// finding.
+func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Finding, span trace.Span) {
+	if w.deps.Remember == nil || f.Status != types.StatusCompleted || strings.TrimSpace(f.Text) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rememberTimeout)
+	defer cancel()
+
+	ref, err := w.deps.Remember.Remember(ctx, w.deps.KnowledgeNamespace, rememberedFinding(id, objective, f))
+	if err != nil {
+		detail := boundDetail(secret.Scrub(err.Error()))
+		if span != nil {
+			span.SetAttr("remember_error", detail)
+		}
+		slog.Default().Warn("worker: saving the finding to the knowledge store failed",
+			"interaction_id", id, "error", detail)
+		return
+	}
+	loc := ref.Locator
+	if loc == "" {
+		loc = ref.Digest
+	}
+	loc = boundDetail(secret.Scrub(loc))
+	if span != nil {
+		span.SetAttr("remember_ref", loc)
+	}
+	slog.Default().Info("worker: saved the finding to the knowledge store",
+		"interaction_id", id, "ref", loc)
+}
+
+// rememberedFinding is the Memory saved for a finding: the objective, the
+// answer, and the cited locators, scrubbed and bounded to maxRememberBytes.
+func rememberedFinding(id, objective string, f Finding) memory.Memory {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(objective))
+	b.WriteString("\n\n")
+	b.WriteString(strings.TrimSpace(f.Text))
+	if len(f.Citations) > 0 {
+		b.WriteString("\n\nSources:")
+		for _, c := range f.Citations {
+			b.WriteString("\n")
+			b.WriteString(c.URI)
+		}
+	}
+	return memory.Memory{
+		Text: boundBytes(secret.Scrub(b.String()), maxRememberBytes),
+		Meta: memory.ArtifactMeta{
+			Name: boundRunes(oneLine(secret.Scrub(objective)), maxRememberName),
+			Labels: map[string]string{
+				"kind":           "fact",
+				"agent":          agentWorker,
+				"interaction_id": id,
+			},
+		},
+	}
+}
+
+// boundRunes cuts s to at most n runes.
+func boundRunes(s string, n int) string {
+	i := 0
+	for pos := range s {
+		if i == n {
+			return s[:pos]
+		}
+		i++
+	}
+	return s
 }
 
 // newInteractionID mints an opaque, unguessable local id for one in-process
