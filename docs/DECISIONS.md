@@ -1005,3 +1005,61 @@ default agent draws 403s from many CDNs, and a site operator can now see who
 is fetching and why. The default `MaxContentBytes` drops from 8 MiB to
 1 MiB. It is a memory backstop, not a transcript budget: a caller that feeds
 pages to a model passes its own, tighter bound.
+
+## 2026-09-23 — Standard-model and search clients: strict-schema fake, max_completion_tokens, redirect downgrade
+
+Cycle-3 review remediation for `internal/researcher/fleet/model` and
+`internal/researcher/fleet/search`. No new dependency.
+
+**`max_completion_tokens` replaces `max_tokens` on the wire.** OpenAI's Chat
+Completions API rejects `max_tokens` for GPT-5-family and o-series models and
+documents `max_completion_tokens` as its replacement; the replacement also
+counts reasoning tokens, which is the bound a per-turn cap needs.
+`Request.MaxTokens` keeps its name, so callers are unaffected; only the wire
+field changes, amending the "optional `max_tokens`" wording of the 2026-07-01
+standard-model entry. An OpenAI-compatible server that predates the field may
+ignore it and leave a turn uncapped server-side; when a worker token cap is
+configured, the worker's cumulative check still stops the loop.
+
+**The fake model enforces strict structured output.** `Generate` always sends
+`strict: true` for a structured request, and the provider rejects a strict
+schema unless every object, at any depth, sets `additionalProperties: false`
+and lists every property in `required` (an optional field becomes a union with
+`null`). The fake accepted any schema, so a non-compliant schema passed CI and
+failed every real run on its first turn. `model.ValidateStrictSchema` now
+encodes those two rules, walking `properties`, `$defs`/`definitions`, `items`,
+`prefixItems`, `anyOf`/`oneOf`/`allOf` and `not`, and `FakeServer` answers a
+failing strict request with HTTP 400 and OpenAI's `invalid_request_error`
+envelope, recording the call without consuming a scripted reply. The
+validator is exported in the non-test build, beside the fake, so a package
+that builds a schema can unit-test it directly. It checks only these two
+rules, not the whole strict-mode subset (supported keywords, nesting limits,
+root type), so a green fake is necessary but not sufficient.
+
+**Redirects: no scheme downgrade.** Both credential-bearing clients refused
+cross-host redirects but followed a same-host `https` to `http` redirect, and
+`net/http` re-sends `Authorization` to any target on the same hostname
+whatever its scheme, so the key would travel in cleartext. The redirect
+policy, renamed from `refuseCrossHostRedirects` to `refuseUnsafeRedirects` in
+both packages, now also refuses a non-`https` target when the original request
+was `https`; same-host `https` redirects and the three-hop cap are unchanged.
+The v1 `internal/interactions.refuseCrossHostRedirects` has the same shape and
+is not changed by this entry. Alongside this, both clients reject an endpoint
+that embeds userinfo, and no endpoint error echoes a value containing `@`.
+
+**MCP transport conformance.** The search client now follows three more rules
+of the 2025-06-18 Streamable-HTTP transport. It sends `MCP-Protocol-Version`
+on every request after `initialize`, using the `protocolVersion` the server
+returned, or the client's own revision when the result names none; a
+different revision is still tolerated rather than refused, since the client
+relies only on the JSON-RPC envelope. It requires a reply's `id` to match the
+request's on both framings, accepting a null id only on an error reply, and
+skips SSE frames that carry a `method` (server requests and notifications,
+which it does not answer). When `initialize` issued an `Mcp-Session-Id`,
+`Search` ends the session with a best-effort `DELETE` before returning,
+whatever the outcome; the `DELETE` runs under the search's own deadline and
+its result is ignored, since a server may answer 405. A session still lives
+for one `Search`: reusing one across searches would save two round trips per
+query but needs re-initialisation on a 404 and concurrency control, and is
+deferred. The tool name and query argument key stay configurable through
+`Options.ToolName` and `Options.QueryArgKey` (defaults `search` and `query`).
