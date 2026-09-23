@@ -92,6 +92,16 @@ var recallPromptEdits = []struct{ old, new string }{
 		"call any\ntool other than search, fetch and recall;",
 	},
 	{
+		"Search first to gather sources, fetch the most promising ones to read\ntheir content,",
+		"Recall first when the objective may already be answered internally,\n" +
+			"then search to gather public sources, fetch the most promising ones to\n" +
+			"read their content,",
+	},
+	{
+		"Ground every claim in a fetched or\nsearched source;",
+		"Ground every claim in a recalled,\nfetched or searched source;",
+	},
+	{
 		"an\nunfinished loop wastes them.",
 		"an\nunfinished loop wastes them.\n\n" +
 			"The knowledge store holds the organisation's prior findings, decisions and\n" +

@@ -127,14 +127,18 @@ func TestRecallPromptAndSchema(t *testing.T) {
 		"other than search, fetch and recall",
 		"or the Ref\n    of a knowledge store result",
 		"never fetchable",
+		"Recall first when the objective may already be answered internally,\nthen search to gather public sources,",
+		"Ground every claim in a recalled,\nfetched or searched source;",
 		defaultBoundariesRecall,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("recall prompt lacks %q", want)
 		}
 	}
-	if strings.Contains(prompt, "external public web only") {
-		t.Error("recall prompt still claims the external public web only")
+	for _, stale := range []string{"external public web only", "Search first to gather sources", "in a fetched or\nsearched source"} {
+		if strings.Contains(prompt, stale) {
+			t.Errorf("recall prompt still says %q, contradicting the recall guidance", stale)
+		}
 	}
 	custom := buildSystemPrompt(Brief{Objective: "o", Boundaries: "Use only the external public web."}, true)
 	if !strings.Contains(custom, "Boundaries:\nUse only the external public web.") {

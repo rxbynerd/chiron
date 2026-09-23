@@ -304,8 +304,12 @@ type WorkerDeps struct {
   internally, then confirm on the public web; a recalled item is citable by
   the `Ref:` shown. The "external public web only" sentence becomes "the
   external public web and, where offered, the organisation's knowledge
-  store". Prose changes are guarded so the recall-disabled prompt is
-  byte-identical to today's.
+  store"; "Search first to gather sources" becomes "Recall first when the
+  objective may already be answered internally, then search to gather public
+  sources"; and "Ground every claim in a fetched or searched source" becomes
+  "in a recalled, fetched or searched source", so the recall-enabled prompt
+  never contradicts its own recall guidance. Prose changes are guarded so
+  the recall-disabled prompt is byte-identical to today's.
 - `doRecall` calls `Knowledge.Recall(ctx, KnowledgeNamespace, Query{Text,
   Limit: RecallLimit})`, increments `usage.RecallCount`, records every hit
   locator as citable (see 4.3), and appends `recallResultsMessage`. Failures
