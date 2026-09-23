@@ -417,3 +417,35 @@ func TestRunNilInteractionFromResearcher(t *testing.T) {
 		t.Fatalf("error = %v, want the nil-interaction guard", err)
 	}
 }
+
+// valueTracer records the last value of each metric; spans are no-ops.
+type valueTracer struct {
+	trace.Noop
+	values map[string]float64
+}
+
+func (v *valueTracer) Metric(_ context.Context, name string, value float64) {
+	if v.values == nil {
+		v.values = make(map[string]float64)
+	}
+	v.values[name] = value
+}
+
+// TestRunRecordsRecallCount: the run-level recall count is recorded beside
+// the search count from the interaction's usage.
+func TestRunRecordsRecallCount(t *testing.T) {
+	deps, r, _, _ := happyDeps()
+	r.result.Usage.RecallCount = 3
+	tracer := &valueTracer{}
+	deps.Tracer = tracer
+
+	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := tracer.values[trace.MetricRecallCount]; got != 3 {
+		t.Errorf("%s = %v, want 3", trace.MetricRecallCount, got)
+	}
+	if got := tracer.values[trace.MetricSearchCount]; got != 80 {
+		t.Errorf("%s = %v, want 80", trace.MetricSearchCount, got)
+	}
+}
