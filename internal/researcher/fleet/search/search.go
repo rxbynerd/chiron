@@ -14,8 +14,8 @@
 // Money-safety and security follow the Gemini adapter (internal/interactions,
 // internal/researcher/gemini) and the sibling model adapter
 // (internal/researcher/fleet/model): every response body is bounded, a
-// text/event-stream reply is read under the same bound, cross-host redirects
-// carrying the credential are refused, and the search key travels only in the
+// text/event-stream reply is read under the same bound, cross-host and
+// https-to-http redirects are refused, and the search key travels only in the
 // Authorization header — never a URL, query, log, error, or trace.
 package search
 
@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,7 +56,8 @@ type Options struct {
 	// https:// URL, with http:// admitted for loopback hosts only
 	// (127.0.0.1, ::1, localhost) — the credential travels to whatever
 	// endpoint is set, so a cleartext or internal override would be a
-	// key-exfiltration and SSRF channel (CWE-918, CWE-319).
+	// key-exfiltration and SSRF channel (CWE-918, CWE-319). Userinfo
+	// (user:password@) is rejected.
 	Endpoint string
 	// APIKey is the ALREADY-RESOLVED literal key. This client never resolves
 	// secret:// references itself — resolution happens at the CLI composition
@@ -108,14 +110,10 @@ func New(opts Options) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	// Go's net/http strips only its own sensitive headers (Authorization,
-	// Cookie, ...) on cross-domain redirects, and following a same-scheme
-	// cross-host redirect would still hand the Authorization header to the
-	// new host. The same-host policy is set on a shallow copy (sharing the
-	// caller's Transport, jar and timeout), so supplying a bare client via
-	// Options.HTTPClient cannot lose the guarantee.
+	// The policy is set on a shallow copy, sharing the caller's Transport,
+	// jar and timeout, so a caller-supplied client cannot bypass it.
 	hc := *httpClient
-	hc.CheckRedirect = refuseCrossHostRedirects
+	hc.CheckRedirect = refuseUnsafeRedirects
 	httpClient = &hc
 
 	requestTimeout := opts.RequestTimeout
@@ -157,20 +155,33 @@ type Result struct {
 }
 
 // validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule: an absolute
-// https:// URL, with http:// admitted for loopback hosts only. This mirrors
-// model.validateEndpoint and allowedEndpointScheme in internal/config
-// (validated there too); it is re-applied here because the client is a
-// reusable seam that must not depend on config having run. The error echoes
-// only the endpoint, never a credential.
+// https:// URL, with http:// admitted for loopback hosts only, and no
+// userinfo. This mirrors model.validateEndpoint and allowedEndpointScheme in
+// internal/config (validated there too); it is re-applied here because the
+// client is a reusable seam that must not depend on config having run. No
+// error echoes userinfo.
 func validateEndpoint(raw string) error {
 	if raw == "" {
 		return errors.New("search: endpoint must not be empty")
 	}
 	u, err := url.Parse(raw)
+	if err == nil && u.User != nil {
+		return errors.New("search: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
+	}
 	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("search: endpoint %q must be an absolute https:// URL (http:// only for loopback test servers)", raw)
+		return fmt.Errorf("search: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
 	}
 	return nil
+}
+
+// quoteEndpoint renders an endpoint for an error message. A value containing
+// '@' is withheld: a malformed URL can carry credentials that url.Parse does
+// not recognise as userinfo.
+func quoteEndpoint(raw string) string {
+	if strings.Contains(raw, "@") {
+		return "(withheld: contains '@')"
+	}
+	return strconv.Quote(raw)
 }
 
 // allowedEndpointScheme admits https anywhere and http on loopback only — the
@@ -194,16 +205,20 @@ func allowedEndpointScheme(u *url.URL) bool {
 	}
 }
 
-// refuseCrossHostRedirects is the client's redirect policy: same-host
-// redirects are followed (capped at three hops), cross-host redirects are
-// refused outright — the Authorization header travels on every request, and
-// following one would hand the key to the redirect target (CWE-601). This
-// reimplements internal/interactions.refuseCrossHostRedirects (unexported)
-// and model.refuseCrossHostRedirects; the duplication is noted in
+// refuseUnsafeRedirects is the client's redirect policy: same-host redirects
+// are followed (capped at three hops), but a redirect to another host
+// (CWE-601) or from https to http (CWE-319) is refused. net/http re-sends the
+// Authorization header to any target on the same hostname whatever its
+// scheme, so a downgrade would put the key on the wire in cleartext. It
+// mirrors model.refuseUnsafeRedirects; the duplication is noted in
 // docs/DECISIONS.md.
-func refuseCrossHostRedirects(req *http.Request, via []*http.Request) error {
-	if req.URL.Host != via[0].URL.Host {
+func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
+	first := via[0].URL
+	if req.URL.Host != first.Host {
 		return fmt.Errorf("search: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
+	}
+	if first.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("search: redirect to %s://%s refused: downgrade from https with sensitive headers", req.URL.Scheme, req.URL.Host)
 	}
 	if len(via) >= 3 {
 		return errors.New("search: too many redirects")

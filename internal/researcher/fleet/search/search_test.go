@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,6 +282,117 @@ func TestSearchCrossHostRedirectRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
 		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+}
+
+func TestSearchHTTPSDowngradeRedirectRefused(t *testing.T) {
+	// net/http re-sends Authorization to the same hostname on any scheme, so
+	// an https endpoint redirecting to http on the same host must be refused
+	// before a second connection is opened.
+	var hits, conns atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, "http://"+r.Host+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	c := newClient(t, server.URL, func(o *Options) { o.HTTPClient = server.Client() })
+	_, err := c.Search(context.Background(), "q")
+	if err == nil {
+		t.Fatal("Search should fail rather than follow an https-to-http redirect")
+	}
+	if !strings.Contains(err.Error(), "downgrade") {
+		t.Errorf("error = %v, want a downgrade refusal", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("handler hits = %d, want 1", got)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Errorf("connections = %d, want 1 — the cleartext redirect target must never be dialled", got)
+	}
+}
+
+func TestSearchRedirectPolicy(t *testing.T) {
+	request := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", raw, err)
+		}
+		return &http.Request{URL: u}
+	}
+	tests := []struct {
+		name    string
+		via     []string
+		target  string
+		wantErr string
+	}{
+		{"same-host https path change followed", []string{"https://search.example.com/mcp"}, "https://search.example.com/v2/mcp", ""},
+		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/mcp"}, "http://127.0.0.1:8080/v2", ""},
+		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/mcp"}, "https://127.0.0.1:8080/mcp", ""},
+		{"cross-host refused", []string{"https://search.example.com/mcp"}, "https://evil.example/mcp", "cross-origin"},
+		{"https to http on the same host refused", []string{"https://search.example.com/mcp"}, "http://search.example.com/mcp", "downgrade"},
+		{"downgrade on a later hop refused", []string{"https://search.example.com/a", "https://search.example.com/b"}, "http://search.example.com/c", "downgrade"},
+		{"third hop refused", []string{"https://search.example.com/a", "https://search.example.com/b", "https://search.example.com/c"}, "https://search.example.com/d", "too many redirects"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var via []*http.Request
+			for _, v := range tt.via {
+				via = append(via, request(v))
+			}
+			err := refuseUnsafeRedirects(request(tt.target), via)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSearchEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
+	// An endpoint carrying credentials is rejected, and the error never
+	// repeats them, even when a typo stops url.Parse recognising userinfo.
+	const (
+		username = "alice"
+		password = "Winter2026!"
+	)
+	tests := []struct {
+		name     string
+		endpoint string
+		wantErr  string
+	}{
+		{"user and password", "https://" + username + ":" + password + "@search.example.com/mcp", "userinfo"},
+		{"key as username", "https://" + password + "@search.example.com/mcp", "userinfo"},
+		{"deceptive host", "https://search.example.com:" + password + "@evil.example/mcp", "userinfo"},
+		{"loopback with userinfo", "http://" + username + ":" + password + "@127.0.0.1:8080/mcp", "userinfo"},
+		{"mistyped scheme", "htps://" + username + ":" + password + "@gateway.corp/mcp", "userinfo"},
+		{"single slash", "https:/" + username + ":" + password + "@gateway.corp/mcp", "withheld"},
+		{"unparseable", "://" + username + ":" + password + "@gateway.corp/mcp", "withheld"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Options{Endpoint: tt.endpoint, APIKey: testKey})
+			if err == nil {
+				t.Fatalf("New(%q) succeeded, want an error", tt.endpoint)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), username) {
+				t.Errorf("error echoed the credentials: %v", err)
+			}
+		})
 	}
 }
 
