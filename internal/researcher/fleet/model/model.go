@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -48,7 +49,8 @@ type Options struct {
 	// https:// URL, with http:// admitted for loopback hosts only
 	// (127.0.0.1, ::1, localhost) — the credential travels to whatever
 	// endpoint is set, so a cleartext or internal override would be a
-	// key-exfiltration and SSRF channel (CWE-918, CWE-319).
+	// key-exfiltration and SSRF channel (CWE-918, CWE-319). Userinfo
+	// (user:password@) is rejected.
 	Endpoint string
 	// Model is the model identifier sent in the request body, e.g.
 	// "gpt-5.5". Required.
@@ -131,20 +133,33 @@ func New(opts Options) (*Client, error) {
 }
 
 // validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule: an absolute
-// https:// URL, with http:// admitted for loopback hosts only. This
-// mirrors allowedEndpointScheme in internal/config (validated there too);
-// it is re-applied here because the adapter is a reusable seam that must
-// not depend on config having run. The error echoes only the endpoint,
-// never a credential.
+// https:// URL, with http:// admitted for loopback hosts only, and no
+// userinfo. This mirrors allowedEndpointScheme in internal/config
+// (validated there too); it is re-applied here because the adapter is a
+// reusable seam that must not depend on config having run. No error echoes
+// userinfo.
 func validateEndpoint(raw string) error {
 	if raw == "" {
 		return errors.New("model: endpoint must not be empty")
 	}
 	u, err := url.Parse(raw)
+	if err == nil && u.User != nil {
+		return errors.New("model: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
+	}
 	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("model: endpoint %q must be an absolute https:// URL (http:// only for loopback test servers)", raw)
+		return fmt.Errorf("model: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
 	}
 	return nil
+}
+
+// quoteEndpoint renders an endpoint for an error message. A value containing
+// '@' is withheld: a malformed URL can carry credentials that url.Parse does
+// not recognise as userinfo.
+func quoteEndpoint(raw string) string {
+	if strings.Contains(raw, "@") {
+		return "(withheld: contains '@')"
+	}
+	return strconv.Quote(raw)
 }
 
 // allowedEndpointScheme admits https anywhere and http on loopback only —

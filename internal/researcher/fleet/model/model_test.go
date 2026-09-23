@@ -500,6 +500,42 @@ func TestEndpointValidation(t *testing.T) {
 	}
 }
 
+func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
+	// An endpoint carrying credentials is rejected, and the error never
+	// repeats them, even when a typo stops url.Parse recognising userinfo.
+	const (
+		username = "alice"
+		password = "Winter2026!"
+	)
+	tests := []struct {
+		name     string
+		endpoint string
+		wantErr  string
+	}{
+		{"user and password", "https://" + username + ":" + password + "@api.example.com/v1", "userinfo"},
+		{"key as username", "https://" + password + "@api.example.com/v1", "userinfo"},
+		{"deceptive host", "https://api.openai.com:" + password + "@evil.example/v1", "userinfo"},
+		{"loopback with userinfo", "http://" + username + ":" + password + "@127.0.0.1:8080/v1", "userinfo"},
+		{"mistyped scheme", "htps://" + username + ":" + password + "@gateway.corp/v1", "userinfo"},
+		{"single slash", "https:/" + username + ":" + password + "@gateway.corp/v1", "withheld"},
+		{"unparseable", "://" + username + ":" + password + "@gateway.corp/v1", "withheld"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(Options{Endpoint: tt.endpoint, Model: "gpt-test", APIKey: testKey})
+			if err == nil {
+				t.Fatalf("New(%q) succeeded, want an error", tt.endpoint)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), username) {
+				t.Errorf("error echoed the credentials: %v", err)
+			}
+		})
+	}
+}
+
 func TestNewValidatesRequiredFields(t *testing.T) {
 	tests := []struct {
 		name string
