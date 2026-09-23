@@ -30,6 +30,16 @@ the report. Reviewing needs a terminal on stdin — in a pipeline, pass
 With --budget, the run is blocked up front when the tier's estimated
 cost exceeds the cap — before any interaction is created.
 
+--agent selects the researcher. deep-research and deep-research-max are
+the managed Gemini Deep Research tiers; --plan, --budget and the tool
+flags apply to them. worker is Chiron's own in-process research loop
+over one standard model (fleet.model_endpoint) plus a web-search MCP
+server (fleet.search_endpoint) and web_fetch; its spend is bounded by
+the fleet caps (--fleet-max-turns, --fleet-max-tokens, --fleet-ceiling
+with the fleet-price flags, --fleet-worker-timeout), and the
+deep-research levers are rejected rather than ignored. fleet, the
+multi-worker orchestrator, is not implemented yet.
+
 Exit codes:
 
   0  the research completed and the report was emitted
@@ -80,11 +90,12 @@ func newGetCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <interaction-id>",
 		Short: "Re-fetch and format an interaction (resume after a crash)",
-		Long: `Re-fetch a completed or in-progress interaction by its ID and format the
-report. State is held server-side, so a crashed run is recovered with no
-local state. An in-progress interaction is awaited to completion,
-respecting --timeout; a finished one is emitted immediately. No new
-interaction is created and nothing new is spent.`,
+		Long: `Re-fetch a completed or in-progress deep-research interaction by its ID
+and format the report. State is held server-side, so a crashed run is
+recovered with no local state. An in-progress interaction is awaited to
+completion, respecting --timeout; a finished one is emitted immediately.
+No new interaction is created and nothing new is spent. Ids minted by the
+in-process worker (wkr_...) hold no server-side state and are refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)
@@ -102,10 +113,11 @@ func newFollowUpCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "follow-up <interaction-id>",
 		Short: "Ask a follow-up question against a completed interaction",
-		Long: `Ask a follow-up question about a completed research interaction. The
-question is answered by a model over the stored interaction
+		Long: `Ask a follow-up question about a completed deep-research interaction.
+The question is answered by a model over the stored interaction
 (previous_interaction_id), not by a new research task — quick and far
-cheaper than re-researching. --model overrides the default model.`,
+cheaper than re-researching. --model overrides the default model. Ids
+minted by the in-process worker (wkr_...) are refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)

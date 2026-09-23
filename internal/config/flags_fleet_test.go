@@ -56,6 +56,21 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 				t.Errorf("CeilingGBP = %v", f.CeilingGBP)
 			}
 		}},
+		{"price-input", []string{"--fleet-price-input", "1.5"}, func(t *testing.T, f FleetConfig) {
+			if f.PriceInputGBPPerMTok != 1.5 {
+				t.Errorf("PriceInputGBPPerMTok = %v", f.PriceInputGBPPerMTok)
+			}
+		}},
+		{"price-output", []string{"--fleet-price-output", "12"}, func(t *testing.T, f FleetConfig) {
+			if f.PriceOutputGBPPerMTok != 12 {
+				t.Errorf("PriceOutputGBPPerMTok = %v", f.PriceOutputGBPPerMTok)
+			}
+		}},
+		{"max-page-bytes", []string{"--fleet-max-page-bytes", "4096"}, func(t *testing.T, f FleetConfig) {
+			if f.MaxPageBytes != 4096 {
+				t.Errorf("MaxPageBytes = %d", f.MaxPageBytes)
+			}
+		}},
 		{"worker-timeout", []string{"--fleet-worker-timeout", "90s"}, func(t *testing.T, f FleetConfig) {
 			if time.Duration(f.WorkerTimeout) != 90*time.Second {
 				t.Errorf("WorkerTimeout = %v", f.WorkerTimeout)
@@ -91,18 +106,7 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 			// Only the flag under test may diverge from the defaults:
 			// reset that one field and the whole config must equal Default().
 			rest := cfg
-			rest.Fleet.ModelEndpoint = ""
-			rest.Fleet.ModelName = ""
-			rest.Fleet.ModelKeyRef = ""
-			rest.Fleet.SearchEndpoint = ""
-			rest.Fleet.SearchKeyRef = ""
-			rest.Fleet.MaxTurns = Default().Fleet.MaxTurns
-			rest.Fleet.MaxTokens = Default().Fleet.MaxTokens
-			rest.Fleet.CeilingGBP = Default().Fleet.CeilingGBP
-			rest.Fleet.WorkerTimeout = Default().Fleet.WorkerTimeout
-			rest.Fleet.MaxWorkers = Default().Fleet.MaxWorkers
-			rest.Fleet.Concurrency = Default().Fleet.Concurrency
-			rest.Fleet.Memory = Default().Fleet.Memory
+			rest.Fleet = Default().Fleet
 			if !reflect.DeepEqual(rest, Default()) {
 				t.Errorf("an unrelated field changed: %+v", cfg)
 			}

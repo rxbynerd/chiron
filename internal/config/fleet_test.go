@@ -21,6 +21,8 @@ func validWorker() ResearchConfig {
 	cfg.Fleet.SearchKeyRef = "secret://SEARCH_API_KEY"
 	cfg.Fleet.MaxTokens = 200_000
 	cfg.Fleet.CeilingGBP = 1.50
+	cfg.Fleet.PriceInputGBPPerMTok = 1.2
+	cfg.Fleet.PriceOutputGBPPerMTok = 9.6
 	return cfg
 }
 
@@ -110,6 +112,11 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"max turns negative", func(c *ResearchConfig) { c.Fleet.MaxTurns = -1 }},
 		{"max tokens negative", func(c *ResearchConfig) { c.Fleet.MaxTokens = -1 }},
 		{"ceiling negative", func(c *ResearchConfig) { c.Fleet.CeilingGBP = -0.5 }},
+		{"ceiling without a price", func(c *ResearchConfig) {
+			c.Fleet.PriceInputGBPPerMTok, c.Fleet.PriceOutputGBPPerMTok = 0, 0
+		}},
+		{"price negative", func(c *ResearchConfig) { c.Fleet.PriceOutputGBPPerMTok = -1 }},
+		{"page bytes zero", func(c *ResearchConfig) { c.Fleet.MaxPageBytes = 0 }},
 		{"worker timeout zero", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = 0 }},
 		{"worker timeout negative", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = Duration(-time.Second) }},
 		{"bad memory enum", func(c *ResearchConfig) { c.Fleet.Memory = "redis" }},
@@ -217,5 +224,55 @@ func TestFleetDecodeRejectsUnknownKeys(t *testing.T) {
 	const in = "agent: worker\nfleet:\n  max_trns: 4\n"
 	if _, err := Decode(strings.NewReader(in)); err == nil {
 		t.Error("a typo inside the fleet block was accepted silently")
+	}
+}
+
+// TestValidateRejectsDeepResearchLeversForInProcessAgents: a Gemini-only
+// spend or planning lever set alongside the worker or fleet agent is an
+// error naming the lever, never a silent no-op.
+func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*ResearchConfig)
+		want   string
+	}{
+		{"budget", func(c *ResearchConfig) { c.BudgetGBP = 2 }, "budget:"},
+		{"plan", func(c *ResearchConfig) { c.Plan = true }, "plan:"},
+		{"accept_plan", func(c *ResearchConfig) { c.AcceptPlan = true }, "accept_plan:"},
+		{"model", func(c *ResearchConfig) { c.Model = "gemini-2.5-pro" }, "model:"},
+		{"visualise", func(c *ResearchConfig) { c.Visualise = true }, "visualise:"},
+		{"tools", func(c *ResearchConfig) { c.Tools = []string{"google_search"} }, "tools:"},
+		{"mcp", func(c *ResearchConfig) { c.MCP = map[string]string{"x": "https://x"} }, "mcp:"},
+		{"file_search", func(c *ResearchConfig) { c.FileSearch = []string{"store"} }, "file_search:"},
+		{"inputs", func(c *ResearchConfig) { c.Inputs = []string{"doc.pdf"} }, "inputs:"},
+		{"template", func(c *ResearchConfig) { c.Template = "t.md" }, "template:"},
+	} {
+		for _, agent := range []string{AgentWorker, AgentFleet} {
+			t.Run(tt.name+"/"+agent, func(t *testing.T) {
+				cfg := validWorker()
+				cfg.Agent = agent
+				tt.mutate(&cfg)
+				err := cfg.Validate()
+				if err == nil || !strings.HasPrefix(err.Error(), tt.want) {
+					t.Errorf("Validate = %v, want an error starting %q", err, tt.want)
+				}
+			})
+		}
+	}
+	// The same levers remain valid for the deep-research tiers.
+	cfg := Default()
+	cfg.BudgetGBP, cfg.Plan, cfg.Template = 2, true, "t.md"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("deep-research with levers: %v", err)
+	}
+}
+
+// TestDefaultFleetIsBounded: the defaults alone cap turns, tokens, page size
+// and wall clock, so a bare --agent worker run is bounded on every axis
+// that needs no price table.
+func TestDefaultFleetIsBounded(t *testing.T) {
+	f := Default().Fleet
+	if f.MaxTurns <= 0 || f.MaxTokens <= 0 || f.MaxPageBytes <= 0 || time.Duration(f.WorkerTimeout) <= 0 {
+		t.Errorf("default fleet caps are not all positive: %+v", f)
 	}
 }

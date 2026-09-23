@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/types"
@@ -371,26 +372,23 @@ func TestResearchRequiresQuery(t *testing.T) {
 	}
 }
 
-// TestFleetAgentNotYetWired pins the interim composition-root contract
-// (V2-RESEARCH-AGENT §6): the fleet orchestrator passes config validation
-// but is not constructed yet (Wave 4), so the run fails with a clear typed
-// error at the seam-selection point — never a nil researcher or a silent
-// Gemini fallback. The guard fires before any secret is resolved or any
-// request is made, so no fake server is needed. Wave 4 replaces this with
-// real construction. The worker agent is now wired (see
-// TestWorkerAgentIsWired), so only fleet is asserted here.
-func TestFleetAgentNotYetWired(t *testing.T) {
+// TestFleetAgentNotImplemented: the fleet orchestrator passes config
+// validation but has no researcher, so the run fails with a clear error at
+// the seam-selection point, before any secret is resolved or request made.
+// It is a usage error, not a research outcome.
+func TestFleetAgentNotImplemented(t *testing.T) {
 	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "-o", "none")
 	if err == nil {
-		t.Fatal("--agent fleet must fail until the researcher is wired")
+		t.Fatal("--agent fleet must fail until the researcher exists")
 	}
-	if !strings.Contains(err.Error(), "not yet wired") {
-		t.Errorf("err = %v, want the not-yet-wired message", err)
+	if !errors.Is(err, fleet.ErrNotImplemented) {
+		t.Errorf("err = %v, want fleet.ErrNotImplemented", err)
 	}
-	// It is an infrastructure/usage error, not a research outcome — no
-	// ExitError, so no research exit code.
+	if !strings.Contains(err.Error(), "--agent worker") {
+		t.Errorf("err = %v, want a pointer to the working agent", err)
+	}
 	if _, ok := errors.AsType[*ExitError](err); ok {
-		t.Errorf("a not-yet-wired agent is a usage error, not a research outcome: %v", err)
+		t.Errorf("an unimplemented agent is a usage error, not a research outcome: %v", err)
 	}
 }
 
