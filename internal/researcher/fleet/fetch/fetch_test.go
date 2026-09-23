@@ -83,6 +83,13 @@ func TestFetchPrivateAddressRefused(t *testing.T) {
 		{"ipv6 loopback", "http://[::1]/x"},
 		{"ipv6 link-local", "http://[fe80::1]/x"},
 		{"unspecified", "http://0.0.0.0/x"},
+		{"cgnat metadata", "http://100.100.100.200/latest/meta-data"},
+		{"mapped loopback", "http://[::ffff:127.0.0.1]/x"},
+		{"mapped metadata", "http://[::ffff:169.254.169.254]/x"},
+		{"unique local", "http://[fd00::1]/x"},
+		{"nat64 metadata", "http://[64:ff9b::a9fe:a9fe]/x"},
+		{"6to4 metadata", "http://[2002:a9fe:a9fe::1]/x"},
+		{"zoned link-local", "http://[fe80::1%25eth0]/x"},
 	}
 	c := newClient(t, func(o *Options) { o.AllowLoopback = false })
 	for _, tt := range tests {

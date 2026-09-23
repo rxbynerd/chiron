@@ -9,10 +9,11 @@
 // chosen by an upstream search result, and carries NO Chiron credential. The
 // dominant risk is therefore Server-Side Request Forgery (SSRF, CWE-918): a
 // crafted or compromised search result pointing web_fetch at an internal
-// address. The guard here refuses loopback, private, link-local and
-// unspecified destinations (unless AllowLoopback is set for tests), and
-// re-checks the destination on every redirect so a redirect to an internal
-// host is refused too.
+// address. The guard here refuses loopback, private, link-local, CGNAT,
+// multicast, reserved and other special-purpose destinations, including an
+// IPv4 address embedded in an IPv6 one (see isInternal), and re-checks the
+// destination on every redirect so a redirect to an internal host is refused
+// too.
 //
 // HTTP hardening otherwise follows the Gemini adapter (internal/interactions):
 // bounded body reads, a redirect-depth cap, and a per-call timeout that yields
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -60,12 +62,11 @@ type Options struct {
 	// adapter where oversize is an error.
 	MaxContentBytes int64
 	// AllowLoopback, when true, permits fetching loopback and unspecified
-	// destinations (127.0.0.0/8, ::1, 0.0.0.0). It exists ONLY so tests can
-	// reach loopback httptest servers; production configuration must leave it
-	// false. It deliberately does NOT relax the refusal of private (RFC1918 /
-	// RFC4193) or link-local addresses — those remain refused even under
-	// AllowLoopback, so a redirect from a loopback test server to, say, the
-	// cloud metadata endpoint (169.254.169.254) is still caught.
+	// destinations (127.0.0.0/8, ::1, 0.0.0.0, ::). It exists ONLY so tests
+	// can reach loopback httptest servers; production configuration must
+	// leave it false. Every other internal range stays refused, so a redirect
+	// from a loopback test server to the cloud metadata endpoint
+	// (169.254.169.254) is still caught.
 	AllowLoopback bool
 }
 
@@ -167,7 +168,7 @@ func guardHost(u *url.URL, allowLoopback bool) error {
 
 	// A literal IP is checked directly; a name is resolved and every answer
 	// checked.
-	if ip := net.ParseIP(host); ip != nil {
+	if ip, err := netip.ParseAddr(host); err == nil {
 		if isInternal(ip, allowLoopback) {
 			return fmt.Errorf("%w: %s is an internal address", ErrRefusedDestination, host)
 		}
@@ -179,28 +180,12 @@ func guardHost(u *url.URL, allowLoopback bool) error {
 		return fmt.Errorf("fetch: resolving %s: %v", host, err)
 	}
 	for _, ip := range ips {
-		if isInternal(ip, allowLoopback) {
+		addr, _ := netip.AddrFromSlice(ip)
+		if isInternal(addr, allowLoopback) {
 			return fmt.Errorf("%w: %s resolves to internal address %s", ErrRefusedDestination, host, ip)
 		}
 	}
 	return nil
-}
-
-// isInternal reports whether ip is one Chiron must not reach from a
-// web_fetch: loopback, RFC1918 / RFC4193 private, link-local (unicast or
-// multicast, which covers 169.254/16 and fe80::/10), or the unspecified
-// address. IsPrivate covers the standard private ranges in both families.
-// When allowLoopback is set, loopback and the unspecified address are exempt
-// (tests reach loopback httptest servers) but private and link-local remain
-// internal, so the guard still catches a redirect to an internal host.
-func isInternal(ip net.IP, allowLoopback bool) bool {
-	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-	if allowLoopback {
-		return false
-	}
-	return ip.IsLoopback() || ip.IsUnspecified()
 }
 
 // sanitizeURL returns u with any userinfo (user:password@) stripped, so the
