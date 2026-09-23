@@ -30,8 +30,10 @@ import (
 
 // Defaults, all overridable via Options.
 const (
-	defaultRequestTimeout  = 30 * time.Second
-	defaultMaxContentBytes = 8 << 20
+	defaultRequestTimeout = 30 * time.Second
+	// defaultMaxContentBytes is a memory backstop, not a transcript budget:
+	// a caller that feeds pages to a model passes its own, tighter bound.
+	defaultMaxContentBytes = 1 << 20
 	defaultUserAgent       = "chiron/2 (+https://github.com/rxbynerd/chiron; research-only web_fetch)"
 	maxRedirects           = 5
 )
@@ -56,7 +58,7 @@ type Options struct {
 	// reading the body. Default 30s. A caller-supplied context deadline still
 	// wins if tighter.
 	RequestTimeout time.Duration
-	// MaxContentBytes bounds how much of a page body is read. Default 8 MiB.
+	// MaxContentBytes bounds how much of a page body is read. Default 1 MiB.
 	// A source exceeding the bound is truncated and Page.Truncated is set —
 	// partial page text is still useful (docs/DECISIONS.md), unlike the model
 	// adapter where oversize is an error.

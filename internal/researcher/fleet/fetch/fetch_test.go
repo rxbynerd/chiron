@@ -318,6 +318,24 @@ func TestFetchOversizedTruncated(t *testing.T) {
 	}
 }
 
+func TestFetchDefaultContentBound(t *testing.T) {
+	// With MaxContentBytes unset, reads stop at 1 MiB.
+	body := strings.Repeat("x", 1<<20+1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	c := newClient(t)
+	page, err := c.Fetch(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if !page.Truncated || len(page.Content) != 1<<20 {
+		t.Errorf("Truncated = %v, len(Content) = %d; want true and %d", page.Truncated, len(page.Content), 1<<20)
+	}
+}
+
 func TestFetchExactBoundNotTruncated(t *testing.T) {
 	// A body exactly at the bound is complete, not truncated.
 	body := strings.Repeat("x", 512)
