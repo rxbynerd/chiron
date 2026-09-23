@@ -306,8 +306,8 @@ type WorkerDeps struct {
   field passed through `defang`: numbered hits, `Name`, `Ref: <Locator>`,
   a score when non-zero, then the text, each hit bounded to `maxRecallHitBytes`
   (4 KiB) and the whole message to `MaxRecallBytes`, with a `[truncated]`
-  marker. Zero hits renders "(no results)". A `degraded` label is rendered
-  once as a note before the list.
+  marker. Zero hits renders "(no results)". A non-empty `degraded` label is
+  rendered once, with its reason, as a note before the list.
 
 ### 4.3 Citations
 
@@ -341,7 +341,8 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
   a slow store never delays `Await`.
 - Failure never changes the run's status. The outcome goes on the worker
   span (`remember_ref` or `remember_error`, scrubbed) and to stderr through
-  the process logger (scrubbed). The `Interaction` records the reference in
+  the `Logger` injected in `WorkerDeps` (bound by the composition root to a
+  scrub-wrapped handler on the command's stderr; nil discards). The `Interaction` records the reference in
   `Metadata["remember_ref"]` if `types.Interaction` has a metadata map;
   otherwise only the span and log carry it (check `internal/types` first
   and do not add a field for this alone).

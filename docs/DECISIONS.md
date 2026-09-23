@@ -1238,8 +1238,10 @@ closing the channel first and saving afterwards was rejected: `Result` could
 read the Interaction while the save was still running, and the goroutine
 would outlive the run with no deterministic end. The save runs while the
 worker span is still open, so the outcome lands on it as `remember_ref` or
-`remember_error`, scrubbed, and is logged through `slog.Default()`, also
-scrubbed. A failure never changes the run's status. `types.Interaction` has
+`remember_error`, scrubbed, and is logged through the `Logger` injected in
+`WorkerDeps`: the composition root binds a scrub-wrapped handler on the
+command's stderr, and a nil `Logger` discards the record, so the worker
+never writes to the process-wide default logger. A failure never changes the run's status. `types.Interaction` has
 no metadata map, and none was added for this alone, so the reference is not
 recorded on the Interaction.
 
