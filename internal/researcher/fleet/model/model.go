@@ -14,8 +14,8 @@
 //
 // Money-safety and security follow the Gemini adapter
 // (internal/researcher/gemini, internal/interactions): the paid POST is
-// never auto-retried, response bodies are bounded, cross-host redirects
-// carrying the credential are refused, and the API key travels only in the
+// never auto-retried, response bodies are bounded, cross-host and
+// https-to-http redirects are refused, and the API key travels only in the
 // Authorization header — never a URL, log, error, or trace.
 package model
 
@@ -105,14 +105,10 @@ func New(opts Options) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	// Go's net/http strips only its own sensitive headers (Authorization,
-	// Cookie, ...) on cross-domain redirects, and following a same-scheme
-	// cross-host redirect would still hand the Authorization header to the
-	// new host. The same-host policy is set on a shallow copy (sharing the
-	// caller's Transport, jar and timeout), so supplying a bare client via
-	// Options.HTTPClient cannot lose the guarantee.
+	// The policy is set on a shallow copy, sharing the caller's Transport,
+	// jar and timeout, so a caller-supplied client cannot bypass it.
 	hc := *httpClient
-	hc.CheckRedirect = refuseCrossHostRedirects
+	hc.CheckRedirect = refuseUnsafeRedirects
 	httpClient = &hc
 
 	requestTimeout := opts.RequestTimeout
@@ -172,15 +168,20 @@ func allowedEndpointScheme(u *url.URL) bool {
 	}
 }
 
-// refuseCrossHostRedirects is the client's redirect policy: same-host
-// redirects are followed (capped at three hops), cross-host redirects are
-// refused outright — the Authorization header travels on every request,
-// and following one would hand the key to the redirect target (CWE-601).
-// This reimplements internal/interactions.refuseCrossHostRedirects, which
-// is unexported; the duplication is noted in docs/DECISIONS.md.
-func refuseCrossHostRedirects(req *http.Request, via []*http.Request) error {
-	if req.URL.Host != via[0].URL.Host {
+// refuseUnsafeRedirects is the client's redirect policy: same-host
+// redirects are followed (capped at three hops), but a redirect to another
+// host (CWE-601) or from https to http (CWE-319) is refused. net/http
+// re-sends the Authorization header to any target on the same hostname
+// whatever its scheme, so a downgrade would put the key on the wire in
+// cleartext. It extends the unexported
+// internal/interactions.refuseCrossHostRedirects with the downgrade check.
+func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
+	first := via[0].URL
+	if req.URL.Host != first.Host {
 		return fmt.Errorf("model: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
+	}
+	if first.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("model: redirect to %s://%s refused: downgrade from https with sensitive headers", req.URL.Scheme, req.URL.Host)
 	}
 	if len(via) >= 3 {
 		return errors.New("model: too many redirects")

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -388,6 +391,83 @@ func TestCrossHostRedirectRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
 		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+}
+
+func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
+	// net/http re-sends Authorization to the same hostname on any scheme, so
+	// an https endpoint redirecting to http on the same host must be refused
+	// before a second connection is opened.
+	var hits, conns atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, "http://"+r.Host+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	c := newClient(t, server.URL, func(o *Options) { o.HTTPClient = server.Client() })
+	_, err := c.Generate(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("Generate should fail rather than follow an https-to-http redirect")
+	}
+	if !strings.Contains(err.Error(), "downgrade") {
+		t.Errorf("error = %v, want a downgrade refusal", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("handler hits = %d, want 1", got)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Errorf("connections = %d, want 1 — the cleartext redirect target must never be dialled", got)
+	}
+}
+
+func TestRedirectPolicy(t *testing.T) {
+	request := func(raw string) *http.Request {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", raw, err)
+		}
+		return &http.Request{URL: u}
+	}
+	tests := []struct {
+		name    string
+		via     []string
+		target  string
+		wantErr string
+	}{
+		{"same-host https path change followed", []string{"https://api.example.com/v1/chat/completions"}, "https://api.example.com/v2/chat/completions", ""},
+		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/v1"}, "http://127.0.0.1:8080/v2", ""},
+		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/v1"}, "https://127.0.0.1:8080/v1", ""},
+		{"cross-host refused", []string{"https://api.example.com/v1"}, "https://evil.example/v1", "cross-origin"},
+		{"https to http on the same host refused", []string{"https://api.example.com/v1"}, "http://api.example.com/v1", "downgrade"},
+		{"downgrade on a later hop refused", []string{"https://api.example.com/v1", "https://api.example.com/v2"}, "http://api.example.com/v3", "downgrade"},
+		{"third hop refused", []string{"https://api.example.com/a", "https://api.example.com/b", "https://api.example.com/c"}, "https://api.example.com/d", "too many redirects"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var via []*http.Request
+			for _, v := range tt.via {
+				via = append(via, request(v))
+			}
+			err := refuseUnsafeRedirects(request(tt.target), via)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
