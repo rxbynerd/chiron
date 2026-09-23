@@ -62,7 +62,7 @@ type FakeRequest struct {
 	Model string
 	// Messages is the transcript from the request body.
 	Messages []Message
-	// MaxTokens is the max_tokens field (0 when unset).
+	// MaxTokens is the max_completion_tokens field (0 when unset).
 	MaxTokens int
 	// ResponseFormatType is response_format.type ("" when the request was
 	// plain text, "json_schema" for a structured request).
@@ -125,7 +125,7 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	rec := FakeRequest{
 		Authorization: r.Header.Get("Authorization"),
 		Model:         body.Model,
-		MaxTokens:     body.MaxTokens,
+		MaxTokens:     body.MaxCompletionTokens,
 	}
 	for _, m := range body.Messages {
 		rec.Messages = append(rec.Messages, Message{Role: Role(m.Role), Content: m.Content})

@@ -38,8 +38,8 @@ type Message struct {
 type Request struct {
 	// Messages is the ordered chat transcript. At least one is required.
 	Messages []Message
-	// MaxTokens, when > 0, bounds the completion length (the wire
-	// max_tokens field). Zero leaves it unset.
+	// MaxTokens, when > 0, bounds the completion length, reasoning tokens
+	// included (the wire max_completion_tokens field). Zero leaves it unset.
 	MaxTokens int
 	// JSONSchema, when set, requests provider-native structured output via
 	// response_format {type: json_schema, strict: true}. It is the JSON
@@ -78,11 +78,13 @@ type Usage struct {
 
 // --- wire types: minimal OpenAI-compatible Chat Completions, unexported ---
 
+// chatRequest sends max_completion_tokens rather than the deprecated
+// max_tokens, which GPT-5 and o-series models reject.
 type chatRequest struct {
-	Model          string          `json:"model"`
-	Messages       []chatMessage   `json:"messages"`
-	MaxTokens      int             `json:"max_tokens,omitempty"`
-	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []chatMessage   `json:"messages"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	ResponseFormat      *responseFormat `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {
@@ -197,9 +199,9 @@ func (c *Client) buildRequest(req Request) chatRequest {
 		msgs[i] = chatMessage{Role: string(m.Role), Content: m.Content}
 	}
 	out := chatRequest{
-		Model:     c.model,
-		Messages:  msgs,
-		MaxTokens: req.MaxTokens,
+		Model:               c.model,
+		Messages:            msgs,
+		MaxCompletionTokens: req.MaxTokens,
 	}
 	if req.JSONSchema != nil {
 		out.ResponseFormat = &responseFormat{

@@ -58,7 +58,7 @@ func TestGenerateText(t *testing.T) {
 		t.Errorf("Usage = %+v, want prompt→input=12 completion→output=9 total=21", resp.Usage)
 	}
 
-	// The request the fake saw carries the transcript, model, max_tokens
+	// The request the fake saw carries the transcript, model, completion cap
 	// and no response_format (plain text), and the key rides only the
 	// Authorization header.
 	reqs := fake.Requests()
@@ -70,7 +70,7 @@ func TestGenerateText(t *testing.T) {
 		t.Errorf("model = %q, want gpt-test", got.Model)
 	}
 	if got.MaxTokens != 256 {
-		t.Errorf("max_tokens = %d, want 256", got.MaxTokens)
+		t.Errorf("max_completion_tokens = %d, want 256", got.MaxTokens)
 	}
 	if got.ResponseFormatType != "" {
 		t.Errorf("response_format present on a text call: %q", got.ResponseFormatType)
@@ -80,6 +80,58 @@ func TestGenerateText(t *testing.T) {
 	}
 	if got.Authorization != "Bearer "+testKey {
 		t.Errorf("Authorization = %q, want the bearer key header", got.Authorization)
+	}
+}
+
+func TestGenerateSendsMaxCompletionTokens(t *testing.T) {
+	// GPT-5 and o-series models reject max_tokens; the cap must ride
+	// max_completion_tokens, and the legacy field must be absent.
+	var body map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	if _, err := c.Generate(context.Background(), Request{
+		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
+		MaxTokens: 512,
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if got := string(body["max_completion_tokens"]); got != "512" {
+		t.Errorf("max_completion_tokens = %q, want 512", got)
+	}
+	if _, present := body["max_tokens"]; present {
+		t.Errorf("request carried the deprecated max_tokens field: %s", body["max_tokens"])
+	}
+}
+
+func TestGenerateOmitsCompletionCapWhenUnset(t *testing.T) {
+	var body map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	if _, err := c.Generate(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, field := range []string{"max_completion_tokens", "max_tokens"} {
+		if _, present := body[field]; present {
+			t.Errorf("request carried %s with MaxTokens unset: %s", field, body[field])
+		}
 	}
 }
 
