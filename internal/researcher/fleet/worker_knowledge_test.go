@@ -376,11 +376,10 @@ type savedMemory struct {
 }
 
 // runRememberingWorker runs one Worker to completion over the scripted model
-// with remember as the store, returning the Interaction and the JSONL trace.
-func runRememberingWorker(t *testing.T, modelSrv *model.FakeServer, remember memory.Rememberer, logger *slog.Logger, results []search.Result) (*types.Interaction, string) {
+// and search fakes with remember as the store, returning the Interaction and
+// the JSONL trace. The caller owns both fakes.
+func runRememberingWorker(t *testing.T, modelSrv *model.FakeServer, searchSrv *search.FakeServer, remember memory.Rememberer, logger *slog.Logger) (*types.Interaction, string) {
 	t.Helper()
-	searchSrv := search.NewFakeServer(results)
-	t.Cleanup(searchSrv.Close)
 	var out bytes.Buffer
 	w, err := NewWorker(WorkerDeps{
 		Model:              newModelClient(t, modelSrv),
@@ -429,13 +428,15 @@ func TestWorkerRemembersCompletedFinding(t *testing.T) {
 		saved = append(saved, savedMemory{ns: ns, mem: m, deadline: time.Until(dl), hasDeadline: ok, ctxErr: ctx.Err()})
 		return memory.Reference{Namespace: ns, Digest: "m9", Locator: "billet://memory/m9"}, nil
 	})
+	searchSrv := search.NewFakeServer([]search.Result{{Title: "PHY", URL: "https://example.org/phy"}})
+	defer searchSrv.Close()
 	modelSrv := model.NewFakeServer(
 		model.FakeReply{Content: `{"action":"search","query":"phy"}`, FinishReason: "stop"},
 		finalReply("# Vendors\n\nVendor A.", "https://example.org/phy"),
 	)
 	defer modelSrv.Close()
 
-	in, spans := runRememberingWorker(t, modelSrv, remember, logger, []search.Result{{Title: "PHY", URL: "https://example.org/phy"}})
+	in, spans := runRememberingWorker(t, modelSrv, searchSrv, remember, logger)
 
 	if in.Status != types.StatusCompleted {
 		t.Fatalf("status = %s (%s), want completed", in.Status, in.StatusDetail)
@@ -483,10 +484,12 @@ func TestWorkerRememberFailureIsIsolated(t *testing.T) {
 	remember := rememberFunc(func(context.Context, memory.Namespace, memory.Memory) (memory.Reference, error) {
 		return memory.Reference{}, errors.New("billet: save_memory refused for key " + key)
 	})
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
 	modelSrv := model.NewFakeServer(finalReply("answer"))
 	defer modelSrv.Close()
 
-	in, spans := runRememberingWorker(t, modelSrv, remember, logger, nil)
+	in, spans := runRememberingWorker(t, modelSrv, searchSrv, remember, logger)
 
 	if in.Status != types.StatusCompleted || len(in.Outputs) != 1 {
 		t.Fatalf("interaction = %s with %d outputs, want completed with the answer", in.Status, len(in.Outputs))
@@ -521,9 +524,11 @@ func TestWorkerRemembersOnlyCompletedFindings(t *testing.T) {
 				calls++
 				return memory.Reference{}, nil
 			})
+			searchSrv := search.NewFakeServer(nil)
+			defer searchSrv.Close()
 			modelSrv := model.NewFakeServer(tt.reply)
 			defer modelSrv.Close()
-			runRememberingWorker(t, modelSrv, remember, nil, nil)
+			runRememberingWorker(t, modelSrv, searchSrv, remember, nil)
 			if calls != 0 {
 				t.Errorf("remember calls = %d, want 0", calls)
 			}
