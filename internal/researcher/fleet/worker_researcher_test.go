@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -56,12 +57,16 @@ func TestWorkerStartAwaitResult(t *testing.T) {
 	if err := w.Await(ctx, id); err != nil {
 		t.Fatalf("Await: %v", err)
 	}
+	awaited := time.Now()
 	in, err := w.Result(ctx, id)
 	if err != nil {
 		t.Fatalf("Result: %v", err)
 	}
 	if in.Status != types.StatusCompleted {
 		t.Errorf("status = %s (%s), want completed", in.Status, in.StatusDetail)
+	}
+	if in.CompletedAt.After(awaited) || in.CompletedAt.Before(in.CreatedAt) {
+		t.Errorf("CompletedAt = %v, want within [%v, %v]: it must be the loop's end, not Result's call time", in.CompletedAt, in.CreatedAt, awaited)
 	}
 	if in.Agent != "worker" {
 		t.Errorf("agent = %q, want worker", in.Agent)
@@ -90,7 +95,7 @@ func TestWorkerStartReturnsImmediately(t *testing.T) {
 	release := make(chan struct{})
 	// A raw server that hangs until released, so any synchronous await inside
 	// Start would deadlock the test.
-	blockingModel := newBlockingModelServer(t, release)
+	blockingModel := httptest.NewServer(blockingModel(release))
 	defer blockingModel.Close()
 	defer close(release)
 
@@ -133,7 +138,7 @@ func TestWorkerStartReturnsImmediately(t *testing.T) {
 // even though the run is still going, rather than blocking forever.
 func TestWorkerAwaitRespectsContext(t *testing.T) {
 	release := make(chan struct{})
-	blockingModel := newBlockingModelServer(t, release)
+	blockingModel := httptest.NewServer(blockingModel(release))
 	defer blockingModel.Close()
 	defer close(release)
 
@@ -275,7 +280,7 @@ func TestWorkerScrubsSearchCredential(t *testing.T) {
 	const key = "sk-search-Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2H1g0"
 	// A search MCP that answers initialize but rejects tools/call, echoing the
 	// key in the error — the provider-echo path on the search side.
-	searchSrv := newLeakySearchServer(t, key)
+	searchSrv := httptest.NewServer(leakySearch(key))
 	defer searchSrv.Close()
 
 	sc, err := search.New(search.Options{Endpoint: searchSrv.URL, APIKey: key})

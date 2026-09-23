@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -103,7 +104,7 @@ func TestRunWorkerCostCeilingStops(t *testing.T) {
 // a model call is in flight ends the run Incomplete, not Failed.
 func TestRunWorkerTimeoutMidTurnIsIncomplete(t *testing.T) {
 	release := make(chan struct{})
-	blockingModel := newBlockingModelServer(t, release)
+	blockingModel := httptest.NewServer(blockingModel(release))
 	defer blockingModel.Close()
 	defer close(release)
 
@@ -163,7 +164,7 @@ func TestRunWorkerLengthFinishIsIncomplete(t *testing.T) {
 // Incomplete.
 func TestWorkerAwaitCancelStopsRun(t *testing.T) {
 	release := make(chan struct{})
-	blockingModel := newBlockingModelServer(t, release)
+	blockingModel := httptest.NewServer(blockingModel(release))
 	defer blockingModel.Close()
 	defer close(release)
 

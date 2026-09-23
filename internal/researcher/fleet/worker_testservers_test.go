@@ -3,42 +3,40 @@ package fleet
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
-	"testing"
 )
 
-// newFetchPage returns a loopback httptest server serving the given text as a
-// plain-text page, for the worker's web_fetch to retrieve. The worker's fetch
-// client reaches it because tests build the client with AllowLoopback true.
-func newFetchPage(t *testing.T, body string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// Handlers for the loopback servers the worker tests stand up. Each test
+// creates and closes its own httptest.Server around one of these, so the
+// call site owns the server lifecycle.
+
+// plainTextPage serves body as a text/plain page for the worker's web_fetch.
+// The worker's fetch client reaches it because tests build the client with
+// AllowLoopback true.
+func plainTextPage(body string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
-	}))
+	})
 }
 
-// newBlockingModelServer returns a bare httptest server that hangs on every
-// request until release is closed, then answers 500. It stands in for a model
-// endpoint whose turn never completes, so a test can prove Start does not block
-// on the run and Await respects its context. The server is not a model.Client
-// fake — it deliberately bypasses the scripted fake to control timing.
-func newBlockingModelServer(t *testing.T, release <-chan struct{}) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// blockingModel hangs on every request until release is closed, then answers
+// 500. It stands in for a model endpoint whose turn never completes, so a test
+// can prove Start does not block on the run and Await respects its context. It
+// deliberately bypasses the scripted model fake to control timing.
+func blockingModel(release <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 		w.WriteHeader(http.StatusInternalServerError)
-	}))
+	})
 }
 
-// newLeakySearchServer returns an MCP search server that completes the
-// handshake but rejects tools/call with a JSON-RPC error whose message echoes
-// the given key — the provider-echo path on the search side. It is used to
-// prove the worker scrubs a search credential out of the failed Interaction.
-func newLeakySearchServer(t *testing.T, key string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// leakySearch is an MCP search server that completes the handshake but
+// rejects tools/call with a JSON-RPC error whose message echoes the given key,
+// the provider-echo path on the search side. It proves the worker scrubs a
+// search credential out of the failed Interaction.
+func leakySearch(key string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ID     *int   `json:"id"`
 			Method string `json:"method"`
@@ -58,7 +56,7 @@ func newLeakySearchServer(t *testing.T, key string) *httptest.Server {
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
-	}))
+	})
 }
 
 // itoa renders an optional JSON-RPC id as a JSON number, defaulting to 0 for a

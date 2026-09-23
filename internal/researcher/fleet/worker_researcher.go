@@ -39,8 +39,9 @@ type workerState struct {
 	started time.Time
 	cancel  context.CancelFunc
 
-	done    chan struct{}
-	finding Finding
+	done      chan struct{}
+	finding   Finding
+	completed time.Time
 }
 
 var _ researcher.Researcher = (*Worker)(nil)
@@ -115,6 +116,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	go func() {
 		defer cancel()
 		st.finding = RunWorker(runCtx, w.deps, brief)
+		st.completed = time.Now()
 		close(st.done)
 	}()
 
@@ -178,7 +180,7 @@ func (w *Worker) mapInteraction(id string, st *workerState) *types.Interaction {
 		Citations:    f.Citations,
 		Usage:        f.Usage,
 		CreatedAt:    st.started,
-		CompletedAt:  time.Now(),
+		CompletedAt:  st.completed,
 	}
 	if f.Text != "" {
 		in.Outputs = []types.Output{{Type: types.OutputText, Text: f.Text}}

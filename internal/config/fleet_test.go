@@ -51,11 +51,6 @@ func TestValidateAcceptsWorkerAndFleet(t *testing.T) {
 			cfg.Agent = AgentFleet
 			return cfg
 		}()},
-		{"inmemory binding", func() ResearchConfig {
-			cfg := validWorker()
-			cfg.Fleet.Memory = MemoryInMemory
-			return cfg
-		}()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.cfg.Validate(); err != nil {
@@ -120,6 +115,16 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"worker timeout zero", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = 0 }},
 		{"worker timeout negative", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = Duration(-time.Second) }},
 		{"bad memory enum", func(c *ResearchConfig) { c.Fleet.Memory = "redis" }},
+		{"inmemory not implemented", func(c *ResearchConfig) { c.Fleet.Memory = MemoryInMemory }},
+		{"model endpoint userinfo", func(c *ResearchConfig) {
+			c.Fleet.ModelEndpoint = "https://user:hunter2@model.example/v1"
+		}},
+		{"model endpoint query", func(c *ResearchConfig) {
+			c.Fleet.ModelEndpoint = "https://model.example/v1?api_key=x"
+		}},
+		{"search endpoint fragment", func(c *ResearchConfig) {
+			c.Fleet.SearchEndpoint = "https://search.example/mcp#frag"
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validWorker()

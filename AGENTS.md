@@ -91,6 +91,11 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
 - Create `httptest.Server` at the call site with `defer server.Close()`;
   do not hide server lifecycle inside helper functions — the call site
   owns and varies the handler.
+  The exported `model.FakeServer` and `search.FakeServer` are the one
+  carve-out: they are scripted protocol doubles shared across packages,
+  still created and closed at the call site (see DECISIONS.md,
+  2026-07-01 standard-model adapter entry, for why they live beside the
+  clients rather than in test-support packages).
 - For new SSE tests in any package, use an `sseWrite`-style helper
   (`t.Helper()`; calls `http.Flusher.Flush()` after writing) rather
   than raw `io.WriteString` literals, so a handler that keeps the

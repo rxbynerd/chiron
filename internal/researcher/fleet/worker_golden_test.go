@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"flag"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -59,7 +60,7 @@ func (c *captureSink) Write(_ context.Context, r *types.RunResult) error {
 func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 	// A loopback page the worker fetches. Its text is what the model
 	// synthesises the report from.
-	page := newFetchPage(t, "10BASE-T1L is a long-reach single-pair Ethernet PHY standardised in IEEE 802.3cg.")
+	page := httptest.NewServer(plainTextPage("10BASE-T1L is a long-reach single-pair Ethernet PHY standardised in IEEE 802.3cg."))
 	defer page.Close()
 
 	searchSrv := search.NewFakeServer([]search.Result{

@@ -51,7 +51,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Duration("fleet-worker-timeout", time.Duration(d.Fleet.WorkerTimeout), "per-worker wall-clock timeout")
 	fs.Int("fleet-max-workers", d.Fleet.MaxWorkers, "maximum workers the fleet lead may dispatch")
 	fs.Int("fleet-concurrency", d.Fleet.Concurrency, "maximum workers running at once (<= fleet-max-workers)")
-	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q or %q", MemoryNoop, MemoryInMemory))
+	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q (%q is reserved and not yet implemented)", MemoryNoop, MemoryInMemory))
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset

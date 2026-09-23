@@ -41,8 +41,8 @@ const (
 )
 
 // Memory bindings for the in-process research agents (V2-RESEARCH-AGENT §4).
-// noop holds no Chiron-side context; inmemory selects the in-process
-// ContextStore.
+// noop holds no Chiron-side context; inmemory is reserved for the in-process
+// ContextStore and rejected until that store exists.
 const (
 	MemoryNoop     = "noop"
 	MemoryInMemory = "inmemory"
@@ -174,7 +174,7 @@ type FleetConfig struct {
 	// Concurrency caps how many workers run at once. Positive; must not
 	// exceed MaxWorkers.
 	Concurrency int `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
-	// Memory selects the ContextStore binding: noop or inmemory.
+	// Memory selects the ContextStore binding: noop (inmemory is reserved).
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 }
 
@@ -367,7 +367,9 @@ func (f FleetConfig) validate(agent string) error {
 		}
 	}
 	switch f.Memory {
-	case MemoryNoop, MemoryInMemory:
+	case MemoryNoop:
+	case MemoryInMemory:
+		return fmt.Errorf("fleet.memory: %q is not implemented yet; use %q", f.Memory, MemoryNoop)
 	default:
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
 	}
@@ -386,9 +388,21 @@ func validEndpoint(field, raw string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("%s: %q must be an absolute https:// URL (http:// only for loopback test servers)", field, raw)
+		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
 	}
 	return nil
+}
+
+// describeEndpoint names an endpoint in an error without echoing the raw
+// value, which may embed a credential in its userinfo.
+func describeEndpoint(u *url.URL) string {
+	if u == nil {
+		return "an unparseable URL"
+	}
+	return fmt.Sprintf("scheme %q host %q", u.Scheme, u.Host)
 }
 
 // allowedEndpointScheme admits https anywhere and http on loopback only —

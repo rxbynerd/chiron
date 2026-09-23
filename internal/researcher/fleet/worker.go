@@ -349,9 +349,9 @@ func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Findi
 	return false, Finding{}
 }
 
-// finalise builds the successful Finding from a final action: the answer text
-// and the model's citations, restricted to URLs the worker actually saw,
-// merged with the pages it fetched and deduplicated.
+// finalise builds the successful Finding from a final action: the sanitised
+// answer text and the model's citations, restricted to URLs the worker
+// actually saw, merged with the pages it fetched and deduplicated.
 func (w *workerRun) finalise(act action) Finding {
 	for _, c := range act.Citations {
 		if !w.seenURLs[c.URL] {
@@ -361,7 +361,7 @@ func (w *workerRun) finalise(act action) Finding {
 		w.addCitation(c.URL, c.Title)
 	}
 	return Finding{
-		Text:      act.Answer,
+		Text:      sanitiseAnswer(act.Answer),
 		Citations: w.citations,
 		Usage:     w.usage,
 		Status:    types.StatusCompleted,
