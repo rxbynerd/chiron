@@ -244,7 +244,8 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rememberTimeout)
 	defer cancel()
 
-	ref, err := w.deps.Remember.Remember(ctx, w.deps.KnowledgeNamespace, rememberedFinding(id, objective, f))
+	mem := rememberedFinding(id, objective, f, time.Now())
+	ref, err := w.deps.Remember.Remember(ctx, w.deps.KnowledgeNamespace, mem)
 	if err != nil {
 		detail := boundDetail(secret.Scrub(err.Error()))
 		if span != nil {
@@ -266,10 +267,14 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 		"interaction_id", id, "ref", loc)
 }
 
-// rememberedFinding is the Memory saved for a finding: the objective, the
-// answer, and the cited locators, scrubbed and bounded to maxRememberBytes.
-func rememberedFinding(id, objective string, f Finding) memory.Memory {
+// rememberedFinding is the Memory saved for a finding: a provenance header,
+// the objective, the answer, and the cited locators, scrubbed and bounded to
+// maxRememberBytes. The header leads the text because a store may keep only
+// the text, dropping the labels, and a reader must still see that the memory
+// is an unreviewed worker finding and which run produced it.
+func rememberedFinding(id, objective string, f Finding, saved time.Time) memory.Memory {
 	var b strings.Builder
+	fmt.Fprintf(&b, "Chiron worker finding\ninteraction: %s\nsaved: %s\n\n", id, saved.UTC().Format(time.RFC3339))
 	b.WriteString(strings.TrimSpace(objective))
 	b.WriteString("\n\n")
 	b.WriteString(strings.TrimSpace(f.Text))

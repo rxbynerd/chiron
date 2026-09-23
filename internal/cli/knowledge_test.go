@@ -84,8 +84,9 @@ func TestWorkerRecallSearchFetchFinalThroughCLI(t *testing.T) {
 }
 
 // TestWorkerKnowledgeRememberThroughCLI: with knowledge_remember, a completed
-// finding is saved back to Billet once, carrying the objective, the answer and
-// the sources, and the interaction lists the remember tool.
+// finding is saved back to Billet once, carrying the provenance header, the
+// objective, the answer and the sources, and the interaction lists the
+// remember tool.
 func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
 	searchSrv := search.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -108,6 +109,9 @@ func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
 	saved := kbSrv.SavedContents()
 	if len(saved) != 1 {
 		t.Fatalf("saved contents = %d, want exactly one save-back", len(saved))
+	}
+	if !strings.HasPrefix(saved[0], "Chiron worker finding\ninteraction: wkr_") {
+		t.Errorf("saved content lacks the provenance header:\n%s", saved[0])
 	}
 	for _, want := range []string{"why is the sky blue", "Rayleigh scattering"} {
 		if !strings.Contains(saved[0], want) {

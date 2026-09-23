@@ -187,17 +187,19 @@ var _ memory.Rememberer = (*Client)(nil)
   reads `structuredContent` first, then a text block, as
   `{"records":[{memory_id, content, score, created_at}]}`. `isError: true`
   is an error carrying the tool's text ("budget exceeded", "backend
-  unavailable", or the validation message), bounded to 4 KiB. Unlike search, there is no
-  graceful degradation to a prose snippet: a reply without a `records` key is
-  an error, because the worker must never mistake arbitrary text for a
-  memory.
+  unavailable", or the validation message), bounded to 4 KiB. Unlike
+  search, there is no graceful degradation to a prose snippet: a reply
+  without a `records` key is an error, because the worker must never mistake
+  arbitrary text for a memory.
 - `Remember` calls `save_memory` with `{"content": m.Text, "kind": kind}`
   and returns `Reference{Digest: memory_id, Locator: "billet://memory/<id>"}`.
   `accepted: false` is an error. Content over 256 KiB is refused client-side
   with a clear error before any request (Billet's `MaxContentBytes`), as is
   a `kind` other than `fact` or `event`. A returned `memory_id` outside
   letters, digits and `-_.:` (at most 256 bytes) fails the call, because
-  the id is embedded in a locator the worker renders and cites.
+  the id is embedded in a locator the worker renders and cites. Billet
+  stores only the content and kind, so every other label is dropped; a
+  caller that needs provenance to survive puts it in the content (§4.4).
 - Each record's `content` is bounded on read to `MaxHitBytes` (default 8
   KiB, rune-safe) before it is returned, so a huge memory cannot flood the
   transcript.
@@ -344,12 +346,27 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
 `rememberFinding` when `deps.Remember != nil` and the finding is
 `Completed` with non-empty text:
 
-- `Memory.Text` is: the objective, a blank line, the answer and, when the
-  finding has citations, a blank line, `Sources:` and one locator per line;
-  the whole bounded to
-  `maxRememberBytes` (32 KiB, rune-safe, `[truncated]` marker).
+- `Memory.Text` is: a provenance header, the objective, a blank line, the
+  answer and, when the finding has citations, a blank line, `Sources:` and
+  one locator per line; the whole bounded to `maxRememberBytes` (32 KiB,
+  rune-safe, `[truncated]` marker). The header comes first, so truncation
+  never removes it, and reads:
+
+  ```text
+  Chiron worker finding
+  interaction: wkr_<hex>
+  saved: <RFC 3339 UTC time>
+
+  ```
+
+  It is in the text because Billet keeps only content and kind: without it
+  a saved finding, built from public-web content, would be
+  indistinguishable from a human-written memory to every other consumer of
+  the store. Billet names a recalled memory from its first line, so a saved
+  finding recalls under the name "Chiron worker finding".
   `Meta.Name` is the objective bounded to 120 runes; `Labels` carry
-  `kind: fact`, `agent: worker`, `interaction_id`.
+  `kind: fact`, `agent: worker`, `interaction_id`, for stores that keep
+  them.
 - It runs synchronously after the loop returns and before the run is marked
   done, under a 30 s context derived from the run's context
   (`context.WithoutCancel` plus a timeout), so a slow store delays `Await`

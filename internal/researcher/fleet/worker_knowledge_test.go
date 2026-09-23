@@ -409,9 +409,9 @@ func captureLog(t *testing.T) (*slog.Logger, *bytes.Buffer) {
 }
 
 // TestWorkerRemembersCompletedFinding: a Completed finding is saved before
-// Await returns, with the objective, answer and sources as content, the
-// objective as its name, the fact/worker/interaction labels, a bounded
-// detached context, and the reference on the span and in the log.
+// Await returns, with the provenance header, objective, answer and sources
+// as content, the objective as its name, the fact/worker/interaction labels,
+// a bounded detached context, and the reference on the span and in the log.
 func TestWorkerRemembersCompletedFinding(t *testing.T) {
 	logger, logs := captureLog(t)
 	var saved []savedMemory
@@ -435,9 +435,16 @@ func TestWorkerRemembersCompletedFinding(t *testing.T) {
 		t.Fatalf("remember calls = %d, want 1 before Await returned", len(saved))
 	}
 	s := saved[0]
-	wantText := "which PHY vendor did we choose\n\n# Vendors\n\nVendor A.\n\nSources:\nhttps://example.org/phy"
-	if s.mem.Text != wantText {
-		t.Errorf("saved text = %q, want %q", s.mem.Text, wantText)
+	header, body, _ := strings.Cut(s.mem.Text, "\n\n")
+	lines := strings.Split(header, "\n")
+	if len(lines) != 3 || lines[0] != "Chiron worker finding" || lines[1] != "interaction: "+in.ID || !strings.HasPrefix(lines[2], "saved: ") {
+		t.Errorf("saved text lacks the provenance header:\n%s", s.mem.Text)
+	} else if at, err := time.Parse(time.RFC3339, strings.TrimPrefix(lines[2], "saved: ")); err != nil || at.Location() != time.UTC || time.Since(at) > time.Minute {
+		t.Errorf("provenance timestamp %q is not a recent RFC 3339 UTC time: %v", lines[2], err)
+	}
+	wantBody := "which PHY vendor did we choose\n\n# Vendors\n\nVendor A.\n\nSources:\nhttps://example.org/phy"
+	if body != wantBody {
+		t.Errorf("saved text after the header = %q, want %q", body, wantBody)
 	}
 	if s.mem.Meta.Name != "which PHY vendor did we choose" || s.ns != "team" {
 		t.Errorf("saved name/namespace = %q/%q", s.mem.Meta.Name, s.ns)
@@ -515,16 +522,21 @@ func TestWorkerRemembersOnlyCompletedFindings(t *testing.T) {
 	}
 }
 
-// TestRememberedFindingBounds: the saved content is scrubbed and cut to
-// maxRememberBytes on a rune boundary with the marker; the name is the
-// objective on one line, cut to maxRememberName runes.
+// TestRememberedFindingBounds: the saved content starts with the provenance
+// header, is scrubbed and is cut to maxRememberBytes on a rune boundary with
+// the marker; the name is the objective on one line, cut to maxRememberName
+// runes.
 func TestRememberedFindingBounds(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	objective := "vendors\nand " + strings.Repeat("ü", 200)
 	f := Finding{Text: strings.Repeat("é", maxRememberBytes) + key, Status: types.StatusCompleted}
 
-	m := rememberedFinding("wkr_x", objective, f)
+	saved := time.Date(2026, 9, 23, 10, 4, 5, 0, time.FixedZone("BST", 3600))
+	m := rememberedFinding("wkr_x", objective, f, saved)
 
+	if want := "Chiron worker finding\ninteraction: wkr_x\nsaved: 2026-09-23T09:04:05Z\n\nvendors\n"; !strings.HasPrefix(m.Text, want) {
+		t.Errorf("a truncated finding lost its provenance header: %.120q", m.Text)
+	}
 	if len(m.Text) > maxRememberBytes || !strings.HasSuffix(m.Text, truncatedMarker) || !utf8.ValidString(m.Text) {
 		t.Errorf("text is %d bytes (valid UTF-8 %v), want at most %d ending in the marker", len(m.Text), utf8.ValidString(m.Text), maxRememberBytes)
 	}
@@ -534,7 +546,7 @@ func TestRememberedFindingBounds(t *testing.T) {
 	if n := utf8.RuneCountInString(m.Meta.Name); n != maxRememberName || strings.Contains(m.Meta.Name, "\n") {
 		t.Errorf("name = %q (%d runes), want one line of %d runes", m.Meta.Name, n, maxRememberName)
 	}
-	short := rememberedFinding("wkr_x", "q", Finding{Text: "leaks " + key, Status: types.StatusCompleted})
+	short := rememberedFinding("wkr_x", "q", Finding{Text: "leaks " + key, Status: types.StatusCompleted}, saved)
 	if strings.Contains(short.Text, key) {
 		t.Errorf("saved text carries the credential: %q", short.Text)
 	}
