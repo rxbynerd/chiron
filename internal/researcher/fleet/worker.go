@@ -111,8 +111,8 @@ const turnCompletionTokens = 8192
 
 // maxConsecutiveToolFailures is how many search, fetch or recall failures in
 // a row the loop feeds back to the model before treating the tools as
-// unavailable and ending the run Failed. Each feedback costs one model turn, so this is a
-// spend bound as much as a robustness one.
+// unavailable and ending the run Failed. Each feedback costs one model turn,
+// so this is a spend bound as much as a robustness one.
 const maxConsecutiveToolFailures = 3
 
 // maxDetailBytes bounds Finding.Detail; a provider error body can be large
@@ -127,8 +127,8 @@ type WorkerDeps struct {
 	Model  *model.Client
 	Search *search.Client
 	Fetch  *fetch.Client
-	// Knowledge, when non-nil, adds the recall action. nil leaves the loop's
-	// schema, prompt and tool list unchanged.
+	// Knowledge, when non-nil, adds the recall action. nil omits recall from
+	// the loop's schema, prompt and tool list.
 	Knowledge memory.Recaller
 	// Remember, when non-nil, saves a bounded summary of a Completed finding
 	// after the loop returns (Worker only). It is independent of Knowledge.
@@ -411,9 +411,10 @@ func (w *workerRun) doRecall(ctx context.Context, act action) (bool, Finding) {
 	return false, Finding{}
 }
 
-// toolFailure handles a failed search, fetch or recall: a context end is Incomplete;
-// otherwise the failure is fed back to the model so it can choose another
-// source, until maxConsecutiveToolFailures in a row ends the run Failed.
+// toolFailure handles a failed search, fetch or recall: a context end is
+// Incomplete; otherwise the failure is fed back to the model so it can choose
+// another source, until maxConsecutiveToolFailures in a row ends the run
+// Failed.
 func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Finding) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return true, w.incomplete("worker context ended during a tool call: " + w.scrub(ctxErr.Error()))

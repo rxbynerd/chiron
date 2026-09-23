@@ -3,8 +3,7 @@
 // an external knowledge store (Billet, Alexandria) satisfies them through the
 // adapters in this package's subpackages, and the research worker consults
 // them as its recall action (docs/KNOWLEDGE.md). The session and artifact
-// plane (OpenSession, Put, Get) remains bound to Noop pending the Wave 4
-// in-memory store or Paddock (PROPOSAL §5).
+// plane (OpenSession, Put, Get) is bound only to Noop (PROPOSAL §5).
 //
 // The interfaces are declared locally rather than imported from any store's
 // own module, per PADDOCK §8.4: a store satisfies them structurally, so

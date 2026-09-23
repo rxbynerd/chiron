@@ -64,9 +64,9 @@ func recallReply(query string) model.FakeReply {
 	return model.FakeReply{Content: `{"action":"recall","query":` + jsonString(query) + `}`, FinishReason: "stop"}
 }
 
-// TestRecallDisabledSchemaAndPromptUnchanged pins the recall-disabled loop to
-// the schema and system prompt it sent before the knowledge seam existed,
-// byte for byte, both as built and as sent on the wire.
+// TestRecallDisabledSchemaAndPromptUnchanged: the recall-disabled loop sends
+// the testdata snapshot schema and system prompt, byte for byte, both as
+// built and as sent on the wire.
 func TestRecallDisabledSchemaAndPromptUnchanged(t *testing.T) {
 	wantSchema, err := os.ReadFile(filepath.Join("testdata", "worker-action-schema.json"))
 	if err != nil {
