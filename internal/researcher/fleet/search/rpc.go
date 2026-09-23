@@ -84,12 +84,10 @@ func (e *rpcError) Error() string {
 	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
 }
 
-// doRequest POSTs one JSON-RPC request and returns the matching response plus
-// any Mcp-Session-Id the server set. The session's headers are sent when set;
-// initialize passes the zero session. The reply may be application/json (a
-// single JSON-RPC message) or text/event-stream (SSE frames carrying JSON-RPC
-// messages); both are read under maxBodyBytes and reduced to the one response
-// message, whose id must match the request's.
+// doRequest POSTs one JSON-RPC request with the session's headers (initialize
+// passes the zero session) and returns the reply, whose id must match the
+// request's, plus any Mcp-Session-Id the server set. A JSON or SSE reply is
+// read under maxBodyBytes and reduced to the one response message.
 func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (rpcResponse, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -194,14 +192,10 @@ func (c *Client) readResponse(resp *http.Response) (rpcResponse, error) {
 	}
 }
 
-// readEventStream reads a text/event-stream reply and returns the first
-// JSON-RPC response message it carries, without waiting for the stream to
-// end; doRequest checks that it answers the request. It mirrors the SSE
-// reading discipline in
-// internal/interactions.Stream (line-oriented scan, data: accumulation across
-// continuation lines, blank-line frame dispatch) but is reimplemented
-// minimally: this transport only needs the one response frame, not a
-// reconnecting event feed. The whole stream is bounded by maxBodyBytes.
+// readEventStream returns the first JSON-RPC response on a text/event-stream
+// reply without waiting for the stream to end; doRequest checks its id. It is
+// a minimal line-oriented reader in the style of internal/interactions.Stream,
+// with the whole stream bounded by maxBodyBytes.
 func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 	// Bound the aggregate stream read the same way a JSON body is bounded: a
 	// misbehaving server must not stream unboundedly. The scanner's own

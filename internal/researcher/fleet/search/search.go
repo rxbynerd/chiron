@@ -44,11 +44,10 @@ const (
 	defaultToolName    = "search"
 	defaultQueryArgKey = "query"
 
-	// mcpProtocolVersion is the protocol revision advertised in initialize,
-	// and sent as MCP-Protocol-Version when the initialize result names no
-	// revision. A server that picks a different revision is tolerated, since
-	// this client relies only on the JSON-RPC envelope; its choice is echoed
-	// on every later request.
+	// mcpProtocolVersion is the revision advertised in initialize and the
+	// MCP-Protocol-Version fallback when the result names none. A server
+	// choosing another revision is tolerated (only the JSON-RPC envelope is
+	// relied on), and its choice is echoed on every later request.
 	mcpProtocolVersion = "2025-06-18"
 )
 
@@ -157,12 +156,10 @@ type Result struct {
 	Snippet string
 }
 
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule: an absolute
-// https:// URL, with http:// admitted for loopback hosts only, and no
-// userinfo. This mirrors model.validateEndpoint and allowedEndpointScheme in
-// internal/config (validated there too); it is re-applied here because the
-// client is a reusable seam that must not depend on config having run. No
-// error echoes userinfo.
+// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute https://,
+// http:// for loopback only) and rejects userinfo without echoing it. It
+// mirrors model.validateEndpoint and internal/config's check because this
+// reusable seam must not depend on config having run.
 func validateEndpoint(raw string) error {
 	if raw == "" {
 		return errors.New("search: endpoint must not be empty")
@@ -208,13 +205,10 @@ func allowedEndpointScheme(u *url.URL) bool {
 	}
 }
 
-// refuseUnsafeRedirects is the client's redirect policy: same-host redirects
-// are followed (capped at three hops), but a redirect to another host
-// (CWE-601) or from https to http (CWE-319) is refused. net/http re-sends the
-// Authorization header to any target on the same hostname whatever its
-// scheme, so a downgrade would put the key on the wire in cleartext. It
-// mirrors model.refuseUnsafeRedirects; the duplication is noted in
-// docs/DECISIONS.md.
+// refuseUnsafeRedirects follows same-host redirects (at most three hops) and
+// refuses one to another host or from https to http: net/http re-sends
+// Authorization to any target on the same hostname whatever its scheme
+// (CWE-601, CWE-319). It mirrors model.refuseUnsafeRedirects.
 func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 	first := via[0].URL
 	if req.URL.Host != first.Host {

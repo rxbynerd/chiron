@@ -9,13 +9,10 @@ import (
 	"strings"
 )
 
-// ValidateStrictSchema reports whether schema satisfies the structured-output
-// strict-mode rules that OpenAI enforces when a request sets strict: true,
-// which Generate always does for a structured request: every object schema,
-// at any depth, must set additionalProperties to false and list every one of
-// its properties in required. An optional field is expressed as a union with
-// null, not by omitting it from required. The error names the JSON Pointer of
-// the first offending object.
+// ValidateStrictSchema checks the two strict-mode rules providers enforce when
+// strict: true is set, as Generate does: every object, at any depth, sets
+// additionalProperties to false and lists all its properties in required. The
+// error names the first offending object's JSON Pointer.
 func ValidateStrictSchema(schema json.RawMessage) error {
 	if err := checkStrictSchema(schema); err != nil {
 		return fmt.Errorf("model: %w", err)

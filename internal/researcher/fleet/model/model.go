@@ -132,12 +132,10 @@ func New(opts Options) (*Client, error) {
 	}, nil
 }
 
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule: an absolute
-// https:// URL, with http:// admitted for loopback hosts only, and no
-// userinfo. This mirrors allowedEndpointScheme in internal/config
-// (validated there too); it is re-applied here because the adapter is a
-// reusable seam that must not depend on config having run. No error echoes
-// userinfo.
+// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute https://,
+// http:// for loopback only) and rejects userinfo without echoing it. It
+// mirrors internal/config's check because this reusable seam must not depend
+// on config having run.
 func validateEndpoint(raw string) error {
 	if raw == "" {
 		return errors.New("model: endpoint must not be empty")
@@ -183,13 +181,10 @@ func allowedEndpointScheme(u *url.URL) bool {
 	}
 }
 
-// refuseUnsafeRedirects is the client's redirect policy: same-host
-// redirects are followed (capped at three hops), but a redirect to another
-// host (CWE-601) or from https to http (CWE-319) is refused. net/http
-// re-sends the Authorization header to any target on the same hostname
-// whatever its scheme, so a downgrade would put the key on the wire in
-// cleartext. It extends the unexported
-// internal/interactions.refuseCrossHostRedirects with the downgrade check.
+// refuseUnsafeRedirects follows same-host redirects (at most three hops) and
+// refuses one to another host or from https to http: net/http re-sends
+// Authorization to any target on the same hostname whatever its scheme
+// (CWE-601, CWE-319). It extends internal/interactions.refuseCrossHostRedirects.
 func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 	first := via[0].URL
 	if req.URL.Host != first.Host {

@@ -783,11 +783,9 @@ func TestSearchEmptyQueryRejected(t *testing.T) {
 }
 
 func TestSearchCallerContextDeadlineWins(t *testing.T) {
-	// A tighter caller deadline must fire even though RequestTimeout is
-	// generous — WithTimeout keeps whichever is sooner. net/http cancels
-	// r.Context() on client disconnect only once the body has been read, so
-	// the handler drains it first; the 2s backstop keeps server.Close from
-	// hanging if cancellation is never observed.
+	// The caller's tighter deadline must beat the generous RequestTimeout. The
+	// handler drains the body because net/http only cancels r.Context() on
+	// client disconnect once it is read; the 2s backstop keeps Close unblocked.
 	aborted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

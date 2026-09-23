@@ -64,11 +64,9 @@ type resultsDoc struct {
 }
 
 // Search runs the minimal MCP flow — initialize, an initialized notification,
-// then a tools/call for the configured tool — and returns the parsed results.
-// When the server issued a session, a best-effort DELETE ends it before
-// Search returns, whatever the outcome. The whole exchange is bounded by
-// RequestTimeout (a tighter caller deadline wins), and every response body is
-// bounded by MaxBodyBytes.
+// then a tools/call for the configured tool — and returns the parsed results,
+// ending any session the server issued with a best-effort DELETE. The exchange
+// is bounded by RequestTimeout (a tighter caller deadline wins) and MaxBodyBytes.
 //
 // The three round-trips are NOT individually retried. tools/call may invoke a
 // billable upstream search, so it is single-attempt like the model adapter's
