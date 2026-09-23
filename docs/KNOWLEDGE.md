@@ -370,7 +370,10 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
 - It runs synchronously after the loop returns and before the run is marked
   done, under a 30 s context derived from the run's context
   (`context.WithoutCancel` plus a timeout), so a slow store delays `Await`
-  by at most 30 s and no goroutine outlives the run.
+  by at most 30 s. The finding is recorded before the save starts: if
+  `Await`'s context ends during the save, `Await` returns nil and `Result`
+  maps the completed finding, while the save finishes, or times out, within
+  its own 30 s bound.
 - Failure never changes the run's status. The outcome goes on the worker
   span (`remember_ref` or `remember_error`, scrubbed) and to stderr through
   the `Logger` injected in `WorkerDeps` (bound by the composition root to a

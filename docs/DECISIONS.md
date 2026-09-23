@@ -1231,18 +1231,26 @@ pointer to `docs/KNOWLEDGE.md`: recall is read-only, and the one write goes
 to the suite's memory store, never to a workspace. The research-only
 boundary (no shell, no file writes, no workspace mutation) is unchanged.
 
-**Save-back runs before Await returns, bounded at 30 seconds.** The save
-runs synchronously on the run's goroutine after the loop returns and before
-the done channel closes, under `context.WithoutCancel` plus a 30 s timeout.
-A slow store therefore delays `Await` by at most 30 s. The alternative of
-closing the channel first and saving afterwards was rejected: `Result` could
-read the Interaction while the save was still running, and the goroutine
-would outlive the run with no deterministic end. The save runs while the
+**Save-back runs before Await returns, bounded at 30 seconds, and never
+costs the report.** The save runs synchronously on the run's goroutine after
+the loop returns and before the done channel closes, under
+`context.WithoutCancel` plus a 30 s timeout. A slow store therefore delays
+`Await` by at most 30 s. The finding is recorded, and a second `loopDone`
+channel closed, before the save starts: if `Await`'s context ends during the
+save (the CLI deadline, or Ctrl-C), `Await` returns nil and `Result` maps
+the completed finding, so a paid, completed report is written rather than
+discarded. The save is not cancelled then; it finishes, or times out, on the
+run's goroutine within its own 30 s bound, so no goroutine runs unbounded,
+though a process that exits at once may cut the save short. The alternative
+of saving on a separate goroutine after the done channel closes was
+rejected: in the normal case `Await` would return before the save, and the
+goroutine would have no deterministic end. The save runs while the
 worker span is still open, so the outcome lands on it as `remember_ref` or
 `remember_error`, scrubbed, and is logged through the `Logger` injected in
 `WorkerDeps`: the composition root binds a scrub-wrapped handler on the
 command's stderr, and a nil `Logger` discards the record, so the worker
-never writes to the process-wide default logger. A failure never changes the run's status. `types.Interaction` has
+never writes to the process-wide default logger. A failure never changes
+the run's status. `types.Interaction` has
 no metadata map, and none was added for this alone, so the reference is not
 recorded on the Interaction.
 

@@ -522,6 +522,62 @@ func TestWorkerRemembersOnlyCompletedFindings(t *testing.T) {
 	}
 }
 
+// TestWorkerAwaitKeepsFindingDuringSlowSave: when Await's context ends while
+// the save-back is still running, Await returns nil, Result reports the
+// completed finding, and the save is not cancelled.
+func TestWorkerAwaitKeepsFindingDuringSlowSave(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	saveErr := make(chan error, 1)
+	remember := rememberFunc(func(ctx context.Context, _ memory.Namespace, _ memory.Memory) (memory.Reference, error) {
+		close(entered)
+		<-release
+		saveErr <- ctx.Err()
+		return memory.Reference{Locator: "billet://memory/m1"}, nil
+	})
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
+	modelSrv := model.NewFakeServer(finalReply("the answer"))
+	defer modelSrv.Close()
+
+	w, err := NewWorker(WorkerDeps{
+		Model:    newModelClient(t, modelSrv),
+		Search:   newSearchClient(t, searchSrv),
+		Fetch:    newFetchClient(t),
+		Remember: remember,
+		Caps:     caps(),
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	id, err := w.Start(context.Background(), researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-entered
+
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := w.Await(ended, id); err != nil {
+		t.Errorf("Await during the save = %v, want nil: the finding is already complete", err)
+	}
+	in, err := w.Result(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if in.Status != types.StatusCompleted || len(in.Outputs) != 1 || in.Outputs[0].Text != "the answer" || in.CompletedAt.IsZero() {
+		t.Errorf("interaction = %s with outputs %+v, want the completed finding", in.Status, in.Outputs)
+	}
+
+	close(release)
+	if err := <-saveErr; err != nil {
+		t.Errorf("the save's context ended with %v, want it left running", err)
+	}
+	if err := w.Await(context.Background(), id); err != nil {
+		t.Errorf("Await after the save = %v, want nil", err)
+	}
+}
+
 // TestRememberedFindingBounds: the saved content starts with the provenance
 // header, is scrubbed and is cut to maxRememberBytes on a rune boundary with
 // the marker; the name is the objective on one line, cut to maxRememberName

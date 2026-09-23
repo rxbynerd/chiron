@@ -23,13 +23,15 @@ import (
 //
 // Start allocates an opaque local id and launches the loop in a goroutine,
 // returning the id immediately so the run core can emit it before awaiting.
-// Await blocks on that run; if Await's context ends first the run is
-// cancelled, because an in-process run nobody is waiting for can only waste
-// paid turns. Result maps the Finding. When deps.Remember is set, a Completed
-// finding is saved to the knowledge store before Await returns (bounded by
-// rememberTimeout). Unlike the Gemini adapter, the id is a local handle, not
-// a durable resume token: a crashed in-process run cannot be recovered by
-// `chiron get <id>`.
+// Await blocks on that run; if Await's context ends before the loop has
+// produced its Finding the run is cancelled, because an in-process run nobody
+// is waiting for can only waste paid turns. Result maps the Finding. When
+// deps.Remember is set, a Completed finding is saved to the knowledge store
+// after the Finding is recorded and, normally, before Await returns (bounded
+// by rememberTimeout); a save still running when Await's context ends never
+// costs the recorded Finding. Unlike the Gemini adapter, the id is a local
+// handle, not a durable resume token: a crashed in-process run cannot be
+// recovered by `chiron get <id>`.
 type Worker struct {
 	deps WorkerDeps
 
@@ -37,13 +39,17 @@ type Worker struct {
 	runs map[string]*workerState
 }
 
-// workerState is the per-run record keyed by interaction id. done is closed
-// exactly once, when the loop returns; cancel stops the loop early.
+// workerState is the per-run record keyed by interaction id. loopDone is
+// closed once finding and completed are stored, before any save-back; done is
+// closed once the run, save-back included, has finished. finding and
+// completed are written only before loopDone closes. cancel stops the loop
+// early.
 type workerState struct {
 	query   string
 	started time.Time
 	cancel  context.CancelFunc
 
+	loopDone  chan struct{}
 	done      chan struct{}
 	finding   Finding
 	completed time.Time
@@ -108,33 +114,39 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	st := &workerState{
-		query:   task.Query,
-		started: time.Now(),
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		query:    task.Query,
+		started:  time.Now(),
+		cancel:   cancel,
+		loopDone: make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	w.mu.Lock()
 	w.runs[id] = st
 	w.mu.Unlock()
 
 	brief := Brief{Objective: task.Query}
-	remember := func(ctx context.Context, f Finding, span trace.Span) {
+	after := func(ctx context.Context, f Finding, span trace.Span) {
+		st.finding = f
+		st.completed = time.Now()
+		close(st.loopDone)
 		w.rememberFinding(ctx, id, brief.Objective, f, span)
 	}
 	go func() {
 		defer cancel()
-		st.finding = runWorker(runCtx, w.deps, brief, remember)
-		st.completed = time.Now()
+		runWorker(runCtx, w.deps, brief, after)
 		close(st.done)
 	}()
 
 	return id, nil
 }
 
-// Await implements researcher.Researcher: block until the run for id finishes.
-// If ctx ends first, the run is cancelled so no further paid turns are taken,
-// and the context error is returned. An unknown id is a programming fault, not
-// a user condition.
+// Await implements researcher.Researcher: block until the run for id
+// finishes, save-back included. If ctx ends while the loop is still running,
+// the run is cancelled so no further paid turns are taken, and the context
+// error is returned. If ctx ends after the loop has recorded its Finding,
+// Await returns nil: the finding is complete and paid for, and the save-back
+// continues under its own rememberTimeout. An unknown id is a programming
+// fault, not a user condition.
 func (w *Worker) Await(ctx context.Context, id string) error {
 	st, err := w.state(id)
 	if err != nil {
@@ -144,13 +156,19 @@ func (w *Worker) Await(ctx context.Context, id string) error {
 	case <-st.done:
 		return nil
 	case <-ctx.Done():
+	}
+	select {
+	case <-st.loopDone:
+		return nil
+	default:
 		st.cancel()
 		return fmt.Errorf("fleet: awaiting worker %s: %w", id, ctx.Err())
 	}
 }
 
-// Result implements researcher.Researcher: map the finished run's Finding onto
-// a types.Interaction. Called before completion, it reports the in-progress
+// Result implements researcher.Researcher: map the run's Finding onto a
+// types.Interaction once the loop has recorded it, whether or not a
+// save-back is still running. Called before then, it reports the in-progress
 // state rather than blocking.
 func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error) {
 	st, err := w.state(id)
@@ -158,7 +176,7 @@ func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error
 		return nil, err
 	}
 	select {
-	case <-st.done:
+	case <-st.loopDone:
 		return w.mapInteraction(id, st), nil
 	default:
 		return &types.Interaction{
@@ -226,7 +244,7 @@ func workerTools(deps WorkerDeps) []string {
 }
 
 // Save-back bounds. rememberTimeout also bounds how long a slow store can
-// delay Await.
+// delay Await, and how long a save can run on after Await has returned.
 const (
 	rememberTimeout  = 30 * time.Second
 	maxRememberBytes = 32 << 10
