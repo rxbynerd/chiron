@@ -251,8 +251,9 @@ const truncatedMarker = " [truncated]"
 
 // recallResultsMessage renders knowledge store hits as the next user turn.
 // Every store-supplied field is defanged and flattened to one line except the
-// text; each hit's text is bounded to maxRecallHitBytes and the whole list to
-// maxBytes, so the closing fence is always present.
+// text; a hit the store marks stale says so after its name. Each hit's text is
+// bounded to maxRecallHitBytes and the fenced body, its final newline
+// included, to maxBytes, so the closing fence is always present.
 func recallResultsMessage(query string, hits []memory.Recalled, maxBytes int) model.Message {
 	var list strings.Builder
 	if len(hits) == 0 {
@@ -270,6 +271,9 @@ func recallResultsMessage(query string, hits []memory.Recalled, maxBytes int) mo
 			list.WriteString(defang(name))
 		} else {
 			list.WriteString("(untitled)")
+		}
+		if h.Memory.Meta.Labels["stale"] == "true" {
+			list.WriteString(" (stale)")
 		}
 		list.WriteString("\n")
 		if ref := oneLine(h.Reference.Locator); ref != "" {
@@ -289,7 +293,7 @@ func recallResultsMessage(query string, hits []memory.Recalled, maxBytes int) mo
 	fmt.Fprintf(&b, "Knowledge store results for %q:\n%s\n", query, toolResultOpen)
 	body := list.String()
 	if len(body) > maxBytes {
-		body = boundBytes(body, maxBytes) + "\n"
+		body = boundBytes(body, maxBytes-1) + "\n"
 	}
 	b.WriteString(body)
 	b.WriteString(toolResultClose)

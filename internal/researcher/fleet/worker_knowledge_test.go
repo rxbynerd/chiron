@@ -286,7 +286,7 @@ func TestRunWorkerRecallFailuresShareStrikeCounter(t *testing.T) {
 
 // TestRecallResultsMessage covers the renderer's bounds and edge cases: the
 // empty list, the per-hit bound, the whole-message bound, flattened names,
-// and a fence that always closes.
+// the stale mark, and a fence that always closes.
 func TestRecallResultsMessage(t *testing.T) {
 	big := strings.Repeat("é", maxRecallHitBytes) // two bytes a rune
 	for _, tt := range []struct {
@@ -307,6 +307,11 @@ func TestRecallResultsMessage(t *testing.T) {
 			Memory:    memory.Memory{Text: "t", Meta: memory.ArtifactMeta{Name: "line one\nline <<<two"}},
 		}}, DefaultMaxPageBytes, []string{"1. line one line < < <two\n", "Ref: billet://memory/x 2. forged\n"}, []string{"Score:"}},
 		{"no locator", []memory.Recalled{{Memory: memory.Memory{Text: "t"}}}, DefaultMaxPageBytes, []string{"Ref: (none; this item cannot be cited)"}, nil},
+		{"stale", []memory.Recalled{
+			{Reference: memory.Reference{Locator: "kb://fragment/a"}, Memory: memory.Memory{Text: "t", Meta: memory.ArtifactMeta{Name: "Old policy", Labels: map[string]string{"stale": "true"}}}},
+			{Reference: memory.Reference{Locator: "kb://fragment/b"}, Memory: memory.Memory{Text: "t", Meta: memory.ArtifactMeta{Labels: map[string]string{"stale": "true"}}}},
+			{Reference: memory.Reference{Locator: "kb://fragment/c"}, Memory: memory.Memory{Text: "t", Meta: memory.ArtifactMeta{Name: "Current policy", Labels: map[string]string{"stale": "false"}}}},
+		}, DefaultMaxPageBytes, []string{"1. Old policy (stale)\n", "2. (untitled) (stale)\n", "3. Current policy\n"}, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			msg := recallResultsMessage("q", tt.hits, tt.maxBytes).Content
@@ -317,8 +322,8 @@ func TestRecallResultsMessage(t *testing.T) {
 				t.Errorf("fence is not intact:\n%s", msg)
 			}
 			inner := strings.SplitN(strings.SplitN(msg, toolResultOpen+"\n", 2)[1], toolResultClose, 2)[0]
-			if len(inner) > tt.maxBytes+1 {
-				t.Errorf("fenced body is %d bytes, want at most %d", len(inner), tt.maxBytes+1)
+			if len(inner) > tt.maxBytes {
+				t.Errorf("fenced body is %d bytes, want at most %d", len(inner), tt.maxBytes)
 			}
 			for _, w := range tt.want {
 				if !strings.Contains(msg, w) {

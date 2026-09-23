@@ -321,9 +321,11 @@ type WorkerDeps struct {
 - `recallResultsMessage` renders inside the tool-result fence with every
   field passed through `defang`: numbered hits, `Name`, `Ref: <Locator>`,
   a score when non-zero, then the text, each hit bounded to `maxRecallHitBytes`
-  (4 KiB) and the whole message to `MaxRecallBytes`, with a `[truncated]`
+  (4 KiB) and the fenced body to `MaxRecallBytes`, with a `[truncated]`
   marker. Zero hits renders "(no results)". A non-empty `degraded` label is
-  rendered once, with its reason, as a note before the list.
+  rendered once, with its reason, as a note before the list, and a hit
+  labelled `stale: true` is marked `(stale)` after its name, so a superseded
+  decision does not read as current.
 
 ### 4.3 Citations
 
