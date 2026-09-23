@@ -2,23 +2,31 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 )
 
+// HTTPStatusError reports that the server answered with a non-2xx status.
+type HTTPStatusError struct {
+	Status int
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d", e.Status)
+}
+
 // Fetch retrieves rawURL and returns its content, bounded by MaxContentBytes.
 // The call is bounded by RequestTimeout (a tighter caller deadline wins). The
 // URL scheme must be http/https, and the destination host must pass the SSRF
 // guard both before the request and after every redirect.
 //
-// A reader-side error (dial/read failure) is returned to the caller; reads are
-// idempotent, so a caller may retry knowingly, but Fetch itself does not retry
-// — keeping the cost and time ceiling of one call obvious. A body larger than
-// MaxContentBytes is NOT an error: Content holds the bounded prefix and
-// Page.Truncated is set (docs/DECISIONS.md), because partial page text is
-// useful research input.
+// A refused destination wraps ErrRefusedDestination and a non-2xx response
+// wraps an *HTTPStatusError; any other failure is a plain error. Fetch never
+// retries. A body larger than MaxContentBytes is NOT an error: Content holds
+// the bounded prefix and Page.Truncated is set.
 func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -42,14 +50,12 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// A transport/redirect error can wrap the request URL (with userinfo);
-		// scrub it before surfacing.
-		return Page{}, fmt.Errorf("fetch: GET %s: %s", sanitizeURL(u), scrubURLString(err.Error()))
+		return Page{}, requestError(u, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return Page{}, fmt.Errorf("fetch: GET %s: HTTP %d", sanitizeURL(u), resp.StatusCode)
+		return Page{}, fmt.Errorf("fetch: GET %s: %w", sanitizeURL(u), &HTTPStatusError{Status: resp.StatusCode})
 	}
 
 	content, truncated, err := readCapped(resp.Body, c.maxContentBytes)
@@ -69,6 +75,22 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error) {
 		Content:     content,
 		Truncated:   truncated,
 	}, nil
+}
+
+// requestError reports a client.Do failure against the sanitised URL. The
+// *url.Error layer names the request URL, userinfo included, so a refusal is
+// re-wrapped from the cause beneath it, whose message holds only a host and
+// an address; any other failure is flattened and scrubbed.
+func requestError(u *url.URL, err error) error {
+	cause := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cause = ue.Err
+	}
+	if errors.Is(cause, ErrRefusedDestination) {
+		return fmt.Errorf("fetch: GET %s: %w", sanitizeURL(u), cause)
+	}
+	return fmt.Errorf("fetch: GET %s: %s", sanitizeURL(u), scrubURLString(err.Error()))
 }
 
 // readCapped reads up to max bytes and reports whether the source held more.

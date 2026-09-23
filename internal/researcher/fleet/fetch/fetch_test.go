@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -62,11 +63,8 @@ func TestFetchLoopbackRefusedWithoutAllow(t *testing.T) {
 
 	c := newClient(t, func(o *Options) { o.AllowLoopback = false })
 	_, err := c.Fetch(context.Background(), server.URL)
-	if err == nil {
-		t.Fatal("Fetch should refuse a loopback URL when AllowLoopback is false")
-	}
-	if !strings.Contains(err.Error(), "internal") && !strings.Contains(err.Error(), "refus") {
-		t.Errorf("error = %v, want an SSRF refusal", err)
+	if !errors.Is(err, ErrRefusedDestination) {
+		t.Fatalf("error = %v, want ErrRefusedDestination for loopback without AllowLoopback", err)
 	}
 }
 
@@ -90,8 +88,8 @@ func TestFetchPrivateAddressRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := c.Fetch(context.Background(), tt.url)
-			if err == nil {
-				t.Errorf("Fetch(%q) succeeded, want an SSRF refusal", tt.url)
+			if !errors.Is(err, ErrRefusedDestination) {
+				t.Errorf("Fetch(%q) error = %v, want ErrRefusedDestination", tt.url, err)
 			}
 		})
 	}
@@ -112,8 +110,8 @@ func TestFetchAllowLoopbackDoesNotRelaxPrivate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := c.Fetch(context.Background(), tt.url)
-			if err == nil {
-				t.Errorf("Fetch(%q) succeeded under AllowLoopback, want it still refused", tt.url)
+			if !errors.Is(err, ErrRefusedDestination) {
+				t.Errorf("Fetch(%q) under AllowLoopback error = %v, want ErrRefusedDestination", tt.url, err)
 			}
 		})
 	}
@@ -135,7 +133,7 @@ func TestFetchSchemeRejected(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := c.Fetch(context.Background(), tt.url)
 			if err == nil {
-				t.Errorf("Fetch(%q) succeeded, want a scheme rejection", tt.url)
+				t.Fatalf("Fetch(%q) succeeded, want a scheme rejection", tt.url)
 			}
 			if !strings.Contains(err.Error(), "scheme") {
 				t.Errorf("error = %v, want a scheme error", err)
@@ -228,11 +226,27 @@ func TestFetchRedirectToPrivateRefused(t *testing.T) {
 
 	c := newClient(t) // AllowLoopback true
 	_, err := c.Fetch(context.Background(), server.URL)
-	if err == nil {
-		t.Fatal("Fetch should refuse a redirect to an internal address")
+	if !errors.Is(err, ErrRefusedDestination) {
+		t.Fatalf("error = %v, want ErrRefusedDestination on the redirect", err)
 	}
-	if !strings.Contains(err.Error(), "internal") && !strings.Contains(err.Error(), "refus") {
-		t.Errorf("error = %v, want an SSRF refusal on the redirect", err)
+}
+
+func TestFetchRefusedRedirectNeverLeaksUserinfo(t *testing.T) {
+	// A refusal keeps its error chain for classification, so its message
+	// must still carry no userinfo from the requested URL.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+	}))
+	defer server.Close()
+
+	withCreds := strings.Replace(server.URL, "http://", "http://user:s3cr3t@", 1)
+	c := newClient(t)
+	_, err := c.Fetch(context.Background(), withCreds)
+	if !errors.Is(err, ErrRefusedDestination) {
+		t.Fatalf("error = %v, want ErrRefusedDestination on the redirect", err)
+	}
+	if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(err.Error(), "user:") {
+		t.Fatalf("refusal leaked userinfo: %v", err)
 	}
 }
 
@@ -266,11 +280,18 @@ func TestFetchNon2xxIsError(t *testing.T) {
 
 	c := newClient(t)
 	_, err := c.Fetch(context.Background(), server.URL)
-	if err == nil {
-		t.Fatal("Fetch should error on a 404")
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error = %v, want an *HTTPStatusError", err)
+	}
+	if statusErr.Status != http.StatusNotFound {
+		t.Errorf("Status = %d, want 404", statusErr.Status)
 	}
 	if !strings.Contains(err.Error(), "404") {
-		t.Errorf("error = %v, want the status surfaced", err)
+		t.Errorf("error = %v, want the status in the message", err)
+	}
+	if errors.Is(err, ErrRefusedDestination) {
+		t.Errorf("error = %v, a 404 is not a refused destination", err)
 	}
 }
 
@@ -354,6 +375,9 @@ func TestFetchErrorNeverLeaksUserinfo(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "s3cr3t") {
 		t.Fatalf("error leaked userinfo credential: %v", err)
+	}
+	if errors.Is(err, ErrRefusedDestination) {
+		t.Errorf("error = %v, a dial failure is not a refused destination", err)
 	}
 }
 

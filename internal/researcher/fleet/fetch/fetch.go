@@ -39,6 +39,11 @@ const (
 	maxRedirects           = 5
 )
 
+// ErrRefusedDestination is wrapped by every error that refuses a URL because
+// its destination is an internal address, whether checked before the request
+// or on a redirect.
+var ErrRefusedDestination = errors.New("fetch: refused destination")
+
 // Options configures a Client.
 type Options struct {
 	// HTTPClient supplies the underlying client. nil builds one. A
@@ -164,7 +169,7 @@ func guardHost(u *url.URL, allowLoopback bool) error {
 	// checked.
 	if ip := net.ParseIP(host); ip != nil {
 		if isInternal(ip, allowLoopback) {
-			return fmt.Errorf("fetch: refusing to fetch internal address %s", host)
+			return fmt.Errorf("%w: %s is an internal address", ErrRefusedDestination, host)
 		}
 		return nil
 	}
@@ -175,7 +180,7 @@ func guardHost(u *url.URL, allowLoopback bool) error {
 	}
 	for _, ip := range ips {
 		if isInternal(ip, allowLoopback) {
-			return fmt.Errorf("fetch: refusing to fetch %s: resolves to internal address", host)
+			return fmt.Errorf("%w: %s resolves to internal address %s", ErrRefusedDestination, host, ip)
 		}
 	}
 	return nil
