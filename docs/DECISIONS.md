@@ -10,6 +10,11 @@ place with a note rather than deleting them.
 
 ## 2026-06-07 — ContextStore is declared locally, not imported from paddockapi
 
+> **Partially superseded** by "Knowledge recall and remember via the memory
+> seam" (2026-09-23): the recall and remember halves are now bound to
+> external stores (Billet, Alexandria). The local-declaration rule stands,
+> and the session and artifact plane is still unimplemented.
+
 Chiron's `internal/memory` declares its own `ContextStore` interface and
 supporting types, structurally matching the contract sketched in
 `docs/PADDOCK.md` §4, rather than importing `paddockapi`. This follows the
@@ -1153,3 +1158,99 @@ blocking this merge.
 extraction quality beyond the tag scanner, fakes out of the binary, a shared
 httpx helper, MCP protocol-version enforcement and session reuse, per-turn
 progress events, and durable recovery of worker runs.
+
+## 2026-09-23 — Knowledge recall and remember via the memory seam
+
+Billet (the suite's memory sidecar) and Alexandria (the knowledge base)
+exist now; Paddock does not. The worker's web-search client cannot consume
+either: pointed at Billet it degrades to one prose snippet, and knowledge is
+not web search in any case. `docs/KNOWLEDGE.md` is the binding design; this
+entry records the decisions it makes. No new dependency was introduced.
+
+**The seam splits; the types do not change.** `internal/memory` gains
+`Recaller` and `Rememberer`, and `ContextStore` embeds both beside the
+unchanged session and artifact methods, so `Noop` and a future Paddock
+binding still satisfy it. An external store implements only the halves it
+has. The session and artifact plane stays with the `fleet.memory` binding
+(Wave 4, issue #23). The interfaces remain declared locally, per the
+2026-06-07 entry.
+
+**Two adapters, strict wire shapes.** `internal/memory/billet` calls
+Billet's `search_memory` and `save_memory` tools over MCP Streamable HTTP
+and satisfies both halves. `internal/memory/alexandria` calls `GET
+/v1/search` and satisfies `Recaller` only. Unlike the search client, neither
+degrades to prose: a Billet reply without a `records` key is an error,
+because the worker must never mistake arbitrary text for a memory. Each
+recalled item is bounded on read.
+
+**Alexandria over REST, not MCP.** Alexandria's `/mcp` targets a stateless
+MCP revision behind non-standard headers and a `_meta` envelope, while its
+own Claude Code plugin recalls over `GET /v1/search` with a static bearer
+token. The plugin's path is the maintained, tested integration, so Chiron
+follows it. The client never follows a redirect, since a redirect would
+carry the bearer elsewhere. It has no `Rememberer`: `kb_write_fragment`
+needs a citation model Chiron does not have yet, and config rejects
+`knowledge_remember` with this provider.
+
+**A shared MCP transport.** The Streamable-HTTP transport moves out of
+`internal/researcher/fleet/search` into `internal/mcpclient`, which knows
+nothing about search; `search` keeps its exported API as the result-shape
+layer and Billet reuses the transport. This removes the duplication noted in
+issue #15 for the MCP half only. Issue #16 (protocol-version enforcement and
+session reuse) remains open.
+
+**Recall is a fourth action on the shared failure budget.** With a
+`Recaller` configured the worker offers `recall` beside search, fetch and
+final. Without one, the action schema and system prompt are byte-identical
+to the recall-free loop (pinned against snapshots) and `recall` is an
+unknown action that fails the run closed. Hits render inside the
+tool-result fence, defanged and bounded per hit (4 KiB) and per message
+(`MaxRecallBytes`). Recall failures share the three-strike counter with
+search and fetch, so a dead store cannot extend a run past its existing
+bound.
+
+**Recalled locators are citable, never fetchable.** A hit's locator joins a
+separate allow-list that `finalise` admits alongside the fetched and
+searched URLs, but it never joins the fetch allow-list: the model cannot
+spend a fetch, and a failure strike, on a page behind the store's own
+authentication. The Markdown formatter keeps a `billet://` citation as a
+source, rendered as its escaped title and the locator in inline code rather
+than a link that could not resolve; every other non-web scheme stays
+dropped. `Usage.RecallCount`, the `recall_count` metric and span attribute,
+and the `recalls` front-matter field make recall visible.
+
+**Save-back is an opt-in write to the suite's memory store.** With
+`fleet.knowledge_remember` (Billet only), a Completed finding with a
+non-empty answer is saved as one bounded memory: the objective, the answer
+and the cited locators, scrubbed and cut to 32 KiB. It is named on the
+Interaction's tool list as `knowledge_remember`. This qualifies
+`docs/V2-RESEARCH-AGENT.md` §1 ("exactly two read-only network tools",
+"external web only") and V2-AMENDS amend 6, both amended in place with a
+pointer to `docs/KNOWLEDGE.md`: recall is read-only, and the one write goes
+to the suite's memory store, never to a workspace. The research-only
+boundary (no shell, no file writes, no workspace mutation) is unchanged.
+
+**Save-back runs before Await returns, bounded at 30 seconds.** The save
+runs synchronously on the run's goroutine after the loop returns and before
+the done channel closes, under `context.WithoutCancel` plus a 30 s timeout.
+A slow store therefore delays `Await` by at most 30 s. The alternative of
+closing the channel first and saving afterwards was rejected: `Result` could
+read the Interaction while the save was still running, and the goroutine
+would outlive the run with no deterministic end. The save runs while the
+worker span is still open, so the outcome lands on it as `remember_ref` or
+`remember_error`, scrubbed, and is logged through `slog.Default()`, also
+scrubbed. A failure never changes the run's status. `types.Interaction` has
+no metadata map, and none was added for this alone, so the reference is not
+recorded on the Interaction.
+
+**Config and issue #28.** `fleet.knowledge_provider`, `_endpoint`,
+`_key_ref`, `_space`, `_limit` and `_remember` (with matching
+`--fleet-knowledge-*` flags) are validated for worker and fleet only. The
+endpoint and key reference follow the model and search rules: absolute
+`https://` or loopback-only `http://`, no userinfo, query or fragment,
+`secret://` references only, values never echoed. With no provider, every
+other knowledge field must be empty or default, so a stray endpoint is an
+error rather than silently ignored. Issue #28 (a config file can choose both
+a credential and its destination) applies to this pair exactly as it does to
+the search pair; the pair is added under the same mitigations and falls
+within #28's scope rather than being resolved here.

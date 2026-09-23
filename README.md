@@ -165,6 +165,12 @@ chiron research --agent worker \
 | `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags. |
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
 | `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
+| `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
+| `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider. |
+| `--fleet-knowledge-key-ref` | — | `secret://` reference to the knowledge store key; required for `alexandria`, optional for `billet`. |
+| `--fleet-knowledge-space` | — | Alexandria space slug to scope recalls to (`alexandria` only). |
+| `--fleet-knowledge-limit` | `5` | Hits per recall, 1 to 20. |
+| `--fleet-knowledge-remember` | `false` | Save each completed finding back to the store (`billet` only). |
 
 The worker keeps the v1 money rules: the paid model call is never
 auto-retried, the interaction id (a local `wkr_` handle) is emitted before
@@ -177,6 +183,34 @@ refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
 `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
 `--template`) are rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+
+#### Organisational knowledge (Billet, Alexandria)
+
+With a knowledge store configured the worker gains a read-only `recall`
+action: it queries the store for prior findings, decisions and notes,
+usually before confirming on the public web, and may cite a recalled item
+by its reference. A recalled item is citable but never fetched. Billet
+(the suite's memory sidecar, over MCP) can also receive each completed
+finding with `--fleet-knowledge-remember`; that write goes only to the
+memory store, never to a workspace, and appears on the report's tool
+list. Alexandria (over its REST search API) is recall-only. The design is
+`docs/KNOWLEDGE.md`.
+
+```sh
+chiron research --agent worker \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-endpoint https://search.example.com/mcp \
+  --fleet-knowledge-provider billet \
+  --fleet-knowledge-endpoint http://127.0.0.1:8140/ \
+  --fleet-knowledge-remember \
+  --query "Which 10BASE-T1L PHY vendor did we shortlist, and has anything changed?"
+```
+
+A recalled Billet memory the answer relies on is listed under Sources as
+its title and `billet://memory/<id>` locator, not as a link. Recalls count
+towards the same three-strike tool-failure bound as search and fetch.
 
 ### Exit codes
 
