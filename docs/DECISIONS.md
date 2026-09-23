@@ -802,14 +802,14 @@ harness — or a loopback page that redirects onward — still cannot reach an
 internal production or cloud-metadata address. Production configuration leaves
 it false.
 
-**Connection-time IP pinning is a deliberate follow-up, not implemented
-here.** The guard is resolve-then-check: it does not pin the checked IP for
-the actual dial. Between the guard's `LookupIP` and the connection the name
-could re-resolve to a different address (DNS rebinding), and a redirect target
-is re-checked but likewise not pinned. Closing that race requires a custom
-`DialContext` that validates and pins the connecting IP. That hardening is
-recorded here as a follow-up and is explicitly out of scope for this chunk;
-the resolve-then-check guard is the baseline it will build on.
+**Connection-time IP pinning was a deliberate follow-up here (superseded
+2026-09-23).** As first built, the guard was resolve-then-check: it did not
+pin the checked IP for the actual dial, so between the guard's `LookupIP` and
+the connection the name could re-resolve to a different address (DNS
+rebinding), and a redirect target was re-checked but likewise not pinned. The
+2026-09-23 entry "web_fetch: connection-time SSRF pinning and the
+refused-destination error" closes that race with a guarded `DialContext` and
+records the current guard.
 
 **Oversize body is truncated-and-marked, not an error.** `MaxContentBytes`
 bounds the body read. A source exceeding it yields `Page.Content` = the
@@ -924,3 +924,84 @@ per-call timeout (no single call outlasts the worker's budget). The fetch
 client keeps `AllowLoopback` false in production; only tests flip it on to
 reach loopback fakes. The model client mandates an explicit model identifier,
 so `fleet.model_name` is required at the root rather than sent empty.
+
+## 2026-09-23 — web_fetch: connection-time SSRF pinning and the refused-destination error
+
+Remediates the cycle-3 review findings against
+`internal/researcher/fleet/fetch` (C3-SEC-1, C3-SEC-3, C3-SEC-8, C3-CODE-11,
+C3-CODE-12, C3-TEST-4, and the fetch side of C3-CODE-3 and C3-CODE-4). It
+supersedes the "Connection-time IP pinning is a deliberate follow-up"
+paragraph of the 2026-07-01 web_fetch entry. No new dependency.
+
+**The SSRF check runs when the connection is dialled.** The client's
+transport is a clone of `http.DefaultTransport` (or of a caller-supplied
+`*http.Transport`) with a `DialContext` installed by the guard. That dialer
+resolves the host itself through the injectable `Resolver` (`LookupIPAddr`
+with the request context; `net.DefaultResolver` by default), refuses if any
+answer is internal, and passes only the checked `IP:port` to the underlying
+dialer. The address connected to is therefore the address checked: neither a
+TTL-0 rebinding answer nor a redirect hop can reach an unchecked address. The
+request URL is unchanged, so TLS SNI, certificate verification and the `Host`
+header stay on the hostname. The pre-flight check, now inside the
+`RequestTimeout` context, and the `CheckRedirect` re-check, on
+`req.Context()`, remain as fast refusals ahead of the dial; the redirect cap
+stays at 5. Resolving in the guard rather than checking in a
+`net.Dialer.Control` hook keeps the refuse-on-any-answer rule (a `Control`
+hook sees only the address being connected) and gives the DNS branch a seam
+that tests can fake without the network.
+
+**Accepted costs of pinning.**
+
+- Each fetch resolves twice, once before the request and once at the dial;
+  Go keeps no DNS cache.
+- Checked addresses are dialled one after another in resolver order, so the
+  IPv4/IPv6 racing of Happy Eyeballs is lost. A black-holed first address
+  costs the dialer's timeout (bounded by `RequestTimeout`) before the next is
+  tried.
+- The transport never uses a proxy: `HTTP_PROXY`/`HTTPS_PROXY` are ignored
+  and a caller transport's `Proxy` is dropped, because a proxy resolves names
+  with its own resolver, beyond the guard's reach. An operator egress proxy
+  is therefore unsupported; admitting one needs an explicit opt-in that
+  knowingly moves the SSRF boundary to the proxy.
+- A caller-supplied `HTTPClient` must have a nil transport or an
+  `*http.Transport` without `DialTLS`/`DialTLSContext` (the transport sends
+  HTTPS through a custom TLS dialer instead of `DialContext`); `New` returns
+  an error otherwise. The caller's client and transport are cloned, never
+  mutated, and the caller's `DialContext`, if set, makes each connection to a
+  checked address.
+
+**The address classifier is an explicit table.** `isInternal` works on
+`netip.Addr`. Beyond loopback and unspecified it refuses 0.0.0.0/8, 10/8,
+100.64.0.0/10 (CGNAT, including the 100.100.100.200 metadata address),
+169.254/16, 172.16/12, 192.0.0.0/24, 192.168/16, 198.18.0.0/15, 224.0.0.0/4,
+240.0.0.0/4 (including 255.255.255.255), 64:ff9b:1::/48 (local-use NAT64),
+fc00::/7, fe80::/10, fec0::/10 and ff00::/8. IPv4-mapped addresses are
+unmapped, zones are stripped (a zoned address never matches a
+`netip.Prefix`), an unparseable address is refused, and the IPv4 address
+carried by NAT64 (64:ff9b::/96), 6to4 (2002::/16) and IPv4-compatible
+(::/96) addresses is extracted and re-checked without the `AllowLoopback`
+exemption. `AllowLoopback` still exempts only loopback and unspecified. The
+documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
+2001:db8::/32) are not refused, since nothing routes them; the tests use
+203.0.113.10 as a stand-in public address. An allow-only-global rule was
+the alternative; the explicit table is kept because each row can be
+reviewed and is enumerated by `TestIsInternal`.
+
+**Refusals and status failures are typed.** Every SSRF refusal wraps the
+exported sentinel `ErrRefusedDestination`, and a non-2xx response wraps an
+exported `*HTTPStatusError{Status}`, so a caller can tell a refused
+destination (a signal about the search result) from an ordinary fetch
+failure with `errors.Is`/`errors.As`. `client.Do` returns a `*url.Error`
+naming the request URL with its userinfo, so a refusal is re-wrapped from
+the cause beneath that layer, whose message holds only a host and an
+address. Every other transport failure is still flattened and scrubbed of
+userinfo.
+
+**Requests identify Chiron, and the default body bound is 1 MiB.** Requests
+carry `User-Agent: chiron/2 (+https://github.com/rxbynerd/chiron;
+research-only web_fetch)`, overridable with `Options.UserAgent`, and
+`Accept: text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.5`. Go's
+default agent draws 403s from many CDNs, and a site operator can now see who
+is fetching and why. The default `MaxContentBytes` drops from 8 MiB to
+1 MiB. It is a memory backstop, not a transcript budget: a caller that feeds
+pages to a model passes its own, tighter bound.
