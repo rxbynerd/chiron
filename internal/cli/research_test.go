@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -393,27 +394,23 @@ func TestFleetAgentNotYetWired(t *testing.T) {
 	}
 }
 
-// TestWorkerAgentIsWired proves --agent worker now constructs a real
-// in-process worker researcher at the composition root: the run reaches and
-// completes the worker loop through the unchanged run core, rather than
-// returning the not-yet-wired error. The model is scripted to answer
-// immediately with a final action (no search/fetch), so the run needs only a
-// loopback model MCP-style endpoint and a search endpoint; the report lands
-// on stdout with the worker's front matter. This is the composition-root
-// smoke test for the wiring; the fuller golden-report assertion lives in the
-// fleet package (through run.Run) with a search + loopback-fetch script.
+// TestWorkerAgentIsWired proves --agent worker constructs a real in-process
+// worker researcher at the composition root: the run reaches and completes the
+// worker loop through the unchanged run core. The model searches once and
+// answers citing the search result, so the run needs a loopback model endpoint
+// and a fake search MCP; the report lands on stdout with the worker's front
+// matter. The fuller golden-report assertion lives in the fleet package.
 func TestWorkerAgentIsWired(t *testing.T) {
-	modelSrv := model.NewFakeServer(model.FakeReply{
-		Content:      `{"action":"final","answer":"# Worker answer\n\nThe sky is blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
-		FinishReason: "stop",
-		Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
-	})
+	modelSrv := model.NewFakeServer(
+		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
+		model.FakeReply{
+			Content:      `{"action":"final","answer":"# Worker answer\n\nThe sky is blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
+			FinishReason: "stop",
+			Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
+		},
+	)
 	defer modelSrv.Close()
-	// The search endpoint need only be a valid loopback URL: this script never
-	// searches, so no MCP handler is exercised. A bare server suffices.
-	searchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 	defer searchSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 
@@ -423,13 +420,10 @@ func TestWorkerAgentIsWired(t *testing.T) {
 		"--fleet-model-endpoint", modelSrv.URL(),
 		"--fleet-model-name", "test-model",
 		"--fleet-model-key-ref", "secret://MODEL_KEY",
-		"--fleet-search-endpoint", searchSrv.URL,
+		"--fleet-search-endpoint", searchSrv.URL(),
 	)
 	if err != nil {
 		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
-	if strings.Contains(stderr, "not yet wired") {
-		t.Fatalf("--agent worker must be wired now:\n%s", stderr)
 	}
 	if !strings.Contains(stdout, "# Worker answer") {
 		t.Errorf("stdout missing the worker's report body:\n%s", stdout)

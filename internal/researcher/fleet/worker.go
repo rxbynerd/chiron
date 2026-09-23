@@ -14,21 +14,10 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// This file implements the bounded, in-process research worker loop
-// (docs/V2-RESEARCH-AGENT §5): search -> read -> reason -> synthesise over the
-// two read-only web tools, driven by a standard frontier model asked for one
-// structured action per turn. It is factored so Wave 4's lead can reuse it
-// per-brief: RunWorker takes a Brief (objective + output format + source
-// guidance + boundaries) and shared WorkerDeps, and returns a Finding
-// (prose + citations + usage + status). The single-query --agent worker path
-// (Worker, in worker_researcher.go) is one caller; the lead will be another,
-// dispatching one RunWorker per decomposed brief under its own fan-out caps.
-
 // Brief is one unit of work for a worker: the objective to research and the
-// shape of the answer expected. A lone --agent worker run builds a Brief from
-// the user's query; Wave 4's lead builds one Brief per decomposed subtask.
-// Blank fields fall back to instructive defaults (worker_prompt.go), so a
-// minimally-populated Brief still produces a coherent prompt.
+// shape of the answer expected. Blank fields fall back to instructive defaults
+// (worker_prompt.go), so a minimally-populated Brief still produces a coherent
+// prompt.
 type Brief struct {
 	// Objective is the research question or subtask the worker must answer.
 	Objective string
@@ -43,53 +32,83 @@ type Brief struct {
 }
 
 // Finding is the outcome of one worker run: the synthesised prose, the sources
-// it cited, the usage it accumulated, and the status describing how it ended.
-// It is the unit the --agent worker path maps to a types.Interaction and the
-// unit Wave 4's lead will store by reference and synthesise over.
+// it relied on, the usage it accumulated, and the status describing how it
+// ended.
 type Finding struct {
-	// Text is the worker's synthesised answer — the report-body candidate.
+	// Text is the worker's synthesised answer, the report-body candidate.
 	Text string
-	// Citations are the deduplicated sources the worker relied on.
+	// Citations are the deduplicated sources the worker fetched or cited. Only
+	// URLs the worker actually saw in a search result or fetched are admitted;
+	// a cited URL the worker never encountered is dropped.
 	Citations []types.Citation
 	// Usage accumulates the token and search counters across every turn, plus
-	// a best-effort estimated cost. Cost is 0 when no rate is configured — the
-	// token and search counts are the primary spend signal.
+	// the estimated cost when Caps carries a price; otherwise EstimatedCostGBP
+	// stays 0 and the token counts are the spend signal.
 	Usage types.Usage
 	// Status is the terminal outcome: Completed when the model delivered a
-	// final answer within the caps; Incomplete when a cap stopped the loop;
-	// Failed when a model/search/fetch error ended it. Partial citations
-	// gathered before a stop are preserved on all outcomes.
+	// final answer within the caps; Incomplete when a cap, the context, or a
+	// truncated reply stopped the loop; Failed when a model error, an invalid
+	// action, or repeated tool failures ended it. Citations gathered before a
+	// stop are preserved on every outcome.
 	Status types.Status
 	// Detail is a human-readable reason accompanying an Incomplete or Failed
-	// outcome (the cap that fired, or the scrubbed error), empty on success.
+	// outcome, empty on success. It is scrubbed and bounded in length.
 	Detail string
 }
 
-// Caps bound one worker run deterministically (docs/V2-RESEARCH-AGENT §1,
-// "structural caps"). Exceeding any of them ends the loop with
-// StatusIncomplete rather than an error: a bounded, partial finding is a
+// Caps bound one worker run deterministically. Exceeding a cap ends the loop
+// with StatusIncomplete rather than an error: a bounded, partial finding is a
 // legitimate outcome, not a fault.
 type Caps struct {
-	// MaxTurns caps the number of model turns. It must be positive (config
-	// validation guarantees it); it is the primary runaway guard.
+	// MaxTurns caps the number of model turns. It must be positive; it is the
+	// primary runaway guard.
 	MaxTurns int
-	// MaxTokens caps the accumulated model tokens across the run. Zero means
-	// uncapped on tokens — the turn and time caps still bound the loop.
+	// MaxTokens caps the accumulated model tokens (input plus output) across
+	// the run. Zero means uncapped on tokens.
 	MaxTokens int
-	// CeilingGBP caps the accumulated estimated model spend. Zero means
-	// uncapped on cost (the usual case in CI, where no price table exists).
+	// CeilingGBP caps the accumulated estimated model spend. It only has effect
+	// when InputGBPPerMTok/OutputGBPPerMTok are set, because the estimate is
+	// derived from them; config validation refuses a ceiling without a price.
 	CeilingGBP float64
+	// InputGBPPerMTok and OutputGBPPerMTok price a million prompt and
+	// completion tokens. Zero leaves EstimatedCostGBP at 0.
+	InputGBPPerMTok  float64
+	OutputGBPPerMTok float64
 	// Timeout is the per-worker wall-clock limit. A positive value bounds the
 	// loop with a context deadline; zero leaves the caller's context deadline
 	// as the only wall-clock bound.
 	Timeout time.Duration
+	// MaxPageBytes bounds the text of one fetched page after HTML is reduced
+	// to text, before it enters the transcript. Zero selects
+	// DefaultMaxPageBytes.
+	MaxPageBytes int
 }
 
-// WorkerDeps are the shared collaborators a worker loop uses: the three landed
-// clients, a tracer for best-effort observability, and the caps. The lead and
-// every worker share one set of clients; only the Brief and Caps differ per
-// run. Model and Search are required; Fetch is required for the loop to honour
-// a fetch action; Tracer may be nil (best-effort tracing is skipped).
+// DefaultMaxPageBytes is the page-text bound used when Caps.MaxPageBytes is
+// zero. Every page in the transcript is re-sent on each later turn, so the
+// bound is small relative to a model context window.
+const DefaultMaxPageBytes = 64 << 10
+
+// turnCompletionTokens caps a single turn's completion. An action is a short
+// JSON object except for the final answer, which fits comfortably; providers
+// reject a completion cap above the model's maximum, so the remaining token
+// budget is never passed through verbatim.
+const turnCompletionTokens = 8192
+
+// maxConsecutiveToolFailures is how many search or fetch failures in a row
+// the loop feeds back to the model before treating the tools as unavailable
+// and ending the run Failed. Each feedback costs one model turn, so this is a
+// spend bound as much as a robustness one.
+const maxConsecutiveToolFailures = 3
+
+// maxDetailBytes bounds Finding.Detail; a provider error body can be large
+// and the detail is copied into the report front matter and traces.
+const maxDetailBytes = 2048
+
+// WorkerDeps are the shared collaborators a worker loop uses: the three
+// clients, a tracer for best-effort observability, and the caps. Model and
+// Search are required; Fetch is required for the loop to honour a fetch
+// action; Tracer may be nil.
 type WorkerDeps struct {
 	Model  *model.Client
 	Search *search.Client
@@ -98,10 +117,8 @@ type WorkerDeps struct {
 	Caps   Caps
 }
 
-// fetchedPage is the loop's internal view of a fetched document — the subset
-// of fetch.Page the transcript renders. Decoupling it keeps worker_prompt.go
-// free of a direct dependency on the fetch client's concrete Page type in its
-// message-builder signature.
+// fetchedPage is the loop's view of a fetched document: the subset of
+// fetch.Page the transcript renders.
 type fetchedPage struct {
 	URL         string
 	ContentType string
@@ -110,18 +127,15 @@ type fetchedPage struct {
 }
 
 // RunWorker runs the bounded worker loop for one brief and returns a Finding.
-// It never returns an error: every outcome — success, a cap stop, or a tool
-// failure — is expressed as a Finding with a status and (for non-success) a
-// scrubbed detail, so a caller (the --agent worker adapter, or Wave 4's lead)
-// gets a uniform result to map or store. Any partial citations gathered before
-// a stop are preserved on the returned Finding.
+// It never returns an error: every outcome (success, a cap stop, a context
+// end, or a hard failure) is expressed as a Finding with a status and, for
+// non-success, a scrubbed detail. Citations gathered before a stop are
+// preserved.
 //
-// The loop dispatches ONLY the three known actions (worker_action.go). An
+// The loop dispatches only the three known actions (worker_action.go). An
 // unknown or side-effecting action is refused at parse time and ends the run
-// as Failed with no side effect — there is no execution path for it.
+// Failed with no side effect.
 func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
-	// Bound the whole run by the per-worker timeout, yielding to a tighter
-	// caller deadline. A zero Timeout leaves the caller's context as-is.
 	if deps.Caps.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deps.Caps.Timeout)
@@ -140,24 +154,26 @@ func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
 	if span != nil {
 		span.SetAttr("status", string(finding.Status))
 		span.SetAttr("turns", w.turns)
+		span.SetAttr("dropped_citations", w.droppedCitations)
 		if finding.Detail != "" {
 			span.SetAttr("detail", finding.Detail)
 		}
-		// A cap stop or tool failure is a worker-level outcome, not an error to
-		// record on the span: the loop concluded and produced a finding. Only a
-		// context error (timeout/cancellation surfacing through a tool) is
-		// recorded as the span's error, if any.
-		span.End(nil)
+		// Metrics are recorded while the span is still open so the OTel
+		// binding attributes them to it.
 		emitWorkerMetrics(ctx, deps.Tracer, finding.Usage)
+		var spanErr error
+		if finding.Status == types.StatusFailed {
+			spanErr = errors.New(finding.Detail)
+		}
+		span.End(spanErr)
 	}
 	return finding
 }
 
 // workerRun holds the mutable state of one loop: the growing transcript, the
-// accumulated usage, the citations gathered so far, and the set of URLs the
-// model is permitted to fetch (only URLs it has actually seen in a search
-// result). It exists so the loop's steps can share state without threading a
-// dozen return values.
+// accumulated usage, the citations gathered so far, and the URLs the model is
+// permitted to fetch and cite (only URLs it has actually seen in a search
+// result or fetched).
 type workerRun struct {
 	deps  WorkerDeps
 	brief Brief
@@ -165,32 +181,33 @@ type workerRun struct {
 	transcript []model.Message
 	usage      types.Usage
 	citations  []types.Citation
-	// seenURLs is the allow-list for fetch: a URL becomes fetchable only after
-	// it appears in a search result. This keeps fetch scoped to search-derived
-	// URLs (docs/V2-RESEARCH-AGENT §5, step 4) rather than arbitrary
-	// model-chosen destinations, a defence-in-depth complement to the fetch
-	// client's own SSRF guard.
+	// seenURLs is the allow-list for fetch and for final citations: a URL
+	// qualifies once it appears in a search result or is the final URL of a
+	// successful fetch. This keeps fetch scoped to search-derived URLs, a
+	// defence-in-depth complement to the fetch client's own SSRF guard, and
+	// keeps the report's sources to ones the worker actually encountered.
 	seenURLs map[string]bool
-	turns    int
+	// titles remembers the search-result title for a URL so a fetched page
+	// can be cited with it.
+	titles map[string]string
+
+	turns            int
+	toolFailures     int
+	droppedCitations int
 }
 
-// loop runs the turn loop to a terminal Finding. Each iteration checks the
-// caps, asks the model for one action, and dispatches it. The caps are checked
-// at the top of each turn so a run that has already spent its budget stops
-// before paying for another model turn.
+// loop runs the turn loop to a terminal Finding. The caps are checked at the
+// top of each turn so a run that has already spent its budget stops before
+// paying for another model turn.
 func (w *workerRun) loop(ctx context.Context) Finding {
 	w.transcript = initialTranscript(w.brief)
 	w.seenURLs = map[string]bool{}
+	w.titles = map[string]string{}
 
 	for {
-		// A cancelled or timed-out context ends the loop with a bounded
-		// outcome, preserving partial citations. A timeout is Incomplete (the
-		// wall-clock cap fired); an explicit caller cancellation is also
-		// surfaced as Incomplete — the run was stopped, not broken.
 		if err := ctx.Err(); err != nil {
 			return w.incomplete("worker context ended: " + w.scrub(err.Error()))
 		}
-		// Structural caps: turn count, accumulated tokens, accumulated cost.
 		if w.turns >= w.deps.Caps.MaxTurns {
 			return w.incomplete(fmt.Sprintf("reached the %d-turn cap before a final answer", w.deps.Caps.MaxTurns))
 		}
@@ -210,30 +227,35 @@ func (w *workerRun) loop(ctx context.Context) Finding {
 
 // turn runs one iteration: one model call, then dispatch of the returned
 // action. It returns done=true with the terminal Finding when the loop should
-// stop (a final answer, or a hard failure); done=false to continue.
+// stop; done=false to continue.
 func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 	w.turns++
 
 	resp, err := w.deps.Model.Generate(ctx, model.Request{
 		Messages:   w.transcript,
-		MaxTokens:  w.remainingTokenBudget(),
+		MaxTokens:  w.turnCompletionCap(),
 		JSONSchema: actionSchema,
 		SchemaName: actionSchemaName,
 	})
 	if err != nil {
-		// A model turn may already be billed; the worker adds NO retry (the
-		// model client is single-attempt by contract). The error ends the run
-		// as Failed, keeping any citations already gathered.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return true, w.incomplete("worker context ended during a model turn: " + w.scrub(ctxErr.Error()))
+		}
+		// The model client is single-attempt by contract; the worker adds no
+		// retry either, because the turn may already be billed.
 		return true, w.failed("model turn failed: " + w.scrub(err.Error()))
 	}
 	w.accumulateModelUsage(resp.Usage)
 	w.transcript = append(w.transcript, assistantEcho(resp.Content))
 
+	if resp.FinishReason == "length" {
+		return true, w.incomplete(fmt.Sprintf("the model's reply was cut off at the %d-token completion cap", w.turnCompletionCap()))
+	}
+
 	act, err := parseAction(resp.Content)
 	if err != nil {
-		// An unparseable or unknown/side-effecting action is a hard failure
-		// with NO side effect — this is the closed-vocabulary guarantee. The
-		// run ends Failed; partial citations are preserved.
+		// Refusing here, with no side effect, is the closed-vocabulary
+		// guarantee.
 		return true, w.failed("invalid model action: " + w.scrub(err.Error()))
 	}
 
@@ -245,25 +267,26 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 	case actionFinal:
 		return true, w.finalise(act)
 	default:
-		// Unreachable: parseAction rejects every other kind. Kept as a
-		// belt-and-braces guard so no future action added to the enum can slip
-		// through to an undefined dispatch.
 		return true, w.failed(fmt.Sprintf("unhandled action %q", act.Kind))
 	}
 }
 
 // doSearch runs a search action, appends the results to the transcript, and
-// records every returned URL as fetchable. A search error ends the run as
-// Failed. Returns done=true only on failure.
+// records every returned URL as fetchable and citable. A search failure is
+// fed back to the model unless the consecutive-failure bound is reached.
 func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 	results, err := w.deps.Search.Search(ctx, act.Query)
 	if err != nil {
-		return true, w.failed("search failed: " + w.scrub(err.Error()))
+		return w.toolFailure(ctx, "search failed: "+w.scrub(err.Error()))
 	}
+	w.toolFailures = 0
 	w.usage.SearchCount++
 	for _, r := range results {
 		if r.URL != "" {
 			w.seenURLs[r.URL] = true
+			if _, ok := w.titles[r.URL]; !ok && r.Title != "" {
+				w.titles[r.URL] = r.Title
+			}
 		}
 	}
 	w.transcript = append(w.transcript, searchResultsMessage(act.Query, results))
@@ -271,18 +294,13 @@ func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 }
 
 // doFetch runs a fetch action for a URL the model has already seen in a search
-// result, appends the bounded page text to the transcript, and continues. A
-// fetch of a URL that never appeared in a search result is a recoverable
-// error: it is fed back to the model as guidance (so it can pick a real URL)
-// rather than failing the run — no fetch is performed. A hard fetch error
-// (transport/SSRF refusal) ends the run as Failed. Returns done=true only on a
-// hard failure.
+// result, reduces the page to bounded text, appends it to the transcript, and
+// records the page as a citation. A fetch of an unseen URL is refused without
+// any request and fed back as guidance. A fetch failure (refused destination,
+// HTTP error, transport error, non-text content) is fed back to the model
+// unless the consecutive-failure bound is reached.
 func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	if !w.seenURLs[act.URL] {
-		// The model asked to fetch a URL it was never shown. Do not fetch it;
-		// steer the model back to a search-derived URL. This is defence in
-		// depth over the fetch client's SSRF guard, and it keeps fetch scoped
-		// to search results (§5 step 4).
 		w.transcript = append(w.transcript, errorFeedbackMessage(
 			fmt.Sprintf("the URL %q did not appear in any search result, so it cannot be fetched.", act.URL)))
 		return false, Finding{}
@@ -293,23 +311,53 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 
 	page, err := w.deps.Fetch.Fetch(ctx, act.URL)
 	if err != nil {
-		return true, w.failed("fetch failed: " + w.scrub(err.Error()))
+		return w.toolFailure(ctx, "fetch failed: "+w.scrub(err.Error()))
 	}
-	w.transcript = append(w.transcript, fetchedPageMessage(fetchedPage{
+	fp := fetchedPage{
 		URL:         page.URL,
 		ContentType: page.ContentType,
 		Content:     page.Content,
 		Truncated:   page.Truncated,
-	}))
+	}
+	rendered, ok := pageText(fp, w.maxPageBytes())
+	if !ok {
+		return w.toolFailure(ctx, fmt.Sprintf("the content at %s (%s) is not text and cannot be read.", fp.URL, fp.ContentType))
+	}
+	w.toolFailures = 0
+
+	// A fetched page is a source the worker read, so it is citable under its
+	// final URL as well as the requested one.
+	w.seenURLs[page.URL] = true
+	w.addCitation(page.URL, w.titles[act.URL])
+
+	w.transcript = append(w.transcript, fetchedPageMessage(fp.URL, fp.ContentType, rendered.text, fp.Truncated || rendered.truncated))
+	return false, Finding{}
+}
+
+// toolFailure handles a failed search or fetch: a context end is Incomplete;
+// otherwise the failure is fed back to the model so it can choose another
+// source, until maxConsecutiveToolFailures in a row ends the run Failed.
+func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Finding) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return true, w.incomplete("worker context ended during a tool call: " + w.scrub(ctxErr.Error()))
+	}
+	w.toolFailures++
+	if w.toolFailures >= maxConsecutiveToolFailures {
+		return true, w.failed(fmt.Sprintf("%d consecutive tool failures; last: %s", w.toolFailures, detail))
+	}
+	w.transcript = append(w.transcript, errorFeedbackMessage(detail))
 	return false, Finding{}
 }
 
 // finalise builds the successful Finding from a final action: the answer text
-// and the model's citations, merged with any citations already gathered and
-// deduplicated. A final answer is StatusCompleted even if the caps were close
-// — the model chose to stop.
+// and the model's citations, restricted to URLs the worker actually saw,
+// merged with the pages it fetched and deduplicated.
 func (w *workerRun) finalise(act action) Finding {
 	for _, c := range act.Citations {
+		if !w.seenURLs[c.URL] {
+			w.droppedCitations++
+			continue
+		}
 		w.addCitation(c.URL, c.Title)
 	}
 	return Finding{
@@ -320,99 +368,110 @@ func (w *workerRun) finalise(act action) Finding {
 	}
 }
 
-// incomplete builds a bounded-stop Finding: a cap or the context ended the
-// loop before a final answer. Partial citations and accumulated usage are
-// preserved so a stopped run still yields whatever it gathered.
+// incomplete builds a bounded-stop Finding: a cap, the context, or a truncated
+// reply ended the loop before a final answer.
 func (w *workerRun) incomplete(detail string) Finding {
 	return Finding{
-		Text:      "",
 		Citations: w.citations,
 		Usage:     w.usage,
 		Status:    types.StatusIncomplete,
-		Detail:    detail,
+		Detail:    boundDetail(detail),
 	}
 }
 
-// failed builds a failed Finding: a model/search/fetch error, or an invalid
-// action, ended the loop. Partial citations and accumulated usage are
-// preserved — a failure part-way through must not discard sources already
-// found (docs/V2-RESEARCH-AGENT §8).
+// failed builds a failed Finding: a model error, an invalid action, or
+// repeated tool failures ended the loop.
 func (w *workerRun) failed(detail string) Finding {
 	return Finding{
-		Text:      "",
 		Citations: w.citations,
 		Usage:     w.usage,
 		Status:    types.StatusFailed,
-		Detail:    detail,
+		Detail:    boundDetail(detail),
 	}
 }
 
 // addCitation appends a citation, deduplicated by URI. A citation with an
-// empty URI is dropped (nothing to verify or cite). The first title seen for a
-// URI wins.
+// empty URI is dropped. The first title seen for a URI wins, except that an
+// empty title is replaced by a later non-empty one.
 func (w *workerRun) addCitation(uri, title string) {
 	if uri == "" {
 		return
 	}
-	for _, c := range w.citations {
+	for i, c := range w.citations {
 		if c.URI == uri {
+			if c.Title == "" && title != "" {
+				w.citations[i].Title = title
+			}
 			return
 		}
 	}
 	w.citations = append(w.citations, types.Citation{URI: uri, Title: title})
 }
 
-// accumulateModelUsage folds one model turn's usage into the running totals.
-// Input and output tokens accumulate; TotalTokens is derived on read so the
-// token cap and the mapped Usage stay consistent even if a provider omits its
-// own total.
+// accumulateModelUsage folds one model turn's usage into the running totals
+// and, when a price is configured, into the cost estimate.
 func (w *workerRun) accumulateModelUsage(u model.Usage) {
 	w.usage.InputTokens += u.InputTokens
 	w.usage.OutputTokens += u.OutputTokens
-	// EstimatedCostGBP stays best-effort: there is no price table in CI, so it
-	// remains 0 unless a future rate is wired in. Tokens and search count are
-	// the primary spend signal (docs/DECISIONS.md).
+	w.usage.EstimatedCostGBP += float64(u.InputTokens)*w.deps.Caps.InputGBPPerMTok/1e6 +
+		float64(u.OutputTokens)*w.deps.Caps.OutputGBPPerMTok/1e6
 }
 
-// remainingTokenBudget caps a single model turn's completion length to what is
-// left under the token cap, so no one turn can overshoot the accumulated cap
-// by a full max-completion. Zero (unset) when no token cap is configured — the
-// model client leaves max_tokens unset. Guards against a non-positive budget
-// (the cap check at the top of the loop should already have stopped, but a
-// belt-and-braces floor of 1 keeps the request valid).
-func (w *workerRun) remainingTokenBudget() int {
-	if w.deps.Caps.MaxTokens <= 0 {
-		return 0
+// turnCompletionCap is the completion cap for one model turn: the fixed
+// per-turn cap, narrowed to whatever remains under the token cap so no turn
+// overshoots the accumulated cap by a full completion.
+func (w *workerRun) turnCompletionCap() int {
+	capTokens := turnCompletionTokens
+	if w.deps.Caps.MaxTokens > 0 {
+		remaining := w.deps.Caps.MaxTokens - totalTokens(w.usage)
+		if remaining < 1 {
+			remaining = 1
+		}
+		if remaining < capTokens {
+			capTokens = remaining
+		}
 	}
-	remaining := w.deps.Caps.MaxTokens - totalTokens(w.usage)
-	if remaining < 1 {
-		return 1
+	return capTokens
+}
+
+func (w *workerRun) maxPageBytes() int {
+	if w.deps.Caps.MaxPageBytes > 0 {
+		return w.deps.Caps.MaxPageBytes
 	}
-	return remaining
+	return DefaultMaxPageBytes
 }
 
 // totalTokens is the accumulated token count the token cap is measured
-// against: input plus output. types.Usage stores the two counters (no stored
-// total) and is a stable domain type this package must not extend, so the sum
-// lives here. Tool-use and thought tokens are not counted separately — the
-// worker's model turns report only prompt/completion tokens.
+// against: input plus output. types.Usage stores the two counters and no
+// total, so the sum lives here.
 func totalTokens(u types.Usage) int {
 	return u.InputTokens + u.OutputTokens
 }
 
-// scrub redacts credential-shaped material from a detail string before it is
-// stored on a Finding or a span. The model/search clients already scrub their
-// own errors, but the worker scrubs again unconditionally — a detail composed
-// here (or a future error source) must never carry a key into the Interaction,
-// the report, or a trace (docs/V2-RESEARCH-AGENT §8, credential scrubbing).
+// scrub redacts credential-shaped material from a detail string. The clients
+// scrub their own errors; the worker scrubs again unconditionally so a detail
+// composed here can never carry a key into the Interaction, the report, or a
+// trace.
 func (w *workerRun) scrub(s string) string {
 	return secret.Scrub(s)
 }
 
+// boundDetail truncates a detail string to maxDetailBytes at a rune boundary.
+func boundDetail(s string) string {
+	if len(s) <= maxDetailBytes {
+		return s
+	}
+	cut := maxDetailBytes
+	for cut > 0 && !isRuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + " [truncated]"
+}
+
+func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
+
 // emitWorkerMetrics reports the worker's spend signals through the tracer,
-// best effort: a failed metric emission must never fail the run. Uses the
-// shared metric vocabulary so the search count and token totals roll up the
-// same way the run core reports them.
+// best effort: a failed metric emission must never fail the run.
 func emitWorkerMetrics(ctx context.Context, tracer trace.Tracer, usage types.Usage) {
 	if tracer == nil {
 		return
@@ -423,7 +482,5 @@ func emitWorkerMetrics(ctx context.Context, tracer trace.Tracer, usage types.Usa
 	tracer.Metric(ctx, trace.MetricEstimatedCostGBP, usage.EstimatedCostGBP)
 }
 
-// errWorkerNoModel is returned by NewWorker when the model client is nil — a
-// worker cannot run without one. Search and fetch are checked at construction
-// too, so a misconfigured worker fails at the composition root, not mid-run.
+// errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")

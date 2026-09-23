@@ -2,18 +2,17 @@ package fleet
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
-// The worker's action vocabulary. This is the ONLY surface through which the
-// model can influence the world, and it is deliberately tiny and closed
-// (docs/V2-RESEARCH-AGENT §5, non-negotiable "research-only by construction").
-// Exactly three actions exist — search, fetch, final — each read-only or
-// terminal. There is no generic tool-call surface, no shell, no file write, no
-// code execution: parseAction rejects any kind it does not recognise, and the
-// loop's dispatch is a closed switch with no default execution path, so a
-// side-effecting action requested by the model cannot be run — only refused.
+// The worker's action vocabulary is the only surface through which the model
+// can influence the world, and it is deliberately tiny and closed: exactly
+// three actions exist, each read-only or terminal. parseAction rejects any
+// kind it does not recognise and the loop's dispatch is a closed switch, so a
+// side-effecting action requested by the model can only be refused.
 
 // actionKind is the discriminator on a model action.
 type actionKind string
@@ -27,36 +26,31 @@ const (
 // actionSchemaName names the structured-output schema in the model request.
 const actionSchemaName = "worker_action"
 
-// citationInput is one citation the model attaches to a final action. It maps
-// onto types.Citation; a title is optional.
+// citationInput is one citation the model attaches to a final action.
 type citationInput struct {
 	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
+	Title string `json:"title"`
 }
 
-// action is the decoded model reply. Exactly one action per turn: kind
-// selects which of the sibling fields is meaningful. Unknown kinds are
-// rejected by parseAction before the loop ever inspects the fields, so the
-// dispatch never sees an action it cannot name.
+// action is the decoded model reply. Exactly one action per turn: kind selects
+// which of the sibling fields is meaningful. Fields that do not apply to the
+// chosen kind arrive as JSON null under the strict schema and decode to their
+// zero values.
 type action struct {
 	Kind      actionKind      `json:"action"`
-	Query     string          `json:"query,omitempty"`
-	URL       string          `json:"url,omitempty"`
-	Answer    string          `json:"answer,omitempty"`
-	Citations []citationInput `json:"citations,omitempty"`
+	Query     string          `json:"query"`
+	URL       string          `json:"url"`
+	Answer    string          `json:"answer"`
+	Citations []citationInput `json:"citations"`
 }
 
-// actionSchema is the JSON Schema sent as provider-native structured output
-// (model.Request.JSONSchema). It constrains the model's reply to one of the
-// three actions via an enum on the "action" discriminator: a compliant
-// provider cannot emit a fourth kind. The prompt (worker_prompt.go) restates
-// the same contract in prose. additionalProperties:false keeps the reply
-// shape tight; the per-action required fields are enforced in parseAction,
-// not the schema, so a provider that ignores conditional requirements still
-// yields an error we control rather than a silently-empty action.
-//
-// It is a package-level json.RawMessage built once; the loop passes it on
-// every turn.
+// actionSchema is the JSON Schema sent as provider-native structured output.
+// It follows the strict-mode rules OpenAI-compatible providers enforce: every
+// object sets additionalProperties:false and lists every property in
+// required, with fields that do not apply to an action typed nullable. The
+// "action" enum bars a fourth kind on the wire; parseAction enforces the
+// per-action required fields, since a schema cannot express them
+// conditionally under strict mode.
 var actionSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
@@ -67,77 +61,69 @@ var actionSchema = json.RawMessage(`{
       "description": "The single action to take this turn."
     },
     "query": {
-      "type": "string",
-      "description": "For action=search: the web search query."
+      "type": ["string", "null"],
+      "description": "For action=search: the web search query. Null otherwise."
     },
     "url": {
-      "type": "string",
-      "description": "For action=fetch: a URL seen in a prior search result to retrieve."
+      "type": ["string", "null"],
+      "description": "For action=fetch: a URL seen in a prior search result to retrieve. Null otherwise."
     },
     "answer": {
-      "type": "string",
-      "description": "For action=final: the finding, in the required output format."
+      "type": ["string", "null"],
+      "description": "For action=final: the finding, in the required output format. Null otherwise."
     },
     "citations": {
-      "type": "array",
-      "description": "For action=final: the sources relied on.",
+      "type": ["array", "null"],
+      "description": "For action=final: the sources relied on. Null otherwise.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "url": {"type": "string"},
-          "title": {"type": "string"}
+          "title": {"type": ["string", "null"]}
         },
-        "required": ["url"]
+        "required": ["url", "title"]
       }
     }
   },
-  "required": ["action"]
+  "required": ["action", "query", "url", "answer", "citations"]
 }`)
 
-// parseAction decodes and validates one model reply. It is the guard that
-// keeps the worker research-only: an unrecognised action kind, or a known kind
-// missing its required field, is an error — the loop treats a parse error as a
-// hard failure (no side effect, the run ends failed), so there is no path by
-// which a malformed or side-effecting reply causes an action to run.
-//
-// The reply is expected to be the JSON string a structured-output request
-// returns. It is decoded strictly (unknown fields rejected) so a reply
-// carrying an extra field — the shape a jailbreak attempt to smuggle a
-// side-effecting instruction would take — is refused rather than partially
-// honoured.
+// parseAction decodes and validates one model reply. An unrecognised action
+// kind, a known kind missing its required field, an unknown field, or
+// trailing content after the JSON object is an error; the loop treats a parse
+// error as a hard failure with no side effect.
 func parseAction(raw string) (action, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return action{}, fmt.Errorf("model returned an empty action")
+		return action{}, errors.New("fleet: model returned an empty action")
 	}
 	dec := json.NewDecoder(strings.NewReader(trimmed))
 	dec.DisallowUnknownFields()
 	var a action
 	if err := dec.Decode(&a); err != nil {
-		return action{}, fmt.Errorf("model action is not valid JSON for the action schema: %v", err)
+		return action{}, fmt.Errorf("fleet: model action is not valid JSON for the action schema: %v", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return action{}, errors.New("fleet: model action carries content after the JSON object")
 	}
 
 	switch a.Kind {
 	case actionSearch:
 		if strings.TrimSpace(a.Query) == "" {
-			return action{}, fmt.Errorf("search action is missing a query")
+			return action{}, errors.New("fleet: search action is missing a query")
 		}
 	case actionFetch:
 		if strings.TrimSpace(a.URL) == "" {
-			return action{}, fmt.Errorf("fetch action is missing a url")
+			return action{}, errors.New("fleet: fetch action is missing a url")
 		}
 	case actionFinal:
-		// A final answer may be empty in principle (the model may conclude the
-		// sources are insufficient); the loop maps that to an interaction with
-		// a placeholder body. Citations may also be empty. No required field.
+		// An empty answer is permitted: the model may conclude the sources
+		// are insufficient, and the formatter renders a placeholder body.
 	case "":
-		return action{}, fmt.Errorf("model action is missing the required %q discriminator", "action")
+		return action{}, fmt.Errorf("fleet: model action is missing the required %q discriminator", "action")
 	default:
-		// The closed-vocabulary guard: any kind other than the three known
-		// actions — shell, write, exec, or any other — is refused here, before
-		// dispatch. There is deliberately no execution branch for it anywhere.
-		return action{}, fmt.Errorf("model requested unknown action %q: only search, fetch and final exist", a.Kind)
+		return action{}, fmt.Errorf("fleet: model requested unknown action %q: only search, fetch and final exist", a.Kind)
 	}
 	return a, nil
 }

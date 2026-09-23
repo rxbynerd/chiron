@@ -37,9 +37,12 @@ func newWorker(t *testing.T, modelSrv *model.FakeServer, results []search.Result
 // the Finding onto an Interaction with the worker's agent, tools, query, one
 // text output, and the cited source.
 func TestWorkerStartAwaitResult(t *testing.T) {
-	modelSrv := model.NewFakeServer(finalReply("# Answer\n\nblue sky", "https://example.org/sky"))
+	modelSrv := model.NewFakeServer(
+		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
+	)
 	defer modelSrv.Close()
-	w := newWorker(t, modelSrv, nil)
+	w := newWorker(t, modelSrv, []search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})

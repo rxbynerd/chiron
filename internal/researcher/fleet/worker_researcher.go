@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,20 +14,17 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// Worker is the single-query binding of the Researcher seam
-// (docs/V2-RESEARCH-AGENT §5, "Mapping to Chiron types"): it adapts one
+// Worker is the single-query binding of the Researcher seam: it adapts one
 // user query to one bounded RunWorker run and maps the resulting Finding onto
-// a types.Interaction the existing formatter and sinks render. It is the
-// --agent worker path. Wave 4's fleet lead is a separate binding that will
-// dispatch many RunWorker runs; both reuse RunWorker unchanged.
+// a types.Interaction the existing formatter and sinks render.
 //
 // Start allocates an opaque local id and launches the loop in a goroutine,
-// returning the id immediately (§3): the run core emits it as the resume
-// handle before awaiting. Await blocks on that run; Result maps its Finding.
-// Unlike the Gemini adapter, the id is a local handle, not a durable
-// server-side resume token — a crashed in-process run cannot be recovered by
-// `chiron get <id>` (§3), which is the accepted limitation of the in-process
-// path until control-plane durability lands.
+// returning the id immediately so the run core can emit it before awaiting.
+// Await blocks on that run; if Await's context ends first the run is
+// cancelled, because an in-process run nobody is waiting for can only waste
+// paid turns. Result maps the Finding. Unlike the Gemini adapter, the id is a
+// local handle, not a durable resume token: a crashed in-process run cannot be
+// recovered by `chiron get <id>`.
 type Worker struct {
 	deps WorkerDeps
 
@@ -34,12 +32,12 @@ type Worker struct {
 	runs map[string]*workerState
 }
 
-// workerState is the per-run record keyed by interaction id: the goroutine's
-// completion signal, the query the run answers, and the Finding once done.
-// done is closed exactly once, when the loop returns.
+// workerState is the per-run record keyed by interaction id. done is closed
+// exactly once, when the loop returns; cancel stops the loop early.
 type workerState struct {
 	query   string
 	started time.Time
+	cancel  context.CancelFunc
 
 	done    chan struct{}
 	finding Finding
@@ -47,10 +45,21 @@ type workerState struct {
 
 var _ researcher.Researcher = (*Worker)(nil)
 
+// InteractionIDPrefix marks an id minted by the in-process worker, distinct
+// from the server-issued ids of the managed adapter. The CLI uses it to refuse
+// `chiron get`/`follow-up` on an id that has no server-side state.
+const InteractionIDPrefix = "wkr_"
+
+// IsWorkerInteractionID reports whether id was minted by the in-process
+// worker.
+func IsWorkerInteractionID(id string) bool {
+	return strings.HasPrefix(id, InteractionIDPrefix)
+}
+
 // NewWorker builds the worker researcher over shared deps. It validates the
-// collaborators that a run cannot proceed without — the model, search and
-// fetch clients — at construction, so a misconfigured worker fails at the
-// composition root rather than mid-run after a resume handle has been emitted.
+// collaborators a run cannot proceed without at construction, so a
+// misconfigured worker fails at the composition root rather than mid-run after
+// a resume handle has been emitted.
 func NewWorker(deps WorkerDeps) (*Worker, error) {
 	if deps.Model == nil {
 		return nil, errWorkerNoModel
@@ -72,9 +81,12 @@ func NewWorker(deps WorkerDeps) (*Worker, error) {
 
 // Start implements researcher.Researcher. It builds a Brief from the query,
 // allocates an opaque local id, launches RunWorker in a goroutine, and returns
-// the id immediately. A follow-up (PreviousInteractionID set) is not supported
-// by the in-process worker — the worker has no stored interaction chain to
-// follow up on — so it is rejected before any work starts.
+// the id immediately. A follow-up (PreviousInteractionID set) is rejected
+// before any work starts: the worker has no stored interaction chain.
+//
+// The run is detached from the Start context's cancellation (the run core
+// scopes that context to the start phase) and given its own cancel, which
+// Await triggers when its caller stops waiting.
 func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error) {
 	if task.Query == "" {
 		return "", errors.New("fleet: worker query must not be empty")
@@ -88,9 +100,11 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		return "", err
 	}
 
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	st := &workerState{
 		query:   task.Query,
 		started: time.Now(),
+		cancel:  cancel,
 		done:    make(chan struct{}),
 	}
 	w.mu.Lock()
@@ -98,24 +112,19 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	w.mu.Unlock()
 
 	brief := Brief{Objective: task.Query}
-	// The run is detached from the caller's context: Start returns immediately
-	// (§3) and the goroutine outlives this call. Cancellation and the
-	// wall-clock bound are carried by Await's context and the per-worker
-	// Timeout cap inside RunWorker — the run core awaits under its own
-	// deadline. Using the Start ctx here would cancel the run the instant
-	// Start returns.
 	go func() {
-		st.finding = RunWorker(context.WithoutCancel(ctx), w.deps, brief)
+		defer cancel()
+		st.finding = RunWorker(runCtx, w.deps, brief)
 		close(st.done)
 	}()
 
 	return id, nil
 }
 
-// Await implements researcher.Researcher: block until the run for id finishes,
-// or until ctx is cancelled. An unknown id is an error — the run core only
-// ever awaits an id Start returned, so an unknown id is a programming fault,
-// not a user condition.
+// Await implements researcher.Researcher: block until the run for id finishes.
+// If ctx ends first, the run is cancelled so no further paid turns are taken,
+// and the context error is returned. An unknown id is a programming fault, not
+// a user condition.
 func (w *Worker) Await(ctx context.Context, id string) error {
 	st, err := w.state(id)
 	if err != nil {
@@ -125,14 +134,14 @@ func (w *Worker) Await(ctx context.Context, id string) error {
 	case <-st.done:
 		return nil
 	case <-ctx.Done():
+		st.cancel()
 		return fmt.Errorf("fleet: awaiting worker %s: %w", id, ctx.Err())
 	}
 }
 
 // Result implements researcher.Researcher: map the finished run's Finding onto
-// a types.Interaction. It is called after Await returns, so the run is done;
-// if it is called before completion (Result on an unfinished run), it reports
-// the in-progress state rather than blocking or racing the Finding.
+// a types.Interaction. Called before completion, it reports the in-progress
+// state rather than blocking.
 func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error) {
 	st, err := w.state(id)
 	if err != nil {
@@ -142,8 +151,6 @@ func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error
 	case <-st.done:
 		return w.mapInteraction(id, st), nil
 	default:
-		// Not finished: report in-progress. The run core always awaits before
-		// retrieving, so this is a defensive branch, not the normal path.
 		return &types.Interaction{
 			ID:        id,
 			Agent:     agentWorker,
@@ -156,14 +163,9 @@ func (w *Worker) Result(_ context.Context, id string) (*types.Interaction, error
 }
 
 // mapInteraction maps a finished worker run onto the domain Interaction the
-// formatter renders (docs/V2-RESEARCH-AGENT §5). Status comes from the
-// Finding; the answer becomes the single text Output that is the report body;
-// the Finding's citations (already deduplicated by the loop) become the
-// Citation list; usage carries the accumulated counters; StatusDetail carries
-// the Finding's diagnostic. Agent, Query, Tools and timestamps are the
-// worker's own contributions — the API-shaped fields the loop does not carry.
-// No separate reporting path is added: this one Interaction is the whole
-// output surface.
+// formatter renders: the answer becomes the single text Output, the Finding's
+// citations become the Citation list, usage carries the accumulated counters,
+// and StatusDetail carries the Finding's diagnostic.
 func (w *Worker) mapInteraction(id string, st *workerState) *types.Interaction {
 	f := st.finding
 	in := &types.Interaction{
@@ -195,25 +197,21 @@ func (w *Worker) state(id string) (*workerState, error) {
 	return st, nil
 }
 
-// agentWorker is the Agent value recorded on a worker Interaction — the tier
-// name the report's front matter and the run's events carry.
+// agentWorker is the Agent value recorded on a worker Interaction.
 const agentWorker = "worker"
 
-// workerTools is the tool set recorded on a worker Interaction, the read-only
-// web tools the loop dispatches. It matches the tool-name convention the
-// formatter's front matter expects (a flat list of tool type names).
+// workerTools is the tool set recorded on a worker Interaction: the read-only
+// web tools the loop dispatches.
 func workerTools() []string {
 	return []string{"web_search", "web_fetch"}
 }
 
 // newInteractionID mints an opaque, unguessable local id for one in-process
-// run. It is a local handle only (not a durable resume token): the "wkr_"
-// prefix marks its origin, distinct from the Gemini adapter's server-issued
-// ids. 128 bits of randomness makes collisions within a process negligible.
+// run. 128 bits of randomness makes collisions within a process negligible.
 func newInteractionID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("fleet: generating interaction id: %w", err)
 	}
-	return "wkr_" + hex.EncodeToString(b[:]), nil
+	return InteractionIDPrefix + hex.EncodeToString(b[:]), nil
 }

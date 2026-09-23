@@ -302,13 +302,20 @@ func TestRunWorkerFailurePreservesUsage(t *testing.T) {
 	}
 }
 
-// TestRunWorkerFinalPreservesCitationsOnLaterStop pins that citations attached
-// to a final answer survive even when the answer is otherwise minimal. It
-// complements the failure-preservation case above with the success side.
-func TestRunWorkerFinalPreservesCitations(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+// TestRunWorkerFinalCitationsRestrictedToSeenURLs: citations on a final
+// answer are deduplicated and restricted to URLs the worker saw in a search
+// result; a URL it never encountered is dropped rather than reported as a
+// source.
+func TestRunWorkerFinalCitationsRestrictedToSeenURLs(t *testing.T) {
+	searchSrv := search.NewFakeServer([]search.Result{
+		{Title: "A", URL: "https://a.example"},
+		{Title: "B", URL: "https://b.example"},
+	})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(finalReply("answer", "https://a.example", "https://b.example", "https://a.example"))
+	modelSrv := model.NewFakeServer(
+		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
+		finalReply("answer", "https://a.example", "https://b.example", "https://a.example", "https://invented.example/never-seen"),
+	)
 	defer modelSrv.Close()
 
 	deps := WorkerDeps{
@@ -320,10 +327,15 @@ func TestRunWorkerFinalPreservesCitations(t *testing.T) {
 	finding := RunWorker(context.Background(), deps, Brief{Objective: "q"})
 
 	if finding.Status != types.StatusCompleted {
-		t.Fatalf("status = %s, want completed", finding.Status)
+		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
 	}
 	if len(finding.Citations) != 2 {
-		t.Errorf("citations = %+v, want two deduplicated entries", finding.Citations)
+		t.Fatalf("citations = %+v, want two deduplicated entries", finding.Citations)
+	}
+	for _, c := range finding.Citations {
+		if strings.Contains(c.URI, "invented") {
+			t.Errorf("an unseen URL was cited: %+v", c)
+		}
 	}
 }
 
