@@ -336,9 +336,10 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
   `maxRememberBytes` (32 KiB, rune-safe, `[truncated]` marker).
   `Meta.Name` is the objective bounded to 120 runes; `Labels` carry
   `kind: fact`, `agent: worker`, `interaction_id`.
-- It runs under its own 30 s context derived from the run's context
-  (`context.WithoutCancel` plus a timeout), after the finding is stored, so
-  a slow store never delays `Await`.
+- It runs synchronously after the loop returns and before the run is marked
+  done, under a 30 s context derived from the run's context
+  (`context.WithoutCancel` plus a timeout), so a slow store delays `Await`
+  by at most 30 s and no goroutine outlives the run.
 - Failure never changes the run's status. The outcome goes on the worker
   span (`remember_ref` or `remember_error`, scrubbed) and to stderr through
   the `Logger` injected in `WorkerDeps` (bound by the composition root to a
