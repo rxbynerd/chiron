@@ -88,6 +88,70 @@ func TestWorkerStartAwaitResult(t *testing.T) {
 	}
 }
 
+// TestWorkerUnknownIDRejected: Await and Result on an id this Worker never
+// issued are programming faults reported as errors, not panics or hangs.
+func TestWorkerUnknownIDRejected(t *testing.T) {
+	modelSrv := model.NewFakeServer()
+	defer modelSrv.Close()
+	w := newWorker(t, modelSrv, nil)
+
+	ctx := context.Background()
+	if err := w.Await(ctx, "wkr_not_issued"); err == nil || !strings.Contains(err.Error(), "no worker run") {
+		t.Errorf("Await(unknown) = %v, want a no-worker-run error", err)
+	}
+	if in, err := w.Result(ctx, "wkr_not_issued"); err == nil || in != nil {
+		t.Errorf("Result(unknown) = %+v, %v, want nil and an error", in, err)
+	}
+}
+
+// TestWorkerResultBeforeCompletionIsInProgress: Result on a live run reports
+// in_progress with the run's identity rather than blocking or failing.
+func TestWorkerResultBeforeCompletionIsInProgress(t *testing.T) {
+	release := make(chan struct{})
+	blockingModel := httptest.NewServer(blockingModel(release))
+	defer blockingModel.Close()
+
+	mc, err := model.New(model.Options{Endpoint: blockingModel.URL, Model: "m", APIKey: "k"})
+	if err != nil {
+		t.Fatalf("model.New: %v", err)
+	}
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
+	w, err := NewWorker(WorkerDeps{
+		Model:  mc,
+		Search: newSearchClient(t, searchSrv),
+		Fetch:  newFetchClient(t),
+		Caps:   caps(),
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	ctx := context.Background()
+	id, err := w.Start(ctx, researcher.Task{Query: "q"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	in, err := w.Result(ctx, id)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if in.Status != types.StatusInProgress || in.ID != id || in.Query != "q" || in.Agent != "worker" {
+		t.Errorf("in-progress Result = %+v, want status in_progress with the run's identity", in)
+	}
+	if !in.CompletedAt.IsZero() || len(in.Outputs) != 0 {
+		t.Errorf("in-progress Result carries completion state: %+v", in)
+	}
+
+	close(release)
+	if err := w.Await(ctx, id); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if in, _ := w.Result(ctx, id); in.Status == types.StatusInProgress {
+		t.Errorf("Result after Await still in_progress: %+v", in)
+	}
+}
+
 // TestWorkerStartReturnsImmediately: Start must not block on the run (§3). A
 // model fake that would block indefinitely on its turn must not stop Start
 // from returning the resume handle.

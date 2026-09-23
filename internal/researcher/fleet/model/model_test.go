@@ -369,6 +369,31 @@ func TestOversizedBodyRejected(t *testing.T) {
 	}
 }
 
+// TestGenerateMalformedBodyIsError: a 200 whose body is not a Chat Completions
+// object is a decode error naming the problem, never an empty success.
+func TestGenerateMalformedBodyIsError(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, want string
+	}{
+		{"not json", "<html>upstream proxy error</html>", "decoding response"},
+		{"no choices", `{"id":"x","choices":[]}`, "no choices"},
+		{"wrong shape", `{"choices":"nope"}`, "decoding response"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := NewFakeServer(FakeReply{RawBody: tt.body})
+			defer fake.Close()
+
+			c := newClient(t, fake.URL())
+			_, err := c.Generate(context.Background(), Request{
+				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Generate = %v, want an error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestCrossHostRedirectRefused(t *testing.T) {
 	// A credential-bearing client must not follow a redirect to another
 	// host — that would hand the Authorization header to the target.

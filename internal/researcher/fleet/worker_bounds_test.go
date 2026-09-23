@@ -212,10 +212,11 @@ func TestWorkerAwaitCancelStopsRun(t *testing.T) {
 	}
 }
 
-// TestRunWorkerTraceCarriesMetricsAndNoCredential: the worker span and its
-// metrics reach the tracer, attributed to the span, and a provider error body
-// echoing the key never reaches a span attribute.
-func TestRunWorkerTraceCarriesMetricsAndNoCredential(t *testing.T) {
+// TestRunWorkerTraceCarriesSpendAndNoCredential: the worker span carries the
+// run's spend as attributes, emits no run-level metric of its own (the run
+// core records those once), and a provider error body echoing the key never
+// reaches a span attribute.
+func TestRunWorkerTraceCarriesSpendAndNoCredential(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	searchSrv := search.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
 	defer searchSrv.Close()
@@ -249,14 +250,14 @@ func TestRunWorkerTraceCarriesMetricsAndNoCredential(t *testing.T) {
 	if !strings.Contains(lines, `"`+trace.SpanWorker+`"`) {
 		t.Errorf("trace lacks the worker span:\n%s", lines)
 	}
-	if !strings.Contains(lines, `"`+trace.MetricInputTokens+`"`) || !strings.Contains(lines, `"`+trace.MetricSearchCount+`"`) {
-		t.Errorf("trace lacks the worker metrics:\n%s", lines)
-	}
-	// Metrics are recorded before the span ends, so they carry its span id.
 	spanLine := lineContaining(lines, `"`+trace.SpanWorker+`"`)
-	metricLine := lineContaining(lines, `"`+trace.MetricInputTokens+`"`)
-	if spanID := extractJSONField(spanLine, "span_id"); spanID == "" || !strings.Contains(metricLine, spanID) {
-		t.Errorf("metric line is not attributed to the worker span.\nspan: %s\nmetric: %s", spanLine, metricLine)
+	for _, attr := range []string{`"input_tokens":7`, `"output_tokens":3`, `"search_count":1`, `"status":"failed"`} {
+		if !strings.Contains(spanLine, attr) {
+			t.Errorf("worker span lacks %s:\n%s", attr, spanLine)
+		}
+	}
+	if strings.Contains(lines, `"type":"metric"`) {
+		t.Errorf("the worker emitted a metric; run-level metrics belong to the run core:\n%s", lines)
 	}
 }
 
@@ -265,19 +266,6 @@ func lineContaining(s, needle string) string {
 		if strings.Contains(l, needle) {
 			return l
 		}
-	}
-	return ""
-}
-
-func extractJSONField(line, field string) string {
-	marker := `"` + field + `":"`
-	i := strings.Index(line, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := line[i+len(marker):]
-	if j := strings.Index(rest, `"`); j >= 0 {
-		return rest[:j]
 	}
 	return ""
 }

@@ -145,7 +145,7 @@ func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
 	var span trace.Span
 	if deps.Tracer != nil {
 		ctx, span = deps.Tracer.StartSpan(ctx, trace.SpanWorker)
-		span.SetAttr("objective", brief.Objective)
+		span.SetAttr("objective", boundDetail(brief.Objective))
 	}
 
 	w := &workerRun{deps: deps, brief: brief}
@@ -158,9 +158,12 @@ func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
 		if finding.Detail != "" {
 			span.SetAttr("detail", finding.Detail)
 		}
-		// Metrics are recorded while the span is still open so the OTel
-		// binding attributes them to it.
-		emitWorkerMetrics(ctx, deps.Tracer, finding.Usage)
+		// Per-worker spend lives on the span; the run core records the
+		// run-level metrics once from the returned Usage.
+		span.SetAttr("search_count", finding.Usage.SearchCount)
+		span.SetAttr("input_tokens", finding.Usage.InputTokens)
+		span.SetAttr("output_tokens", finding.Usage.OutputTokens)
+		span.SetAttr("estimated_cost_gbp", finding.Usage.EstimatedCostGBP)
 		var spanErr error
 		if finding.Status == types.StatusFailed {
 			spanErr = errors.New(finding.Detail)
@@ -469,18 +472,6 @@ func boundDetail(s string) string {
 }
 
 func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
-
-// emitWorkerMetrics reports the worker's spend signals through the tracer,
-// best effort: a failed metric emission must never fail the run.
-func emitWorkerMetrics(ctx context.Context, tracer trace.Tracer, usage types.Usage) {
-	if tracer == nil {
-		return
-	}
-	tracer.Metric(ctx, trace.MetricSearchCount, float64(usage.SearchCount))
-	tracer.Metric(ctx, trace.MetricInputTokens, float64(usage.InputTokens))
-	tracer.Metric(ctx, trace.MetricOutputTokens, float64(usage.OutputTokens))
-	tracer.Metric(ctx, trace.MetricEstimatedCostGBP, usage.EstimatedCostGBP)
-}
 
 // errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
