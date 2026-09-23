@@ -109,6 +109,12 @@ const (
 	toolResultClose = "<<<END TOOL RESULT>>>"
 )
 
+// defang breaks any delimiter-like sequence in retrieved content so a page
+// or snippet cannot close the fence early and impersonate Chiron's framing.
+func defang(s string) string {
+	return strings.ReplaceAll(s, "<<<", "< < <")
+}
+
 // searchResultsMessage renders search results as the next user turn.
 func searchResultsMessage(query string, results []search.Result) model.Message {
 	var b strings.Builder
@@ -119,18 +125,18 @@ func searchResultsMessage(query string, results []search.Result) model.Message {
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. ", i+1)
 		if r.Title != "" {
-			b.WriteString(r.Title)
+			b.WriteString(defang(r.Title))
 		} else {
 			b.WriteString("(untitled)")
 		}
 		b.WriteString("\n")
 		if r.URL != "" {
-			fmt.Fprintf(&b, "   URL: %s\n", r.URL)
+			fmt.Fprintf(&b, "   URL: %s\n", defang(r.URL))
 		} else {
 			b.WriteString("   URL: (none; this result cannot be fetched)\n")
 		}
 		if r.Snippet != "" {
-			fmt.Fprintf(&b, "   %s\n", r.Snippet)
+			fmt.Fprintf(&b, "   %s\n", defang(r.Snippet))
 		}
 	}
 	b.WriteString(toolResultClose)
@@ -142,9 +148,9 @@ func searchResultsMessage(query string, results []search.Result) model.Message {
 // fetchedPageMessage renders a fetched page's text as the next user turn.
 func fetchedPageMessage(url, contentType, text string, truncated bool) model.Message {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Fetched %s", url)
+	fmt.Fprintf(&b, "Fetched %s", defang(url))
 	if contentType != "" {
-		fmt.Fprintf(&b, " (%s)", contentType)
+		fmt.Fprintf(&b, " (%s)", defang(contentType))
 	}
 	if truncated {
 		b.WriteString(" [truncated: the content exceeded the page limit; you are reading a prefix]")
@@ -152,7 +158,7 @@ func fetchedPageMessage(url, contentType, text string, truncated bool) model.Mes
 	b.WriteString(":\n")
 	b.WriteString(toolResultOpen)
 	b.WriteString("\n")
-	b.WriteString(text)
+	b.WriteString(defang(text))
 	b.WriteString("\n")
 	b.WriteString(toolResultClose)
 	b.WriteString("\n\nChoose your next action: fetch another URL, search again, " +
