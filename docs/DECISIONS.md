@@ -1213,10 +1213,11 @@ bound.
 separate allow-list that `finalise` admits alongside the fetched and
 searched URLs, but it never joins the fetch allow-list: the model cannot
 spend a fetch, and a failure strike, on a page behind the store's own
-authentication. The Markdown formatter keeps a `billet://` citation as a
-source, rendered as its escaped title and the locator in inline code rather
-than a link that could not resolve; every other non-web scheme stays
-dropped. `Usage.RecallCount`, the `recall_count` metric and span attribute,
+authentication. The Markdown formatter keeps a `billet://` or `kb://`
+citation as a source, rendered as its escaped title and the locator in inline
+code rather than a link that could not resolve (an Alexandria fragment hit
+carries a web locator and renders as a link; a chunk hit carries its `kb://`
+ref); every other non-web scheme stays dropped. `Usage.RecallCount`, the `recall_count` metric and span attribute,
 and the `recalls` front-matter field make recall visible.
 
 **Save-back is an opt-in write to the suite's memory store.** With
@@ -1255,4 +1256,13 @@ other knowledge field must be empty or default, so a stray endpoint is an
 error rather than silently ignored. Issue #28 (a config file can choose both
 a credential and its destination) applies to this pair exactly as it does to
 the search pair; the pair is added under the same mitigations and falls
-within #28's scope rather than being resolved here.
+within #28's scope rather than being resolved here. `knowledge_space` is
+checked against Alexandria's slug grammar in `internal/config` and again in
+`internal/memory/alexandria`; the mirror is accepted for the same reason as
+the endpoint-scheme mirrors, since the adapter must not depend on config
+having run.
+
+**Race detection in the test targets.** `just test` and CI run `go test
+-race ./...`: the worker's save-back and the stdio transport write to the
+same stderr from different goroutines, and the CLI hands both one locked
+writer so the race detector, not a reviewer, is what proves they serialise.

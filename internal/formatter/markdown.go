@@ -76,7 +76,7 @@ type source struct {
 // renders as its escaped title and the locator in inline code, never as a
 // link. Scheme filtering happens earlier, in collectSources.
 func (s source) markdown() string {
-	if strings.HasPrefix(s.URI, billetScheme) {
+	if isKnowledgeURI(s.URI) {
 		uri := strings.ReplaceAll(strings.Join(strings.Fields(s.URI), "%20"), "`", "%60")
 		if s.Title == "" {
 			return "`" + uri + "`"
@@ -194,20 +194,31 @@ func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 	}
 }
 
-// billetScheme prefixes a Billet memory locator, the one non-web citation
-// scheme a report keeps.
-const billetScheme = "billet://"
+// knowledgeSchemes are the non-web citation schemes a report keeps: a Billet
+// memory locator and an Alexandria ref. Neither resolves in a viewer, so
+// both render unlinked.
+var knowledgeSchemes = []string{"billet://", "kb://"}
+
+// isKnowledgeURI reports whether uri carries one of knowledgeSchemes.
+func isKnowledgeURI(uri string) bool {
+	for _, scheme := range knowledgeSchemes {
+		if strings.HasPrefix(uri, scheme) {
+			return true
+		}
+	}
+	return false
+}
 
 // collectSources maps citations into front-matter shape, skipping any
 // without a URI (nothing to verify against) and any with a non-web
-// scheme other than billet://: citation URIs are API-provided, and a
+// scheme other than the knowledge schemes: citation URIs are API-provided, and a
 // javascript:, data: or file: URI is not a verifiable source — some
 // renderers would pass it through to live HTML.
 func collectSources(citations []types.Citation) []source {
 	var out []source
 	for _, c := range citations {
 		if !strings.HasPrefix(c.URI, "https://") && !strings.HasPrefix(c.URI, "http://") &&
-			!strings.HasPrefix(c.URI, billetScheme) {
+			!isKnowledgeURI(c.URI) {
 			continue
 		}
 		out = append(out, source{URI: c.URI, Title: c.Title})

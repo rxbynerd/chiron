@@ -12,6 +12,8 @@ sources:
   - uri: billet://memory/0b1c2d
     title: PHY vendor [decision](javascript:x) *2026*
   - uri: billet://memory/untitled`id
+  - uri: kb://source/1234#L10-L14
+    title: Vendor notes
   - uri: https://example.org/phy
     title: PHY overview
 ---
@@ -24,4 +26,5 @@ Findings.
 
 1. PHY vendor \[decision\](javascript:x) \*2026\* `billet://memory/0b1c2d`
 2. `billet://memory/untitled%60id`
-3. [PHY overview](https://example.org/phy)
+3. Vendor notes `kb://source/1234#L10-L14`
+4. [PHY overview](https://example.org/phy)

@@ -210,10 +210,10 @@ func TestMarkdownFormat(t *testing.T) {
 			},
 		},
 		{
-			// A billet:// memory locator is kept as a source but
-			// rendered as its escaped title plus the locator in inline
-			// code, never a link; other non-web schemes stay dropped,
-			// and the recall count lands in front matter.
+			// A billet:// memory locator or a kb:// ref is kept as a
+			// source but rendered as its escaped title plus the locator
+			// in inline code, never a link; other non-web schemes stay
+			// dropped, and the recall count lands in front matter.
 			name: "citation-billet-uri",
 			in: &types.Interaction{
 				ID:      "wkr_billet",
@@ -225,7 +225,8 @@ func TestMarkdownFormat(t *testing.T) {
 				Citations: []types.Citation{
 					{URI: "billet://memory/0b1c2d", Title: "PHY vendor [decision](javascript:x) *2026*"},
 					{URI: "billet://memory/untitled`id"},
-					{URI: "kb://fragment/1234", Title: "Unrenderable"},
+					{URI: "kb://source/1234#L10-L14", Title: "Vendor notes"},
+					{URI: "javascript:alert(1)", Title: "Dropped"},
 					{URI: "https://example.org/phy", Title: "PHY overview"},
 				},
 				Usage:       types.Usage{SearchCount: 1, RecallCount: 2},

@@ -559,18 +559,7 @@ func (w *workerRun) scrub(s string) string {
 }
 
 // boundDetail truncates a detail string to maxDetailBytes at a rune boundary.
-func boundDetail(s string) string {
-	if len(s) <= maxDetailBytes {
-		return s
-	}
-	cut := maxDetailBytes
-	for cut > 0 && !isRuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + " [truncated]"
-}
-
-func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
+func boundDetail(s string) string { return boundBytes(s, maxDetailBytes) }
 
 // errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")

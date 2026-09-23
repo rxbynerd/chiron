@@ -6,7 +6,7 @@ build:
 
 # Run all tests.
 test:
-    go test ./...
+    go test -race ./...
 
 # Vet the whole module.
 vet:

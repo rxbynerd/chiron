@@ -192,7 +192,10 @@ var _ memory.Rememberer = (*Client)(nil)
 - `Remember` calls `save_memory` with `{"content": m.Text, "kind": kind}`
   and returns `Reference{Digest: memory_id, Locator: "billet://memory/<id>"}`.
   `accepted: false` is an error. Content over 256 KiB is refused client-side
-  with a clear error before any request (Billet's `MaxContentBytes`).
+  with a clear error before any request (Billet's `MaxContentBytes`), as is
+  a `kind` other than `fact` or `event`. A returned `memory_id` outside
+  letters, digits and `-_.:` (at most 256 bytes) fails the call, because
+  the id is embedded in a locator the worker renders and cites.
 - Each record's `content` is bounded on read to `MaxHitBytes` (default 8
   KiB, rune-safe) before it is returned, so a huge memory cannot flood the
   transcript.
@@ -320,10 +323,10 @@ authentication. `titles` is populated from `Meta.Name` so a cited locator
 carries its title. The system prompt's citation rule says so.
 
 `types.Citation.URI` is already scheme-agnostic. The Markdown formatter
-renders web URIs as links and, new here, renders a `billet://` URI as plain
-inline code with its title, so a memory the worker relied on appears in the
-sources list without a link that could not resolve. All other non-web
-schemes stay dropped (the existing safety rule).
+renders web URIs as links and, new here, renders a `billet://` or `kb://`
+URI as plain inline code with its title, so a memory or a chunk ref the
+worker relied on appears in the sources list without a link that could not
+resolve. All other non-web schemes stay dropped (the existing safety rule).
 
 ### 4.4 Save-back
 
@@ -331,8 +334,9 @@ After `RunWorker` returns, `Worker` (the `Researcher` wrapper) calls
 `rememberFinding` when `deps.Remember != nil` and the finding is
 `Completed` with non-empty text:
 
-- `Memory.Text` is: the objective, a blank line, the answer, a blank line,
-  then `Sources:` and one locator per line; the whole bounded to
+- `Memory.Text` is: the objective, a blank line, the answer and, when the
+  finding has citations, a blank line, `Sources:` and one locator per line;
+  the whole bounded to
   `maxRememberBytes` (32 KiB, rune-safe, `[truncated]` marker).
   `Meta.Name` is the objective bounded to 120 runes; `Labels` carry
   `kind: fact`, `agent: worker`, `interaction_id`.

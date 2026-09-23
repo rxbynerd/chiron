@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -129,8 +130,8 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // flags) are rejected by config validation for this agent rather than
 // ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
-	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
-		res, err := buildWorker(ctx, cfg, deps.Tracer, cmd.ErrOrStderr())
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
+		res, err := buildWorker(ctx, cfg, deps.Tracer, stderr)
 		if err != nil {
 			return err
 		}
@@ -351,7 +352,7 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID strin
 // directly and resolve their own key references, so a worker run does not
 // require the Gemini key.
 func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, apiKey string, deps run.Deps) error) error {
-	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, _ io.Writer) error {
 		apiKey, err := secret.Default().Resolve(ctx, cfg.APIKeyRef)
 		if err != nil {
 			return err
@@ -367,7 +368,11 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 // (the Gemini key in withRunSeams, the fleet key refs in the worker
 // binding), so each agent requires only the secrets it actually uses. The
 // Researcher field of the passed Deps is unset; the callback binds it.
-func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps) error) error {
+// withRunLifecycle wraps the command's stderr in one locked writer and hands
+// it to the transport and to f, so the event stream and any logger a
+// researcher writes to share a single lock rather than racing on the same
+// underlying writer.
+func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps, stderr io.Writer) error) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
 
@@ -385,7 +390,8 @@ func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx 
 		}()
 	}
 
-	events := transport.NewStdio(cmd.ErrOrStderr())
+	stderr := &lockedWriter{w: cmd.ErrOrStderr()}
+	events := transport.NewStdio(stderr)
 	defer events.Close()
 
 	return f(ctx, run.Deps{
@@ -393,7 +399,20 @@ func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx 
 		Sink:      buildSink(cmd, cfg),
 		Transport: events,
 		Tracer:    tracer,
-	})
+	}, stderr)
+}
+
+// lockedWriter serialises writes from goroutines that hold different locks
+// over one destination.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // checkResearcherWired reports whether the selected agent has a researcher
