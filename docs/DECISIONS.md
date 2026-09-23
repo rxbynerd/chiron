@@ -1063,3 +1063,93 @@ for one `Search`: reusing one across searches would save two round trips per
 query but needs re-initialisation on a 404 and concurrency control, and is
 deferred. The tool name and query argument key stay configurable through
 `Options.ToolName` and `Options.QueryArgKey` (defaults `search` and `query`).
+
+## 2026-09-23 — Cycle-3 remediation: worker loop, spend levers, CLI surface and wave order
+
+Cycle 3 (docs/reviews/cycle-3-brief.md) reviewed the v2 research-agent PR
+after it had sat unmerged for two months. The tree was green but the worker
+could not complete a run against a real provider or a real page. This entry
+records the decisions taken while remediating the worker loop, the config
+and CLI surface, and the planning record; the fetch and model/search client
+entries above cover their packages. No new dependency was introduced.
+
+**Cancellation and bounded stops.** `Worker.Start` runs the loop under a
+context detached from the caller's cancellation but not from its deadline,
+and `Await` cancels the run when its own context ends, so no paid turn
+outlives the caller. A stop that lands mid-call (deadline, cancellation, a
+`length` finish reason) ends the run `incomplete`, never `failed`: the
+distinction is what the exit code reports (2 for both, with the status in
+the front matter), and a cap stop is a bounded outcome, not a fault.
+`CompletedAt` is the loop's end, recorded before the done channel closes.
+
+**Tool failures are feedback, bounded at three.** A failed fetch or search
+(HTTP status, refused destination, unusable content type, MCP error) is fed
+back to the model as a user turn so it can choose another source, because a
+single dead link failing a paid run wastes every turn before it. Three
+consecutive failures end the run `failed`; a success resets the count. The
+loop also refuses to fetch a URL that appeared in no search result.
+
+**Page reduction in the loop, in stdlib.** Fetched pages pass through
+`pageText`: HTML is reduced to visible text with a tolerant scanner (no
+parser dependency), other textual media types pass through, everything else
+is reported to the model as unreadable. The result is bounded by
+`fleet.max_page_bytes` (default 64 KiB) after reduction, so the per-turn
+transcript growth is deterministic. The fetch client's own 1 MiB bound is a
+memory backstop, not the transcript budget.
+
+**Untrusted content is fenced and defanged; the answer is sanitised.** Tool
+results are wrapped in fixed delimiters, the system prompt declares the
+fenced text data, and every retrieved string has `<<<` runs broken so a page
+cannot close the fence. Final citations are restricted to URLs the worker
+saw, with the dropped count on the span. The final answer has images
+rewritten to links, HTML removed and `secret.Scrub` applied before it
+becomes a `Finding`, so a rendered report cannot fire a beacon carrying the
+query. Fixed delimiters plus defanging were chosen over a per-run nonce for
+deterministic tests and golden files.
+
+**Spend levers are real or rejected.** `fleet.max_tokens` defaults to
+400 000 and `fleet.worker_timeout` to five minutes, so a default worker run
+is bounded without any operator input. `fleet.ceiling_gbp` is enforced only
+when `fleet.price_input_gbp_per_mtok` and `fleet.price_output_gbp_per_mtok`
+are set; a ceiling without prices is a validation error rather than an inert
+cap. This supersedes the 2026-07-01 statement that `EstimatedCostGBP` stays
+zero: it is computed from the configured prices, and stays zero only when
+none are given. The Gemini-only levers (`budget`, `plan`, `accept_plan`,
+`model`, `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`)
+are rejected for `worker`/`fleet` so a caller never believes a cap applied
+when the loop ignores it. `fleet.memory: inmemory` is rejected until the
+store exists. Fleet endpoints must not carry userinfo, a query string or a
+fragment, and validation errors describe them by scheme and host only.
+
+**Per-worker spend lives on the span.** The worker records search count,
+tokens and estimated cost as attributes on its own span and emits no
+run-level metric; the run core records those once from the returned
+`Usage`. Emitting both counted every worker run twice.
+
+**`wkr_` ids are refused by `get` and `follow-up`.** The local handle
+cannot be resumed after process death, and forwarding it to Gemini produced
+a misleading provider error. Both commands refuse it locally with a message
+that says so.
+
+**Loopback fetch is a test-only switch.** `CHIRON_FETCH_ALLOW_LOOPBACK=1`
+lets the CLI e2e test serve a page from httptest; any other non-empty value
+is a startup error. It never relaxes the private-network, link-local or
+metadata refusals. It is listed with the other security-sensitive
+environment variables in AGENTS.md.
+
+**Fleet remains a typed not-implemented error.** `--agent fleet` returns
+`fleet.ErrNotImplemented` from the composition root; the earlier plain
+error is gone so callers can test for it with `errors.Is`.
+
+**Wave order.** Wave 3 (the in-process worker) landed before Wave 1
+(ConnectRPC control plane) and Wave 2 (Langfuse/OTLP flags). The
+prove-first pivot makes the worker the critical path and neither earlier
+wave is a prerequisite for a bounded local run; the CLI is the only
+entrypoint until Wave 1. Waves 1 and 2 are tracked as issues rather than
+blocking this merge.
+
+**Deferred to issues.** Config-file provenance for endpoint plus credential
+(C3-17), the SP-A search backend and tool-name configuration, HTML
+extraction quality beyond the tag scanner, fakes out of the binary, a shared
+httpx helper, MCP protocol-version enforcement and session reuse, per-turn
+progress events, and durable recovery of worker runs.
