@@ -1,54 +1,28 @@
-// Package search is a minimal, SDK-free net/http client for a web-search
-// tool exposed over the Model Context Protocol (MCP) "Streamable HTTP"
-// transport. It is one of the two read-only network tools a Chiron research
-// worker may use (docs/V2-RESEARCH-AGENT §1, §5): the worker calls Search to
-// discover candidate URLs, then hands them to the web_fetch client.
+// Package search is the web-search tool client for a Chiron research worker:
+// one of the two read-only network tools a worker may use
+// (docs/V2-RESEARCH-AGENT §1, §5). The worker calls Search to discover
+// candidate URLs, then hands them to the web_fetch client.
 //
-// MCP is JSON-RPC 2.0 carried over HTTP. This client implements only the
-// minimum correct flow for a single search backend — initialize, an
-// initialized notification, then a tools/call — and parses the tool result
-// into a flat []Result. It is deliberately not a general MCP client: there
-// is no resources/prompts/sampling surface, no server-initiated request
-// handling, and a session lives for one Search: its Mcp-Session-Id and
-// negotiated MCP-Protocol-Version are echoed, then the session is ended with
-// a best-effort DELETE.
-//
-// Money-safety and security follow the Gemini adapter (internal/interactions,
-// internal/researcher/gemini) and the sibling model adapter
-// (internal/researcher/fleet/model): every response body is bounded, a
-// text/event-stream reply is read under the same bound, cross-host and
-// https-to-http redirects are refused, and the search key travels only in the
-// Authorization header — never a URL, query, log, error, or trace.
+// The tool is reached over the Model Context Protocol "Streamable HTTP"
+// transport through internal/mcpclient, which owns the handshake, bounded
+// reads, redirect refusal and key scrubbing. This package is the result-shape
+// layer: it names the tool and its query argument and parses the reply into a
+// flat []Result.
 package search
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/mcpclient"
 )
 
-// Defaults, all overridable via Options. The body bound is generous — a
-// verbose result set with long snippets stays well under it — so a
-// misbehaving server cannot exhaust memory, not that a normal response ever
-// approaches it.
 const (
-	defaultRequestTimeout = 30 * time.Second
-	defaultMaxBodyBytes   = 8 << 20
-	maxErrorBodyBytes     = 1 << 20
-
 	defaultToolName    = "search"
 	defaultQueryArgKey = "query"
-
-	// mcpProtocolVersion is the revision advertised in initialize and the
-	// MCP-Protocol-Version fallback when the result names none. A server
-	// choosing another revision is tolerated (only the JSON-RPC envelope is
-	// relied on), and its choice is echoed on every later request.
-	mcpProtocolVersion = "2025-06-18"
 )
 
 // Options configures a Client.
@@ -86,64 +60,35 @@ type Options struct {
 	QueryArgKey string
 }
 
-// Client is a hand-rolled net/http MCP search client. The API key travels
-// only in the Authorization header: it is never embedded in URLs, logged, or
-// included in error text.
+// Client is an MCP web-search client. The API key travels only in the
+// Authorization header: it is never embedded in URLs, logged, or included in
+// error text.
 type Client struct {
-	endpoint       string
-	apiKey         string
-	httpClient     *http.Client
-	requestTimeout time.Duration
-	maxBodyBytes   int64
-	toolName       string
-	queryArgKey    string
+	mcp         *mcpclient.Client
+	toolName    string
+	queryArgKey string
 }
 
 // New builds a Client, validating the endpoint before any request is made.
-// The endpoint is validated here defensively even though config validates it
-// too — the client is a reusable seam and must not trust its caller to have
-// checked.
 func New(opts Options) (*Client, error) {
-	if err := validateEndpoint(opts.Endpoint); err != nil {
-		return nil, err
+	mc, err := mcpclient.New(mcpclient.Options{
+		Endpoint:       opts.Endpoint,
+		APIKey:         opts.APIKey,
+		HTTPClient:     opts.HTTPClient,
+		RequestTimeout: opts.RequestTimeout,
+		MaxBodyBytes:   opts.MaxBodyBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
 	}
-
-	httpClient := opts.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{}
+	c := &Client{mcp: mc, toolName: opts.ToolName, queryArgKey: opts.QueryArgKey}
+	if c.toolName == "" {
+		c.toolName = defaultToolName
 	}
-	// The policy is set on a shallow copy, sharing the caller's Transport,
-	// jar and timeout, so a caller-supplied client cannot bypass it.
-	hc := *httpClient
-	hc.CheckRedirect = refuseUnsafeRedirects
-	httpClient = &hc
-
-	requestTimeout := opts.RequestTimeout
-	if requestTimeout <= 0 {
-		requestTimeout = defaultRequestTimeout
+	if c.queryArgKey == "" {
+		c.queryArgKey = defaultQueryArgKey
 	}
-	maxBodyBytes := opts.MaxBodyBytes
-	if maxBodyBytes <= 0 {
-		maxBodyBytes = defaultMaxBodyBytes
-	}
-	toolName := opts.ToolName
-	if toolName == "" {
-		toolName = defaultToolName
-	}
-	queryArgKey := opts.QueryArgKey
-	if queryArgKey == "" {
-		queryArgKey = defaultQueryArgKey
-	}
-
-	return &Client{
-		endpoint:       strings.TrimSuffix(opts.Endpoint, "/"),
-		apiKey:         opts.APIKey,
-		httpClient:     httpClient,
-		requestTimeout: requestTimeout,
-		maxBodyBytes:   maxBodyBytes,
-		toolName:       toolName,
-		queryArgKey:    queryArgKey,
-	}, nil
+	return c, nil
 }
 
 // Result is one search hit. The three fields are the ones the worker loop
@@ -156,69 +101,23 @@ type Result struct {
 	Snippet string
 }
 
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute https://,
-// http:// for loopback only) and rejects userinfo without echoing it. It
-// mirrors model.validateEndpoint and internal/config's check because this
-// reusable seam must not depend on config having run.
-func validateEndpoint(raw string) error {
-	if raw == "" {
-		return errors.New("search: endpoint must not be empty")
+// Search calls the configured search tool once and returns the parsed
+// results. The exchange is bounded by RequestTimeout (a tighter caller
+// deadline wins) and MaxBodyBytes.
+//
+// Nothing is retried: tools/call may invoke a billable upstream search, so it
+// is single-attempt like the model adapter's paid POST. A caller that wants to
+// retry a failed search does so knowingly.
+func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
+	if query == "" {
+		return nil, errors.New("search: query must not be empty")
 	}
-	u, err := url.Parse(raw)
-	if err == nil && u.User != nil {
-		return errors.New("search: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
+	result, err := c.mcp.CallTool(ctx, c.toolName, map[string]any{c.queryArgKey: query})
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
 	}
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("search: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
+	if result.IsError {
+		return nil, fmt.Errorf("search: tool reported an error: %s", mcpclient.FirstText(result.Content))
 	}
-	return nil
-}
-
-// quoteEndpoint renders an endpoint for an error message. A value containing
-// '@' is withheld: a malformed URL can carry credentials that url.Parse does
-// not recognise as userinfo.
-func quoteEndpoint(raw string) string {
-	if strings.Contains(raw, "@") {
-		return "(withheld: contains '@')"
-	}
-	return strconv.Quote(raw)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only — the
-// same rule model.allowedEndpointScheme, internal/config, and internal/cli
-// enforce, mirrored here because this seam cannot import those without
-// depending on the CLI/config layer. The duplication is noted in
-// docs/DECISIONS.md as acceptable pending a shared helper.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
-}
-
-// refuseUnsafeRedirects follows same-host redirects (at most three hops) and
-// refuses one to another host or from https to http: net/http re-sends
-// Authorization to any target on the same hostname whatever its scheme
-// (CWE-601, CWE-319). It mirrors model.refuseUnsafeRedirects.
-func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
-	first := via[0].URL
-	if req.URL.Host != first.Host {
-		return fmt.Errorf("search: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
-	}
-	if first.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("search: redirect to %s://%s refused: downgrade from https with sensitive headers", req.URL.Scheme, req.URL.Host)
-	}
-	if len(via) >= 3 {
-		return errors.New("search: too many redirects")
-	}
-	return nil
+	return parseResults(result), nil
 }
