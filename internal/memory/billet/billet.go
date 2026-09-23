@@ -40,6 +40,7 @@ const (
 	LocatorPrefix = "billet://memory/"
 
 	maxNameRunes    = 120
+	maxToolErrBytes = 4 << 10
 	maxMemoryIDLen  = 256
 	defaultKind     = "fact"
 	labelKind       = "kind"
@@ -237,11 +238,15 @@ func decodeReply(result mcpclient.ToolResult, key string, dst any) error {
 }
 
 // toolError surfaces a tool-level failure with the tool's own text, which
-// mcpclient has already scrubbed.
+// mcpclient has already scrubbed, bounded to maxToolErrBytes.
 func toolError(tool string, result mcpclient.ToolResult) error {
 	text := mcpclient.FirstText(result.Content)
 	if text == "" {
 		text = "no detail"
+	}
+	if len(text) > maxToolErrBytes {
+		const marker = " [truncated]"
+		text = truncateRunes(text, maxToolErrBytes-len(marker)) + marker
 	}
 	return fmt.Errorf("billet: %s failed: %s", tool, text)
 }

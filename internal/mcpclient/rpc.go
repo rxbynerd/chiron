@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/secret"
 )
@@ -281,10 +282,11 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 }
 
 // errorFromResponse builds an error from a non-2xx response, bounding the
-// error-body read and scrubbing it — a server error payload could echo the
-// submitted key back. The key is never in the body Chiron sends (it is
-// header-only), but the server's echo is outside Chiron's control, so the
-// body is scrubbed unconditionally.
+// error-body read, then scrubbing and excerpting it — a server error payload
+// could echo the submitted key back. The key is never in the body Chiron
+// sends (it is header-only), but the server's echo is outside Chiron's
+// control, so the body is scrubbed unconditionally. A body over
+// maxErrorBodyBytes is dropped rather than excerpted.
 func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 	data, err := readBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
@@ -294,7 +296,23 @@ func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 	if detail == "" {
 		return fmt.Errorf("mcp: %s failed: HTTP %d", method, resp.StatusCode)
 	}
-	return fmt.Errorf("mcp: %s failed: HTTP %d: %s", method, resp.StatusCode, c.scrub(detail))
+	return fmt.Errorf("mcp: %s failed: HTTP %d: %s", method, resp.StatusCode, c.errorText(detail))
+}
+
+// errorText scrubs server-supplied text, then cuts it to maxErrorTextBytes on
+// a rune boundary with a marker. Scrubbing first means a key straddling the
+// cut is still redacted by exact match.
+func (c *Client) errorText(s string) string {
+	s = c.scrub(s)
+	if len(s) <= maxErrorTextBytes {
+		return s
+	}
+	const marker = " [truncated]"
+	cut := maxErrorTextBytes - len(marker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }
 
 // scrub redacts credentials from a diagnostic string. It replaces the

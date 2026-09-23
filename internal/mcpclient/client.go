@@ -41,6 +41,9 @@ const (
 	defaultRequestTimeout = 30 * time.Second
 	defaultMaxBodyBytes   = 8 << 20
 	maxErrorBodyBytes     = 1 << 20
+	// maxErrorTextBytes bounds any server-supplied text carried into an
+	// error or an IsError result, so a caller never relays megabytes of it.
+	maxErrorTextBytes = 4 << 10
 
 	defaultClientName    = "chiron"
 	defaultClientVersion = "v2"
@@ -97,7 +100,8 @@ type Client struct {
 // ToolResult is a tools/call result: the content blocks, the optional
 // structuredContent object, and the isError flag distinguishing a tool-level
 // failure from a protocol error. When IsError is set, every text block has
-// already been scrubbed of credentials so a caller may surface it in an error.
+// already been scrubbed of credentials and bounded to 4 KiB, so a caller may
+// surface it in an error.
 type ToolResult struct {
 	Content           []ContentBlock  `json:"content"`
 	StructuredContent json.RawMessage `json:"structuredContent,omitempty"`

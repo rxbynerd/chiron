@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/rxbynerd/chiron/internal/mcpclient"
 	"github.com/rxbynerd/chiron/internal/memory"
 )
 
@@ -422,6 +423,27 @@ func TestRememberToolError(t *testing.T) {
 	_, err := c.Remember(context.Background(), "", memory.Memory{Text: "x"})
 	if err == nil || err.Error() != "billet: save_memory failed: backend unavailable" {
 		t.Errorf("error = %v, want the tool's text surfaced", err)
+	}
+}
+
+// TestToolErrorBounded: a tool error's text is cut to maxToolErrBytes on a
+// rune boundary, whether or not the transport already bounded it.
+func TestToolErrorBounded(t *testing.T) {
+	huge := "backend unavailable " + strings.Repeat("é", 1<<20)
+	direct := toolError(saveTool, mcpclient.ToolResult{Content: []mcpclient.ContentBlock{{Type: "text", Text: huge}}, IsError: true})
+
+	fake := NewFakeServer(nil, WithToolError(huge))
+	defer fake.Close()
+	_, viaFake := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "q"})
+
+	for name, err := range map[string]error{"direct": direct, "through the transport": viaFake} {
+		if err == nil {
+			t.Fatalf("%s: want a tool error", name)
+		}
+		msg := err.Error()
+		if len(msg) > maxToolErrBytes+64 || !utf8.ValidString(msg) || !strings.HasSuffix(msg, " [truncated]") || !strings.Contains(msg, "backend unavailable") {
+			t.Errorf("%s: error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus prefix, ending in the marker", name, len(msg), utf8.ValidString(msg), maxToolErrBytes)
+		}
 	}
 }
 

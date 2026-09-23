@@ -310,12 +310,28 @@ func boundBytes(s string, maxBytes int) string {
 }
 
 // errorFeedbackMessage tells the model an action could not be completed so it
-// can choose another.
+// can choose another. detail is Chiron's own wording; tool-supplied text goes
+// through toolFailureMessage.
 func errorFeedbackMessage(detail string) model.Message {
 	return model.Message{
 		Role:    model.RoleUser,
 		Content: "That action could not be completed: " + detail + " Choose a different action.",
 	}
+}
+
+// toolFailureMessage reports a failed tool call. The detail may carry text a
+// store or server chose, so it is defanged, bounded to maxDetailBytes and
+// rendered inside the untrusted-data fence.
+func toolFailureMessage(detail string) model.Message {
+	var b strings.Builder
+	b.WriteString("That action could not be completed. Tool error:\n")
+	b.WriteString(toolResultOpen)
+	b.WriteString("\n")
+	b.WriteString(boundDetail(defang(detail)))
+	b.WriteString("\n")
+	b.WriteString(toolResultClose)
+	b.WriteString("\n\nChoose a different action.")
+	return model.Message{Role: model.RoleUser, Content: b.String()}
 }
 
 // assistantEcho records the model's raw reply in the transcript.

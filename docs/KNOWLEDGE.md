@@ -142,8 +142,10 @@ Behaviour is exactly today's `search` transport: initialize, initialized
 notification, `tools/call`, best-effort DELETE when a session id was
 issued; both reply framings bounded; cross-host and https-to-http redirects
 refused; the key only in `Authorization`; every diagnostic scrubbed (exact
-key match first, then `secret.Scrub`); no retries on any round-trip. Error
-strings are prefixed `mcp:`; a package that wraps the client may re-prefix.
+key match first, then `secret.Scrub`) and any server-supplied error text,
+including an `isError` result's text blocks, cut to 4 KiB; no retries on any
+round-trip. Error strings are prefixed `mcp:`; a package that wraps the
+client may re-prefix.
 
 `internal/researcher/fleet/search` keeps its exported API (`Options`,
 `New`, `Client.Search`, `Result`, `FakeServer` and its options) and becomes
@@ -185,7 +187,7 @@ var _ memory.Rememberer = (*Client)(nil)
   reads `structuredContent` first, then a text block, as
   `{"records":[{memory_id, content, score, created_at}]}`. `isError: true`
   is an error carrying the tool's text ("budget exceeded", "backend
-  unavailable", or the validation message). Unlike search, there is no
+  unavailable", or the validation message), bounded to 4 KiB. Unlike search, there is no
   graceful degradation to a prose snippet: a reply without a `records` key is
   an error, because the worker must never mistake arbitrary text for a
   memory.
@@ -304,7 +306,9 @@ type WorkerDeps struct {
   locator as citable (see 4.3), and appends `recallResultsMessage`. Failures
   go through the same `toolFailure` helper and the same three-strike counter
   as search and fetch: one failure budget per run, so a dead knowledge store
-  cannot extend a run past its existing bound.
+  cannot extend a run past its existing bound. The failure text a store or
+  server supplied is fed back defanged, bounded to 2 KiB and inside the
+  tool-result fence, for search, fetch and recall alike.
 - `recallResultsMessage` renders inside the tool-result fence with every
   field passed through `defang`: numbered hits, `Name`, `Ref: <Locator>`,
   a score when non-zero, then the text, each hit bounded to `maxRecallHitBytes`

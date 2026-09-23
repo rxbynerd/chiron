@@ -421,7 +421,7 @@ func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Findi
 	if w.toolFailures >= maxConsecutiveToolFailures {
 		return true, w.failed(fmt.Sprintf("%d consecutive tool failures; last: %s", w.toolFailures, detail))
 	}
-	w.transcript = append(w.transcript, errorFeedbackMessage(detail))
+	w.transcript = append(w.transcript, toolFailureMessage(detail))
 	return false, Finding{}
 }
 

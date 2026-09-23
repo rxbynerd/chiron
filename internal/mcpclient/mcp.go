@@ -54,7 +54,7 @@ func (c *Client) initialize(ctx context.Context) (session, error) {
 		return session{}, err
 	}
 	if rpc.Error != nil {
-		return session{}, fmt.Errorf("mcp: initialize rejected: %s", c.scrub(rpc.Error.Error()))
+		return session{}, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error()))
 	}
 	sess := session{id: sessionID, protocolVersion: ProtocolVersion}
 	var result initializeResult
@@ -75,7 +75,7 @@ func (c *Client) notifyInitialized(ctx context.Context, sess session) error {
 }
 
 // callTool issues the tools/call and decodes its result envelope. The text of
-// a tool-level error is scrubbed here, where the key is known.
+// a tool-level error is scrubbed and bounded here, where the key is known.
 func (c *Client) callTool(ctx context.Context, sess session, name string, args map[string]any) (ToolResult, error) {
 	if args == nil {
 		args = map[string]any{}
@@ -91,7 +91,7 @@ func (c *Client) callTool(ctx context.Context, sess session, name string, args m
 		return ToolResult{}, err
 	}
 	if rpc.Error != nil {
-		return ToolResult{}, fmt.Errorf("mcp: tools/call rejected: %s", c.scrub(rpc.Error.Error()))
+		return ToolResult{}, fmt.Errorf("mcp: tools/call rejected: %s", c.errorText(rpc.Error.Error()))
 	}
 
 	var result ToolResult
@@ -100,7 +100,7 @@ func (c *Client) callTool(ctx context.Context, sess session, name string, args m
 	}
 	if result.IsError {
 		for i := range result.Content {
-			result.Content[i].Text = c.scrub(result.Content[i].Text)
+			result.Content[i].Text = c.errorText(result.Content[i].Text)
 		}
 	}
 	return result, nil

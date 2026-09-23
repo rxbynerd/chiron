@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const testKey = "sk-mcp-0123456789abcdefABCDEF"
@@ -868,5 +869,62 @@ func TestFirstText(t *testing.T) {
 				t.Errorf("FirstText = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCallToolErrorTextBounded(t *testing.T) {
+	// Every server-supplied error text is scrubbed and cut to 4 KiB, so an
+	// adapter's error never carries megabytes into a caller's transcript.
+	huge := "backend failed for key " + testKey + "\n" + strings.Repeat("é", 200<<10)
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantErr    string
+		wantDetail bool
+	}{
+		{"tools/call rejection", http.StatusOK, fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":%q}}`, huge), "tools/call rejected", true},
+		{"error body", http.StatusBadGateway, huge, "tools/call failed: HTTP 502: backend failed", true},
+		{"non-JSON error body over the read bound", http.StatusBadGateway, strings.Repeat("<html>", maxErrorBodyBytes/5), "tools/call failed: HTTP 502", false},
+		{"empty error body", http.StatusBadGateway, "", "tools/call failed: HTTP 502", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			_, err := call(newClient(t, server.URL))
+			if err == nil {
+				t.Fatal("CallTool should fail")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, tt.wantErr) || strings.Contains(msg, testKey) {
+				t.Errorf("error = %.200q, want %q with the key redacted", msg, tt.wantErr)
+			}
+			if len(msg) > maxErrorTextBytes+64 || !utf8.ValidString(msg) {
+				t.Errorf("error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus its prefix", len(msg), utf8.ValidString(msg), maxErrorTextBytes)
+			}
+			if got := strings.HasSuffix(msg, " [truncated]"); got != tt.wantDetail {
+				t.Errorf("error truncation marker = %v, want %v: %.200q", got, tt.wantDetail, msg)
+			}
+		})
+	}
+
+	fake := NewFakeServer(textErrorHandler(huge))
+	defer fake.Close()
+	got, err := call(newClient(t, fake.URL()))
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	text := FirstText(got.Content)
+	if !got.IsError || len(text) > maxErrorTextBytes || !strings.HasSuffix(text, " [truncated]") || strings.Contains(text, testKey) {
+		t.Errorf("IsError text is %d bytes, want a scrubbed excerpt of at most %d ending in the marker", len(text), maxErrorTextBytes)
 	}
 }
