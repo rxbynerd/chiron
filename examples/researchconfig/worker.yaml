@@ -1,0 +1,30 @@
+# A ResearchConfig for the in-process research worker (--agent worker).
+# Use as a base for a pipeline or with --config:
+#
+#   export MODEL_KEY=... SEARCH_KEY=...
+#   chiron research --config examples/researchconfig/worker.yaml \
+#     --query "Competitive landscape of 10BASE-T1L PHY vendors"
+#
+# Keys mirror internal/config.ResearchConfig. The Gemini-only levers
+# (budget, plan, model, visualise, tools, mcp, file_search, inputs,
+# template) are rejected for this agent; spend is bounded by the fleet
+# block instead. Endpoints must be absolute https:// (http:// for
+# loopback only) because the keys travel to whatever they name.
+agent: worker
+output: text
+timeout: 30m
+fleet:
+  model_endpoint: https://api.openai.com/v1
+  model_name: gpt-5.5
+  model_key_ref: secret://MODEL_KEY
+  search_endpoint: https://search.example.com/mcp
+  search_key_ref: secret://SEARCH_KEY
+  max_turns: 8
+  max_tokens: 400000
+  worker_timeout: 5m
+  max_page_bytes: 65536
+  # ceiling_gbp is honoured only with both prices set (GBP per million
+  # prompt / completion tokens); a ceiling without prices is rejected.
+  price_input_gbp_per_mtok: 1.5
+  price_output_gbp_per_mtok: 12
+  ceiling_gbp: 2.5

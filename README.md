@@ -53,7 +53,7 @@ chiron follow-up <interaction-id> --query "..."
 | Flag | Default | Notes |
 | --- | --- | --- |
 | `--query` / positional | — | The research question. |
-| `--agent` | `deep-research` | or `deep-research-max` (tier table below). |
+| `--agent` | `deep-research` | `deep-research-max` (tier table below), or `worker` for the in-process research loop (section below). `fleet` is reserved and not yet implemented. |
 | `--plan` | off | Collaborative planning: review and refine the plan before spending. |
 | `--accept-plan` | off | With `--plan`, approve the first proposed plan without prompting. |
 | `--model` | adapter default | Follow-up Q&A model (`chiron follow-up`). |
@@ -68,7 +68,7 @@ chiron follow-up <interaction-id> --query "..."
 | `--out <path>` | stdout | Write the Markdown report (and chart assets) to a file. |
 | `--config <path>` | — | Base `ResearchConfig`; `-` or piped stdin for composition. |
 | `--api-key-ref` | `secret://GEMINI_API_KEY` | Never a literal key. |
-| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap. |
+| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; the worker uses `--fleet-ceiling`). |
 | `--timeout <dur>` | `30m` | Wall-clock; hard cap 60m (the agent's own limit). |
 
 All four commands accept the same flag surface; configuration resolves
@@ -131,6 +131,53 @@ and attribution belong to Stint.
   plain model rather than a new research task — quick and far cheaper
   than re-researching.
 
+### The in-process worker (`--agent worker`)
+
+`--agent worker` runs Chiron's own bounded research loop instead of a
+managed Deep Research task: one OpenAI-compatible Chat Completions model
+decides, turn by turn, whether to call a web-search MCP tool, fetch a page
+through an SSRF-guarded `web_fetch`, or write the final answer. The report
+cites only URLs the loop actually fetched. It is the v2 product path; the
+Gemini tiers remain the stopgap and eval baseline.
+
+```sh
+export MODEL_KEY=...      # the standard-model key
+export SEARCH_KEY=...     # the search-MCP key, if the server needs one
+chiron research --agent worker \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-endpoint https://search.example.com/mcp \
+  --fleet-search-key-ref secret://SEARCH_KEY \
+  --query "Competitive landscape of 10BASE-T1L PHY vendors" --out report.md
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--fleet-model-endpoint` | — | Standard-model base URL; absolute `https://`, `http://` for loopback only. Required. |
+| `--fleet-model-name` | — | Model identifier sent on every call. Required. |
+| `--fleet-model-key-ref` | — | `secret://` reference to the model key. Required. |
+| `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required. |
+| `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
+| `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
+| `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
+| `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
+| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags. |
+| `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
+| `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
+
+The worker keeps the v1 money rules: the paid model call is never
+auto-retried, the interaction id (a local `wkr_` handle) is emitted before
+the first call, and hitting any cap ends the run `incomplete` (exit 2)
+with the citations gathered so far. Tool failures (a 404, a refused
+destination, a binary page) are fed back to the model so it can choose
+another source; three consecutive failures end the run `failed`. The
+`wkr_` handle is not a resume token: `chiron get` and `chiron follow-up`
+refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
+`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
+`--template`) are rejected for the worker rather than silently ignored.
+`examples/researchconfig/worker.yaml` is a complete base config.
+
 ### Exit codes
 
 The research outcome is machine-readable from the exit code alone, so
@@ -169,6 +216,7 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | `GEMINI_API_KEY` | The API key, read via the default `secret://GEMINI_API_KEY` reference. Any `secret://env/NAME` or `secret://file/<absolute path>` reference works instead. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
+| `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
 
 ## Documents
 
@@ -176,7 +224,10 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 - `docs/INTERACTIONS-API.md` — the verified Gemini Interactions API
   reference; normative wherever it and the proposal disagree.
 - `docs/DECISIONS.md` — the running decision log.
-- `docs/reviews/` — review briefs and remediation reports for both v1
-  review cycles.
+- `docs/V2-PLAN.md` — the phased v2 implementation plan;
+  `docs/V2-RESEARCH-AGENT.md` is the binding design for the in-process
+  research agents and `docs/V2-AMENDS.md` the amendment log.
+- `docs/reviews/` — review briefs and remediation reports for the v1 and
+  v2 review cycles.
 - `AGENTS.md` / `CLAUDE.md` — orientation for agentic sessions.
 - `SECURITY.md` — security posture and vulnerability reporting.

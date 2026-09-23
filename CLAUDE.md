@@ -7,16 +7,18 @@ design decisions live in `docs/DECISIONS.md`; for anything touching the
 Gemini API, `docs/INTERACTIONS-API.md` is normative and wins over the
 proposal.
 
-v2 is in active planning on the `v2` branch: `docs/V2-PLAN.md` is the phased
-implementation plan and `docs/V2-RESEARCH-AGENT.md` is the research-agent core
-design (treat it as binding for the v2 researcher core). In v2 the `Researcher`
-is Chiron's own multi-agent fleet — a lead orchestrator driving **Stirrup**
-(`github.com/rxbynerd/stirrup`) research-mode jobs on **standard frontier
-models** (GPT-5.4/5.5, Claude, Gemini-Pro) equipped with a web-search tool.
-**Managed deep research (the v1 Gemini Deep Research adapter) is a stopgap +
-eval baseline only, never the product.** Stirrup owns the provider adapters;
-its wire types are Buf-generated, never `go get`. The Chiron runner is the
-`stirrup.harness.v1` `HarnessService` server (Stirrup workers dial in).
+v2 is in progress: `docs/V2-PLAN.md` is the phased implementation plan and
+`docs/V2-RESEARCH-AGENT.md` is the research-agent core design (binding for the
+v2 researcher core). Per the prove-first pivot (V2-AMENDS amend 8), the v2
+`Researcher` is Chiron's own **in-process** research loop on **one
+OpenAI-compatible standard model** plus a web-search MCP tool and an
+SSRF-guarded `web_fetch`: `--agent worker` runs a single bounded loop today;
+`--agent fleet` (a lead orchestrating several workers) is the next wave and
+returns not-implemented until it lands. **Managed deep research (the v1 Gemini
+Deep Research adapter) is a stopgap + eval baseline only, never the product.**
+**Stirrup** (`github.com/rxbynerd/stirrup`) is the deferred scale-out path,
+adopted later as an embedded engine, not a remote K8s-job harness; nothing in
+the tree dials a `HarnessService`.
 
 Non-negotiables worth repeating:
 

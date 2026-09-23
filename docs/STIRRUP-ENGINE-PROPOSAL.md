@@ -17,7 +17,7 @@ prospective external consumer (Chiron, a read-only web-research service). It is 
 of a Chiron planning exercise**, captured so the idea is not lost — it is **not** a decision,
 and **Chiron does not depend on any of it**. Chiron's v2 plan ships a lean, in-process,
 homegrown research loop and treats Stirrup adoption as a *later, optional* scale-out step
-(`chiron/docs/V2-RESEARCH-AGENT.md` §0a, `chiron/docs/V2-PLAN.md` D9 + scale-out track). If
+(`chiron/docs/V2-AMENDS.md` amend 8, `chiron/docs/V2-PLAN.md` D9 + scale-out track). If
 Stirrup decides this is out of scope, misaligned with its coding-agent focus, or simply not
 worth the maintenance surface, **that is a perfectly acceptable outcome** — Chiron proceeds
 regardless.
@@ -186,7 +186,7 @@ multi-model scale justifies the swap (which, by design, is a binding change behi
 
 ## 9. References
 
-- `chiron/docs/V2-RESEARCH-AGENT.md` §0a — the Chiron prove-first pivot that produced this
+- `chiron/docs/V2-AMENDS.md` amend 8 and `chiron/docs/V2-RESEARCH-AGENT.md` §0 — the Chiron prove-first pivot that produced this
   proposal (the in-process loop now; Stirrup-as-embedded-engine later).
 - `chiron/docs/V2-PLAN.md` D9 + "Scale-out track (deferred)" — where Chiron would adopt this,
   if it lands.

@@ -37,7 +37,9 @@ with actions pinned to full commit SHAs.
 | `internal/run` | The pure-function research core: `Run` (start→await→retrieve→format→emit) and `Resume`. Depends only on the seam interfaces; takes a context and `Deps`, reads no environment. |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. |
 | `internal/researcher/gemini` | The Deep Research adapter: tier mapping and cost table, input grounding, prompt template, streaming await with reconnect and poll fallback, planner binding, follow-up mode. Creates are never auto-retried (money). |
-| `internal/researcher/fleet` | v2 stirrup-fleet orchestrator seam — a stub that returns not-implemented, pinned by tests. |
+| `internal/researcher/fleet` | v2 in-process research agents. `RunWorker` is the bounded search→fetch→final loop on one standard model (turn, token, GBP-ceiling and wall-clock caps; tool failures fed back to the model with a three-strike bound; citations restricted to fetched URLs); `Worker` wraps it as a `Researcher` with opaque `wkr_` ids that `get`/`follow-up` refuse. `--agent fleet` (lead over several workers) still returns `ErrNotImplemented`. |
+| `internal/researcher/fleet/search` | Hand-rolled Streamable-HTTP MCP client for the web-search tool: `initialize` handshake, `tools/call` with bounded JSON or SSE responses, key header-only and scrubbed. Ships an exported fake server for downstream tests. `Options.Endpoint`/key ref are security-sensitive for the same reason as the model client. |
+| `internal/researcher/fleet/fetch` | The `web_fetch` client: SSRF-guarded (private, loopback, link-local, CGNAT, NAT64/6to4, metadata ranges refused at dial time with pinned IPs; no proxy; redirects re-validated), bounded reads with truncation reported, `AllowLoopback` for tests only (see `CHIRON_FETCH_ALLOW_LOOPBACK`). |
 | `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. Ships an exported `FakeServer` for downstream tests. `Options.ModelEndpoint`/`ModelKeyRef` (via config) are security-sensitive — credentials travel to the configured endpoint. |
 | `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report` (front matter, body, charts as assets, numbered sources). Pure — no IO; golden-file tested. |
@@ -105,6 +107,11 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   required, `http://` admitted for loopback hosts only. For v2 GKE
   deployments, consider disabling it entirely in release builds via a
   build tag.
+- `CHIRON_FETCH_ALLOW_LOOPBACK` — set to exactly `1`, lets the worker's
+  `web_fetch` reach loopback hosts so the CLI tests can serve pages from
+  httptest. Any other non-empty value is a startup error. It never
+  relaxes the private-network, link-local or metadata refusals, and must
+  never be set in production; absence is the safe default.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` —
   standard OTel configuration; binding either sends spans carrying
   research queries and interaction ids to the named collector. The
@@ -129,8 +136,21 @@ names, so whoever controls those fields receives the credentials.
   cycle); keep the two in step.
 - `fleet.model_key_ref` / `fleet.search_key_ref` — must be `secret://`
   references; literals are rejected and never echoed in the error.
+- `fleet.model_name` is required for `worker`/`fleet`; the model client
+  never sends an empty identifier.
+- Spend caps: `fleet.max_turns`, `fleet.max_tokens` and
+  `fleet.worker_timeout` bound a run deterministically. `fleet.ceiling_gbp`
+  is honoured only when `fleet.price_input_gbp_per_mtok` /
+  `fleet.price_output_gbp_per_mtok` are set; a ceiling with no prices is a
+  validation error rather than a silently inert cap. `fleet.max_page_bytes`
+  bounds each fetched page after HTML-to-text reduction.
+- The Gemini-only levers (`budget`, `plan`, `accept_plan`, `model`,
+  `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`) are
+  rejected for `worker`/`fleet` at validation so a caller never believes a
+  cap or feature applied when the loop ignores it. `stream` is accepted
+  and ignored.
 
-Wave 3 keeps these as config fields, not new environment variables — they
-are per-run research configuration, not process-wide test hooks. If a
-later wave adds a model/search endpoint override *env var*, validate it
-exactly like `CHIRON_GEMINI_BASE_URL` and list it in the section above.
+These are config fields, not environment variables — they are per-run
+research configuration, not process-wide test hooks. If a later wave adds
+a model/search endpoint override *env var*, validate it exactly like
+`CHIRON_GEMINI_BASE_URL` and list it in the section above.

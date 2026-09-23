@@ -1,9 +1,9 @@
 ---
 project: Chiron
 suite: Equestrianism
-status: implementation plan (v2 — for phased hand-off to Claude Code; amended 2026-06-21 per docs/V2-AMENDS.md; researcher core re-seated 2026-06-22 per docs/V2-RESEARCH-AGENT.md; prove-first pivot 2026-06-22 — §0 banner + V2-RESEARCH-AGENT §0a)
+status: implementation plan (v2 — for phased hand-off to Claude Code; amended 2026-06-21 per docs/V2-AMENDS.md; researcher core re-seated 2026-06-22 per docs/V2-RESEARCH-AGENT.md; prove-first pivot 2026-06-22 — §0 banner + V2-AMENDS amend 8; section references re-pointed 2026-09-23 at the 2026-07-01 V2-RESEARCH-AGENT.md)
 author: @rubynerd
-date: 2026-06-22
+date: 2026-09-23
 locale: en-GB
 language: Go
 supersedes: revises the 2026-06-14 draft of this file in light of docs/V2-AMENDS.md; researcher core re-seated onto docs/V2-RESEARCH-AGENT.md (2026-06-22); companion to docs/PROPOSAL.md §6 and §9 (M7)
@@ -11,7 +11,7 @@ summary: >
   The phased implementation plan for Chiron v2: the evolution from the finished v1 CLI
   into a GKE-hosted, multi-agent research service. v2 is scoped to external (internet)
   research only; it runs a homegrown research-agent fleet behind a ConnectRPC control
-  plane. Per the 2026-06-22 prove-first pivot (docs/V2-RESEARCH-AGENT.md §0a), the fleet
+  plane. Per the 2026-06-22 prove-first pivot (docs/V2-AMENDS.md amend 8; docs/V2-RESEARCH-AGENT.md §0), the fleet
   is a Chiron lead orchestrator that runs its workers as a lean, IN-PROCESS research loop
   on a single frontier model (the loop the lead substrate already needs, extended with a
   web-search tool) — NOT as dispatched Stirrup K8s jobs. Stirrup is retained as the
@@ -32,7 +32,7 @@ summary: >
 > **Direction update (2026-06-22) — read first.** After a build-vs-buy pressure-test of the
 > Stirrup dependency, v2's **critical path is a lean, in-process, homegrown research loop on a
 > single provider**, with Stirrup deferred to a later **embedded-engine** adoption (not a remote
-> K8s-job harness). See `docs/V2-RESEARCH-AGENT.md` §0a for the decision and grounded rationale.
+> K8s-job harness). See `docs/V2-AMENDS.md` amend 8 and `docs/V2-RESEARCH-AGENT.md` §0 for the decision.
 > The waves below have been **re-seated** onto that direction; the former Stirrup-remote content
 > (`stirrup.harness.v1` / `HarnessService` server / K8s-Job provisioning, SP-B, SP-D) now lives
 > in the **Scale-out track (deferred)** at the end of §6, pursued only after the Wave 4 eval
@@ -46,7 +46,7 @@ exist as tested stubs: `internal/researcher/fleet`, `internal/transport/grpc.go`
 `proto/chiron/v1/chiron.proto` (committed; generated Go not yet committed).
 
 The researcher core — what the fleet actually runs — is designed in
-`docs/V2-RESEARCH-AGENT.md` (2026-06-22, incl. the §0a prove-first pivot). This plan
+`docs/V2-RESEARCH-AGENT.md` (2026-07-01 revision, which assumes the prove-first pivot throughout). This plan
 re-seats its Wave 3–4 researcher waves and spikes onto that design: the fleet is a lead
 orchestrator whose workers are a **lean, in-process research loop on a single frontier
 model** (see §1 D2/D9 and §5), while the service scaffolding (Waves 1, 2, 5, 6) stays
@@ -75,7 +75,7 @@ normative document, the normative document wins, and this plan is corrected.
 `docs/INTERACTIONS-API.md` stays normative for the Gemini path (now the stopgap + eval
 baseline). For v2's critical path Chiron hand-rolls a **thin `net/http` adapter to one
 standard model** for both the lead and the in-process worker (SP-C, `V2-RESEARCH-AGENT.md`
-§5.5) — SDK-free, like the v1 Gemini adapter; v2 adds **no** `docs/RESPONSES-API.md` (no
+§3) — SDK-free, like the v1 Gemini adapter; v2 adds **no** `docs/RESPONSES-API.md` (no
 full OpenAI Responses adapter is built). When Stirrup is later adopted as an embedded engine
 it owns the multi-provider adapters; that and the `stirrup.harness.v1` contract are the
 deferred scale-out track (§6), confirmed by spike before code rather than restated here as
@@ -104,14 +104,14 @@ that drove it.
 | # | Source | Decision | Consequence |
 | --- | --- | --- | --- |
 | D1 | Planning fork (`§8` framing) | **Full v2 roadmap, phased** into seven gated waves, external-research-only. | This document; gated delivery rather than one slice. The wave set is restructured from the prior six (see §6 preamble). |
-| D2 | Amend 1 + V2-RESEARCH-AGENT.md §0a | **The `Researcher` is Chiron's homegrown research-agent fleet — workers are a lean in-process loop on one model (prove-first).** A Chiron lead orchestrator decomposes a question, dispatches several **in-process research workers** (a search→read→synthesise loop on a single standard frontier model + a web-search tool), then synthesises and cites. **Managed deep research** (the v1 Gemini DR adapter) is **retained as a top-level stopgap researcher + the eval baseline**, never the production backend. | Chiron hand-rolls a **thin `net/http` adapter to one model** (shared by the lead and the worker; SP-C/§5.5), SDK-free; it builds **no** full OpenAI Responses adapter and **no** `docs/RESPONSES-API.md`. The drifted `o3`/`o4-mini-deep-research` bindings are **dropped**. Multi-model + keyless credential federation (Azure OpenAI `azure-workload-identity`, `anthropic-wif`, Gemini Vertex) are **deferred to the scale-out track** with Stirrup (D9). The managed Gemini DR stopgap holds its `generativelanguage.googleapis.com` key in a GCP Secret Manager backend (Wave 7). The web-search loop is the central spike, SP-A. See `docs/V2-RESEARCH-AGENT.md` §0a, §5, §5.5. |
+| D2 | Amends 1, 8 + V2-RESEARCH-AGENT.md §0 | **The `Researcher` is Chiron's homegrown research-agent fleet — workers are a lean in-process loop on one model (prove-first).** A Chiron lead orchestrator decomposes a question, dispatches several **in-process research workers** (a search→read→synthesise loop on a single standard frontier model + a web-search tool), then synthesises and cites. **Managed deep research** (the v1 Gemini DR adapter) is **retained as a top-level stopgap researcher + the eval baseline**, never the production backend. | Chiron hand-rolls a **thin `net/http` adapter to one model** (shared by the lead and the worker; SP-C/§3), SDK-free; it builds **no** full OpenAI Responses adapter and **no** `docs/RESPONSES-API.md`. The drifted `o3`/`o4-mini-deep-research` bindings are **dropped**. Multi-model + keyless credential federation (Azure OpenAI `azure-workload-identity`, `anthropic-wif`, Gemini Vertex) are **deferred to the scale-out track** with Stirrup (D9). The managed Gemini DR stopgap holds its `generativelanguage.googleapis.com` key in a GCP Secret Manager backend (Wave 7). The web-search loop is the central spike, SP-A. See `docs/V2-RESEARCH-AGENT.md` §0, §3, §5. |
 | D3 | Amend 3 + V2-RESEARCH-AGENT.md | **Await is split by path.** The **managed stopgap** (Gemini DR) uses **background-create + poll** (replacing v1's SSE-with-poll-fallback); the **in-process homegrown workers** are awaited **in-process** (goroutines under the lead), not over a wire stream. **Webhook-driven completion** for the managed stopgap is a future enhancement that lands with the public control-plane ingress (Wave 7). | A managed background create returns an interaction id **immediately**, then the adapter polls `GET` until terminal — *not* a held-open socket. In-process workers need no harness stream; the §4 spend-safety rules apply per worker in-process. When Stirrup is later adopted (D9), worker await moves to the `stirrup.harness.v1` event stream and the "a broken event stream never aborts a paid run" rule extends to it. v1's Gemini SSE path is untouched; the control plane is the natural webhook receiver for the managed stopgap (Wave 7). |
 | D4 | Amend 6 + Q2 | **In-memory `ContextStore` first**, Paddock embedded later. Findings-by-reference still applies to the multi-worker fleet. | Wave 4 ships the in-process store; Wave 6 swaps Paddock (gated by S2). |
 | D5 | Amend 6 + V2-RESEARCH-AGENT.md | **External (internet) research only.** v2 workers read the **open web** (web-search MCP + `web_fetch`) via the in-process loop. What defers is the **internal *source tools*** — repo-scoped MCP, Gemini `file_search` — i.e. *where* a worker reads, not *that* workers exist; they route in once Paddock lands. | The router is external-web-only and its internal branch defers (encoded so it slots in later). `PROPOSAL §6`'s `Researcher = stirrup-fleet` becomes the **scale-out** target (D9), not the v2 critical-path researcher; the transport is still ConnectRPC (D8). The web-search spike (SP-A) is the crux of the in-process worker. |
 | D6 | Amend 2 | **Defer all finance/budgeting fixes** (token and financial). No Stint in v2; the broken hard-coded cost estimate and the v1 `--budget` gate are left **as-is** — not fixed, not extended. | Spend is made **visible** (Langfuse, D7), not capped. The non-budget spend-safety invariants (§4) remain and generalise to N workers. Budget enforcement and attribution return in a future release. |
 | D7 | Amend 7 | **Observability is a first-class, early wave** (Wave 2) because v2 can spend a lot of real money it cannot yet cap. Explicit CLI flags forward OTLP telemetry to **Langfuse**; per-worker / per-run spend signals are traced. | Langfuse visibility is the **interim spend control**, standing in for the deferred budget enforcement. It lands before the expensive backend (the worker fleet) so the first real spend is fully visible. |
 | D8 | Amends 4, 5 + V2-RESEARCH-AGENT.md | **ConnectRPC + Buf, one target for v2 (`chiron.v1`).** The control-plane surface is ConnectRPC, generated with Buf (adds the `connect-go` plugin). The runner outbound-dial `Session` stream stays bidi over HTTP/2; a new browser-friendly submission/history surface specifies the previously-underspecified research-submission API, anticipating a future Chiron UI. **Proto clients/servers are Buf-generated from each contract's `.proto`; we never `go get` another repo's generated types.** | Wave 1 commits the Buf+Connect output for `chiron.v1` (served/dialled); Wave 5 serves both `chiron.v1` surfaces. The **second target, `stirrup.harness.v1`**, is **deferred to the scale-out track** (D9) — generated only if/when Stirrup is adopted. The local-`ContextStore` decision (DECISIONS.md, 2026-06-07) is reaffirmed by the same principle. |
-| D9 | Amend 8 + V2-RESEARCH-AGENT.md §0a | **Prove-first; Stirrup deferred to an embedded engine.** v2's critical path is the lean in-process loop (D2); the heavy Stirrup-remote apparatus (`HarnessService` server, K8s Jobs, image pinning, RBAC, endpoint auth) is **not** built until the eval gate (SP-F) is met *and* scale/multi-model justify it. When adopted, Stirrup is an **embedded engine** (a deps-light providers + credential-federation + loop module imported in-process), **not** a remote K8s-job harness. | The wire `stirrup.harness.v1` target (D8), SP-B and SP-D all move to the **scale-out track** (§6). The worker sits behind the same `Researcher` seam / `ContextStore` / prompts / eval as a future engine worker, so the swap is a binding change, not a re-architecture. Stirrup is a multi-consumer platform; Chiron is the forcing function for the engine refactor (captured in `docs/STIRRUP-ENGINE-PROPOSAL.md`). |
+| D9 | Amend 8 + V2-RESEARCH-AGENT.md §0 | **Prove-first; Stirrup deferred to an embedded engine.** v2's critical path is the lean in-process loop (D2); the heavy Stirrup-remote apparatus (`HarnessService` server, K8s Jobs, image pinning, RBAC, endpoint auth) is **not** built until the eval gate (SP-F) is met *and* scale/multi-model justify it. When adopted, Stirrup is an **embedded engine** (a deps-light providers + credential-federation + loop module imported in-process), **not** a remote K8s-job harness. | The wire `stirrup.harness.v1` target (D8), SP-B and SP-D all move to the **scale-out track** (§6). The worker sits behind the same `Researcher` seam / `ContextStore` / prompts / eval as a future engine worker, so the swap is a binding change, not a re-architecture. Stirrup is a multi-consumer platform; Chiron is the forcing function for the engine refactor (captured in `docs/STIRRUP-ENGINE-PROPOSAL.md`). |
 
 ## 2. Non-negotiables carried into v2
 
@@ -123,7 +123,7 @@ restated for a multi-agent, networked context.
   web-search MCP and `web_fetch` — and **no** executor, file-write, or shell surface at all,
   so the invariant holds **by construction** (there is nothing to deny). The fleet exposes no
   executor/edit/permission surface of its own; a worker that reaches for a side-effecting tool
-  is a **defect** that fails the run in test (see `V2-RESEARCH-AGENT.md` §5.3). (When Stirrup
+  is a **defect** that fails the run in test (see `V2-RESEARCH-AGENT.md` §1). (When Stirrup
   is later adopted, `mode:"research"` + `deny-side-effects` + `ValidateRunConfig` re-add the
   same guarantee enforced upstream — D9.)
 - **The core depends only on seams.** `internal/run` does not change. The fleet is *just
@@ -136,7 +136,7 @@ restated for a multi-agent, networked context.
 - **No vendor AI SDKs.** Chiron hand-rolls every provider call as `net/http`. What Chiron
   writes for v2 is the lead orchestrator's control flow, **one thin `net/http` adapter to a
   single standard model** shared by the lead's decompose/synthesise/cite calls *and* the
-  worker's search→read→synthesise loop (SP-C, `docs/V2-RESEARCH-AGENT.md` §5.5), and the
+  worker's search→read→synthesise loop (SP-C, `docs/V2-RESEARCH-AGENT.md` §5), and the
   web-search MCP client; the retained v1 Gemini DR stopgap is already hand-rolled. Any
   embedding calls stay `net/http`. The deferred Stirrup engine is itself SDK-free. Justify
   every new dependency in `DECISIONS.md` before adding it.
@@ -204,7 +204,7 @@ it, the in-process worker is swapped — behind the *same* `Researcher` seam —
 embedded engine** (multi-provider adapters + credential federation + the loop, imported
 in-process), or, only if hard per-worker process isolation is ever required, for remote
 `stirrup.harness.v1` workers. That topology is the deferred reference at the end of §6 and in
-`docs/V2-RESEARCH-AGENT.md` §0a / §2–§11.
+`docs/V2-RESEARCH-AGENT.md` §0 and §9.
 
 ## 4. Spend safety for a multi-agent run (budgeting deferred)
 
@@ -249,8 +249,8 @@ budgeting returns.
 
 ## 5. Spikes (do these before the waves they gate)
 
-The researcher-core spikes are defined in `docs/V2-RESEARCH-AGENT.md` §10 and reproduced
-here with the waves they gate. Per the prove-first pivot (§0a/D9), **SP-A, SP-C, SP-E, SP-F
+The researcher-core spikes are defined in `docs/V2-RESEARCH-AGENT.md` §7 and §9 and reproduced
+here with the waves they gate. Per the prove-first pivot (amend 8/D9), **SP-A, SP-C, SP-E, SP-F
 are the v2 critical-path spikes** (they define the in-process worker, the lead+worker model
 substrate, the findings store, and the quality gate); **SP-B and SP-D move to the deferred
 scale-out track** (they concern Stirrup-remote dispatch and multi-provider keyless auth). The
@@ -259,8 +259,8 @@ prior `S1` (OpenAI deep-research contract + WIF) stays **retired**.
 | Spike | Question | Gates | Output |
 | --- | --- | --- | --- |
 | **SP-A** (the crux) | **Web-search loop — RESOLVED (`V2-RESEARCH-AGENT.md` §3):** the in-process worker drives a search→read→synthesise loop over a **Streamable-HTTP MCP search server** (Tavily/Exa/Brave/SearxNG) + `web_fetch`; native scraping is discounted (datacentre CAPTCHAs). Remaining before Wave 3: prove the loop reaches Gemini-DR grade and pick the search API. (A provider's own built-in `web_search` is a later option, via the scale-out engine.) | Waves 3, 4 | The worker's tool set (MCP search + `web_fetch`) + research prompt; recorded in `DECISIONS.md` when Wave 3 lands. |
-| **SP-B** | **Stirrup dispatch — RESOLVED but DEFERRED (scale-out track, §6; `V2-RESEARCH-AGENT.md` §5.4):** if/when Stirrup is adopted as a *remote* harness, the runner is its control plane (Deployment + Service serving `HarnessService`, one K8s Job per worker). The prove-first path runs workers **in-process**, so this does not gate v2. | Scale-out track | The remote runner↔worker shape, retained as reference; not built for v2. |
-| **SP-C** | **Lead (and worker) substrate — RESOLVED (`V2-RESEARCH-AGENT.md` §5.5):** the lead's decompose/synthesise/cite are **thin hand-rolled `net/http` calls to one standard model** (provider-native structured output for decompose/cite, where deterministic parsing matters); per the pivot the **in-process worker shares that same adapter** for its loop reasoning. Fan-out is **Chiron-level, not `spawn_agent`**. | Waves 3, 4 | The shared `net/http` model adapter + lead/worker prompts; reuses the v1 gemini adapter's HTTP hardening; recorded in `DECISIONS.md` when Wave 3/4 land. |
+| **SP-B** | **Stirrup dispatch — RESOLVED but DEFERRED (scale-out track, §6; `V2-RESEARCH-AGENT.md` §9):** if/when Stirrup is adopted as a *remote* harness, the runner is its control plane (Deployment + Service serving `HarnessService`, one K8s Job per worker). The prove-first path runs workers **in-process**, so this does not gate v2. | Scale-out track | The remote runner↔worker shape, retained as reference; not built for v2. |
+| **SP-C** | **Lead (and worker) substrate — RESOLVED (`V2-RESEARCH-AGENT.md` §3):** the lead's decompose/synthesise/cite are **thin hand-rolled `net/http` calls to one standard model** (provider-native structured output for decompose/cite, where deterministic parsing matters); per the pivot the **in-process worker shares that same adapter** for its loop reasoning. Fan-out is **Chiron-level, not `spawn_agent`**. | Waves 3, 4 | The shared `net/http` model adapter + lead/worker prompts; reuses the v1 gemini adapter's HTTP hardening; recorded in `DECISIONS.md` when Wave 3/4 land. |
 | **SP-D** | **Multi-provider keyless auth — DEFERRED (scale-out track, §6).** Azure OpenAI + `azure-workload-identity`, `anthropic-wif`, Gemini Vertex via Stirrup credential federation. v2 uses **one provider** with the simplest single-provider auth (local static key via `secret://`; on GKE the cheapest keyless path — Wave 7), so multi-provider WIF does not gate v2. | Scale-out track | The keyless multi-provider binding, retained as reference; not built for v2. |
 | **SP-E** | **Findings-by-reference — RESOLVED for v2 (in-memory):** workers write findings to the in-memory `ContextStore` and return a lightweight `Reference`; the Paddock blob-plane interop is Wave 6. (The Stirrup `offload-to-file` mapping is a scale-out concern.) | Waves 4, 6 | The worker→`ContextStore` reference flow. |
 | **SP-F** | **Eval judge.** Does `stirrup-eval` offer an LLM-judge for report-quality-vs-baseline, or must one be added? Fallback: a **Chiron-side judge** (a `net/http` call scoring the two reports) so the gate is never blocked. This gate decides whether the fleet beats the Gemini-DR baseline — the pivot's central question. | Wave 4 (eval gate) | The baseline eval suite + judge. |
@@ -457,7 +457,7 @@ not gate this wave.)
 
 **Deliverables.**
 - A **thin `net/http` model adapter** to one standard model (`internal/researcher/fleet/model`,
-  SP-C/§5.5): plain-generate calls with the provider's native structured output (for the lead's
+  SP-C/§3): plain-generate calls with the provider's native structured output (for the lead's
   decompose/cite in Wave 4) and a turn/streaming API for the worker loop, reusing the v1 gemini
   adapter's HTTP hardening (cross-host-redirect refusal, `secret://` + `Scrub`,
   create-never-retried). Shared by the lead and the worker. SDK-free; **no** full OpenAI
@@ -549,7 +549,7 @@ deferred to the scale-out track and do not gate this wave.)
   `Remember`/`Recall` either a simple in-memory index or an explicit stub returning
   `ErrNotImplemented` (decide in-wave; recall is not load-bearing until Paddock).
 - The lead wired onto the **Wave 3 shared `net/http` model adapter** (`internal/researcher/
-  fleet/model`, SP-C/§5.5): decompose and cite use the provider's native structured output;
+  fleet/model`, SP-C/§3): decompose and cite use the provider's native structured output;
   synthesise produces the report. Fan-out is at the Chiron level (goroutine workers), **not**
   `spawn_agent`.
 - The **eval-vs-baseline harness** (`V2-RESEARCH-AGENT.md` §8; SP-F): runs `--agent fleet`
@@ -640,8 +640,8 @@ stream, relays run events, stores results, and serves history/get/watch. In-memo
   (unary), `WatchRun` (server-stream), `GetRun`, `ListRuns` — the UI-ready surface
   specified in Wave 1.
 - A **webhook receiver stub** in the control-plane ingress (managed Gemini DR completion
-  only; activated in Wave 7 when the service is publicly reachable). Workers complete over
-  the `stirrup.harness.v1` stream, not webhooks.
+  only; activated in Wave 7 when the service is publicly reachable). In-process workers
+  complete inside the runner and report over the control-plane stream, not webhooks.
 
 **Key tasks.**
 1. Runner registry keyed by `runner_id`, tracking advertised `researchers` so scheduling
@@ -662,8 +662,8 @@ stream, relays run events, stores results, and serves history/get/watch. In-memo
    control plane — decide and record); scrub all logged payloads.
 6. Webhook receiver stub: the ingress is the natural place to receive the **managed
    stopgap's** completion webhooks (D3); stub it here, activate it in Wave 7 when the
-   service is publicly reachable. Research **workers complete over the `stirrup.harness.v1`
-   stream**, not webhooks, so the webhook path is Gemini-DR-only and updates just
+   service is publicly reachable. Research **workers complete in-process** and report over
+   the control-plane stream, not webhooks, so the webhook path is Gemini-DR-only and updates just
    `INTERACTIONS-API.md` (Gemini's `interaction.completed`/`failed`/`cancelled`/
    `requires_action` events, the `webhook-timestamp` replay-protection header, static vs
    dynamic configuration) — so Wave 7 implements against a normative reference, not memory.
@@ -815,7 +815,7 @@ stopgap), the durability substrate choice, and rainbow mechanics — each isolat
 **Not on the v2 critical path.** Pursued only after the eval gate (SP-F) is met *and* scale /
 multi-model demand justify it (D9). This is where the Stirrup-remote material the prior plan put
 on the critical path now lives, re-cast for the **embedded-engine** consumption model
-(`docs/V2-RESEARCH-AGENT.md` §0a; the engine refactor proposed to Stirrup in
+(`docs/V2-AMENDS.md` amend 8; the engine refactor proposed to Stirrup in
 `docs/STIRRUP-ENGINE-PROPOSAL.md`).
 
 **What it adds.**
@@ -830,7 +830,7 @@ on the critical path now lives, re-cast for the **embedded-engine** consumption 
 - **(Only if hard per-worker process isolation is ever required) remote Stirrup workers** over
   `stirrup.harness.v1` (SP-B): the second Buf target (D8), the runner as `HarnessService` server
   + K8s-Job provisioning + RBAC + endpoint auth + the pinned `ghcr.io/rxbynerd/stirrup:<tag>`
-  image. This is the design preserved in `docs/V2-RESEARCH-AGENT.md` §2–§11 / §5.4; it is the
+  image. This is the design preserved in `docs/STIRRUP-ENGINE-PROPOSAL.md` and `docs/V2-RESEARCH-AGENT.md` §9; it is the
   fallback, not the default, because read-only web research needs no sandbox isolation.
 - **Provider-built-in `web_search`** as an alternative to the MCP search loop, where a provider
   offers it (SP-A's parallel track), via the engine.
@@ -843,7 +843,7 @@ Waves 1–7.
 
 - **Security review** each wave touching the wire, auth, or the model/search boundary:
   research-only enforcement (the worker is research-only by construction — two read-only tools,
-  no executor/write/shell — `V2-RESEARCH-AGENT.md` §5.3), control-plane address/identity
+  no executor/write/shell — `V2-RESEARCH-AGENT.md` §1), control-plane address/identity
   validation, TLS, redirect-policy parity with v1 (bearer/api-key must not leak across redirects,
   on the gemini stopgap, the model adapter, and the search-MCP client), webhook signature
   verification (Wave 7, managed stopgap), scrubbing across ConnectRPC payloads and traces, tenant
