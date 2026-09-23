@@ -229,9 +229,8 @@ func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
 	}
 }
 
-// TestWorkerKnowledgeKeyResolution: a knowledge key ref is resolved only when
-// set, its failure stops the run before any request, and a fully specified
-// provider reaches adapter construction.
+// TestWorkerKnowledgeKeyResolution: an unresolvable knowledge key ref stops
+// the run before any request and never leaks a resolved value.
 func TestWorkerKnowledgeKeyResolution(t *testing.T) {
 	searchSrv := search.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -250,16 +249,6 @@ func TestWorkerKnowledgeKeyResolution(t *testing.T) {
 			"--fleet-knowledge-endpoint", "http://127.0.0.1:1/",
 			"--fleet-knowledge-key-ref", "secret://CHIRON_TEST_UNSET_KB_KEY",
 		}, "CHIRON_TEST_UNSET_KB_KEY"},
-		{"keyless billet", []string{
-			"--fleet-knowledge-provider", "billet",
-			"--fleet-knowledge-endpoint", "http://127.0.0.1:1/",
-		}, "knowledge provider wiring is not linked"},
-		{"alexandria with key", []string{
-			"--fleet-knowledge-provider", "alexandria",
-			"--fleet-knowledge-endpoint", "https://alexandria.example",
-			"--fleet-knowledge-key-ref", "secret://KB_KEY",
-			"--fleet-knowledge-space", "notes",
-		}, "knowledge provider wiring is not linked"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, err := execute(t, workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, tt.args...)...)...)

@@ -3,10 +3,13 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/memory/alexandria"
+	"github.com/rxbynerd/chiron/internal/memory/billet"
 	"github.com/rxbynerd/chiron/internal/secret"
 )
 
@@ -61,16 +64,34 @@ type knowledgeOptions struct {
 	DefaultLimit   int
 }
 
-// errKnowledgeNotLinked is returned for any provider until the adapters are
-// linked into this build.
-var errKnowledgeNotLinked = errors.New("research --agent worker: knowledge provider wiring is not linked in this build")
-
-// newKnowledgeAdapter constructs the adapter for provider.
+// newKnowledgeAdapter constructs the adapter for provider. Billet serves both
+// halves of the seam; Alexandria serves recall only, so its Rememberer is nil
+// and config validation refuses knowledge_remember for it.
 func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recaller, memory.Rememberer, error) {
-	// TODO(knowledge-seam): construct the adapters here:
-	//   billet:     billet.New(billet.Options{Endpoint, APIKey, RequestTimeout}),
-	//               returned as both the Recaller and the Rememberer;
-	//   alexandria: alexandria.New(alexandria.Options{Endpoint, APIKey, RequestTimeout, DefaultLimit}),
-	//               returned as the Recaller with a nil Rememberer.
-	return nil, nil, errKnowledgeNotLinked
+	switch provider {
+	case config.KnowledgeBillet:
+		c, err := billet.New(billet.Options{
+			Endpoint:       opts.Endpoint,
+			APIKey:         opts.APIKey,
+			RequestTimeout: opts.RequestTimeout,
+			DefaultLimit:   opts.DefaultLimit,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, c, nil
+	case config.KnowledgeAlexandria:
+		c, err := alexandria.New(alexandria.Options{
+			Endpoint:       opts.Endpoint,
+			APIKey:         opts.APIKey,
+			RequestTimeout: opts.RequestTimeout,
+			DefaultLimit:   opts.DefaultLimit,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return c, nil, nil
+	default:
+		return nil, nil, fmt.Errorf("research --agent worker: unknown fleet.knowledge_provider %q", provider)
+	}
 }

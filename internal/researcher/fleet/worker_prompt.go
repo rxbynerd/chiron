@@ -249,8 +249,8 @@ func recallResultsMessage(query string, hits []memory.Recalled, maxBytes int) mo
 		list.WriteString("(no results)\n")
 	}
 	for _, h := range hits {
-		if h.Memory.Meta.Labels["degraded"] == "true" {
-			list.WriteString("Note: the knowledge store fell back to lexical search, so these results may be less relevant.\n")
+		if reason := oneLine(h.Memory.Meta.Labels["degraded"]); reason != "" {
+			fmt.Fprintf(&list, "Note: the knowledge store reported degraded retrieval (%s), so these results may be less relevant.\n", defang(reason))
 			break
 		}
 	}

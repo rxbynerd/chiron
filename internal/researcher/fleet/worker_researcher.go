@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -251,7 +250,7 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 		if span != nil {
 			span.SetAttr("remember_error", detail)
 		}
-		slog.Default().Warn("worker: saving the finding to the knowledge store failed",
+		w.deps.logger().Warn("worker: saving the finding to the knowledge store failed",
 			"interaction_id", id, "error", detail)
 		return
 	}
@@ -263,7 +262,7 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 	if span != nil {
 		span.SetAttr("remember_ref", loc)
 	}
-	slog.Default().Info("worker: saved the finding to the knowledge store",
+	w.deps.logger().Info("worker: saved the finding to the knowledge store",
 		"interaction_id", id, "ref", loc)
 }
 

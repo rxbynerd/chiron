@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/memory"
@@ -131,6 +132,9 @@ type WorkerDeps struct {
 	// Remember, when non-nil, saves a bounded summary of a Completed finding
 	// after the loop returns (Worker only). It is independent of Knowledge.
 	Remember memory.Rememberer
+	// Logger receives the save-back outcome. nil discards it; the composition
+	// root binds a scrubbing handler on the command's stderr.
+	Logger *slog.Logger
 	// KnowledgeNamespace is passed to Recall and Remember: Alexandria's space;
 	// informational for Billet.
 	KnowledgeNamespace memory.Namespace
@@ -570,3 +574,11 @@ func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
 // errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
+
+// logger returns the injected logger, or one that discards every record.
+func (d WorkerDeps) logger() *slog.Logger {
+	if d.Logger != nil {
+		return d.Logger
+	}
+	return slog.New(slog.DiscardHandler)
+}

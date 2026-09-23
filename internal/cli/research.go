@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -128,7 +130,7 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
-		res, err := buildWorker(ctx, cfg, deps.Tracer)
+		res, err := buildWorker(ctx, cfg, deps.Tracer, cmd.ErrOrStderr())
 		if err != nil {
 			return err
 		}
@@ -156,7 +158,7 @@ const fetchMaxContentBytes = 1 << 20
 // resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
 // run and each model, search and knowledge call; fetch has its own tighter
 // per-call bound.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer) (*fleet.Worker, error) {
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer) (*fleet.Worker, error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
 		return nil, errors.New("research --agent worker: fleet.model_endpoint is required")
@@ -240,6 +242,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		Remember:           rememberer,
 		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
 		Tracer:             tracer,
+		Logger:             slog.New(secret.NewScrubHandler(slog.NewTextHandler(stderr, nil))),
 		Caps: fleet.Caps{
 			MaxTurns:         fc.MaxTurns,
 			MaxTokens:        fc.MaxTokens,
