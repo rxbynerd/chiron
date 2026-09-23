@@ -9,11 +9,15 @@ import (
 )
 
 // FakeServer is an httptest-backed stand-in for the Chat Completions
-// endpoint, shared by this package's tests and the later worker/lead
-// chunks (docs/V2-RESEARCH-AGENT §8 requires a fake model transport for
-// CI). It scripts one reply per call, records the decoded requests it
-// received, and never touches the real network. Callers own its lifecycle:
-// build it at the call site and defer Close.
+// endpoint, shared by every package that drives a model in tests
+// (docs/V2-RESEARCH-AGENT §8 requires a fake model transport for CI). It
+// scripts one reply per call, records the decoded requests it received, and
+// never touches the real network. Callers own its lifecycle: build it at the
+// call site and defer Close.
+//
+// Like the provider, it rejects a strict structured-output request whose
+// schema fails ValidateStrictSchema with an HTTP 400 invalid_request_error;
+// the rejected call is recorded but does not consume a scripted reply.
 //
 // The zero value is not usable; construct with NewFakeServer. Point a
 // Client at it via Options{Endpoint: fake.URL(), ...}; the Client appends
@@ -138,6 +142,14 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	f.requests = append(f.requests, rec)
 
+	if rf := body.ResponseFormat; rf != nil && rf.Type == "json_schema" && rf.JSONSchema.Strict {
+		if err := checkStrictSchema(rf.JSONSchema.Schema); err != nil {
+			f.mu.Unlock()
+			writeInvalidRequest(w, fmt.Sprintf("Invalid schema for response_format '%s': %s", rf.JSONSchema.Name, err))
+			return
+		}
+	}
+
 	call := f.nextCall
 	f.nextCall++
 	var reply FakeReply
@@ -185,5 +197,27 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			// the test's server log rather than swallowing it.
 			panic(fmt.Sprintf("fake: encoding reply: %v", err))
 		}
+	}
+}
+
+// providerError mirrors the OpenAI error envelope.
+type providerError struct {
+	Error struct {
+		Message string  `json:"message"`
+		Type    string  `json:"type"`
+		Param   string  `json:"param"`
+		Code    *string `json:"code"`
+	} `json:"error"`
+}
+
+func writeInvalidRequest(w http.ResponseWriter, message string) {
+	var body providerError
+	body.Error.Message = message
+	body.Error.Type = "invalid_request_error"
+	body.Error.Param = "response_format"
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		panic(fmt.Sprintf("fake: encoding error reply: %v", err))
 	}
 }

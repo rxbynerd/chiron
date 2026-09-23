@@ -144,7 +144,7 @@ func TestGenerateStructured(t *testing.T) {
 	})
 	defer fake.Close()
 
-	schema := json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","items":{"type":"string"}}},"required":["subtasks"]}`)
+	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"subtasks":{"type":"array","items":{"type":"string"}}},"required":["subtasks"]}`)
 	c := newClient(t, fake.URL())
 	resp, err := c.Generate(context.Background(), Request{
 		Messages:   []Message{{Role: RoleUser, Content: "Decompose: why is the sky blue?"}},
@@ -180,6 +180,135 @@ func TestGenerateStructured(t *testing.T) {
 	}
 	if string(got.Schema) != string(schema) {
 		t.Errorf("schema = %s, want the request schema echoed", got.Schema)
+	}
+}
+
+func TestFakeRejectsNonStrictSchema(t *testing.T) {
+	// A strict request whose schema the provider would refuse fails with the
+	// provider's 400 shape, and the scripted reply stays queued for the next
+	// compliant call.
+	fake := NewFakeServer(FakeReply{Content: `{"answer":"42"}`})
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	_, err := c.Generate(context.Background(), Request{
+		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
+		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"note":{"type":"string"}},"required":["answer"]}`),
+		SchemaName: "reply",
+	})
+	if err == nil {
+		t.Fatal("Generate with a non-strict schema should fail against the fake")
+	}
+	for _, want := range []string{"HTTP 400", "invalid_request_error", "Invalid schema for response_format 'reply'", `property \"note\" must be listed in required`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to contain %q", err, want)
+		}
+	}
+	if fake.CallCount() != 1 {
+		t.Errorf("call count = %d, want 1", fake.CallCount())
+	}
+
+	resp, err := c.Generate(context.Background(), Request{
+		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
+		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"}},"required":["answer"]}`),
+		SchemaName: "reply",
+	})
+	if err != nil {
+		t.Fatalf("Generate with a strict schema: %v", err)
+	}
+	if resp.Content != `{"answer":"42"}` {
+		t.Errorf("Content = %q, want the scripted reply the rejected call did not consume", resp.Content)
+	}
+}
+
+func TestValidateStrictSchema(t *testing.T) {
+	tests := []struct {
+		name    string
+		schema  string
+		wantErr string
+	}{
+		{
+			name: "compliant nested schema",
+			schema: `{
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"action": {"type": "string", "enum": ["search", "final"]},
+					"query": {"type": ["string", "null"]},
+					"citations": {
+						"type": ["array", "null"],
+						"items": {
+							"type": "object",
+							"additionalProperties": false,
+							"properties": {"url": {"type": "string"}, "title": {"type": ["string", "null"]}},
+							"required": ["url", "title"]
+						}
+					},
+					"meta": {"anyOf": [{"$ref": "#/$defs/meta"}, {"type": "null"}]}
+				},
+				"required": ["action", "query", "citations", "meta"],
+				"$defs": {
+					"meta": {"type": "object", "additionalProperties": false, "properties": {"k": {"type": "string"}}, "required": ["k"]}
+				}
+			}`,
+		},
+		{
+			name:    "missing required at the root",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"action":{"type":"string"},"query":{"type":"string"}},"required":["action"]}`,
+			wantErr: `strict schema object at the root: property "query" must be listed in required`,
+		},
+		{
+			name:    "required absent entirely",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"action":{"type":"string"}}}`,
+			wantErr: `property "action" must be listed in required`,
+		},
+		{
+			name:    "missing additionalProperties on a nested object",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"citations":{"type":"array","items":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},"required":["citations"]}`,
+			wantErr: "strict schema object at /properties/citations/items: additionalProperties must be false",
+		},
+		{
+			name:    "additionalProperties true",
+			schema:  `{"type":"object","additionalProperties":true,"properties":{},"required":[]}`,
+			wantErr: "at the root: additionalProperties must be false",
+		},
+		{
+			name:    "open object inside anyOf",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"x":{"anyOf":[{"type":"object","properties":{}},{"type":"null"}]}},"required":["x"]}`,
+			wantErr: "at /properties/x/anyOf/0: additionalProperties must be false",
+		},
+		{
+			name:    "non-compliant definition",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{},"required":[],"$defs":{"a/b":{"type":"object","additionalProperties":false,"properties":{"k":{"type":"string"}}}}}`,
+			wantErr: `at /$defs/a~1b: property "k" must be listed in required`,
+		},
+		{
+			name:    "not JSON",
+			schema:  `{"type":`,
+			wantErr: "not valid JSON",
+		},
+		{
+			name:    "not an object",
+			schema:  `["object"]`,
+			wantErr: "must be a JSON object",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateStrictSchema(json.RawMessage(tt.schema))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateStrictSchema = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateStrictSchema = nil, want an error containing %q", tt.wantErr)
+			}
+			if !strings.HasPrefix(err.Error(), "model: ") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("ValidateStrictSchema = %q, want a model: error containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
