@@ -227,14 +227,26 @@ func (f *FakeServer) writeToolResult(w http.ResponseWriter, id *int) {
 	resp := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(id), toolResult)
 
 	if f.useSSE {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		// One SSE frame carrying the JSON-RPC response on a data: line.
-		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", resp)
+		writeSSE(w, "event: message\ndata: "+resp+"\n\n")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(resp))
+}
+
+// writeSSE writes frames as a text/event-stream reply and flushes, so the
+// client's scanner never waits on buffered bytes even if the handler goes on
+// to hold the stream open. It is the fake's counterpart of the sseWrite test
+// helper convention in AGENTS.md.
+func writeSSE(w http.ResponseWriter, frames ...string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	for _, frame := range frames {
+		_, _ = fmt.Fprint(w, frame)
+	}
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 // buildResultsJSON serialises the scripted results into the assumed tool

@@ -378,6 +378,94 @@ func TestSearchOverSSE(t *testing.T) {
 	}
 }
 
+func TestSearchSSEMultiLineData(t *testing.T) {
+	// One JSON-RPC message split across several data: lines is rejoined with
+	// newlines before decoding; event: and id: fields are ignored.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, answered := answerHandshake(t, w, r); answered {
+			return
+		}
+		sseWrite(t, w,
+			"event: message\n"+
+				"id: evt-1\n"+
+				`data: {"jsonrpc":"2.0",`+"\n"+
+				`data: "id":2,`+"\n"+
+				`data: "result":{"content":[{"type":"text","text":"{\"results\":[{\"title\":\"t\",\"url\":\"https://e.com/multi\",\"snippet\":\"s\"}]}"}]}}`+"\n"+
+				"\n",
+		)
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	got, err := c.Search(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Search over multi-line SSE data: %v", err)
+	}
+	if len(got) != 1 || got[0].URL != "https://e.com/multi" {
+		t.Fatalf("results = %+v, want the one result from the rejoined message", got)
+	}
+}
+
+func TestSearchSSESkipsServerMessagesBeforeReply(t *testing.T) {
+	// A keep-alive comment, a notification and a server request with its own
+	// id may precede the reply. They are skipped, and the reply is returned
+	// without waiting for the server to end the stream.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, answered := answerHandshake(t, w, r); answered {
+			return
+		}
+		sseWrite(t, w,
+			": keep-alive\n\n",
+			`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"p","progress":1}}`+"\n\n",
+			`data: {"jsonrpc":"2.0","id":"srv-1","method":"ping"}`+"\n\n",
+			`data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"results\":[{\"title\":\"t\",\"url\":\"https://e.com/after\",\"snippet\":\"s\"}]}"}]}}`+"\n\n",
+		)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL)
+	start := time.Now()
+	got, err := c.Search(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Search took %s — it should return on the reply frame, not at end of stream", elapsed)
+	}
+	if len(got) != 1 || got[0].URL != "https://e.com/after" {
+		t.Fatalf("results = %+v, want the reply after the server messages", got)
+	}
+}
+
+func TestSearchSSEStreamBounded(t *testing.T) {
+	// Many frames each under the bound still count against it in aggregate.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, answered := answerHandshake(t, w, r); answered {
+			return
+		}
+		var frames []string
+		for i := range 20 {
+			frames = append(frames, fmt.Sprintf(`data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":%d}}`+"\n\n", i))
+		}
+		frames = append(frames, `data: {"jsonrpc":"2.0","id":2,"result":{"content":[]}}`+"\n\n")
+		sseWrite(t, w, frames...)
+	}))
+	defer server.Close()
+
+	c := newClient(t, server.URL, func(o *Options) { o.MaxBodyBytes = 512 })
+	_, err := c.Search(context.Background(), "q")
+	if err == nil {
+		t.Fatal("Search should fail when the SSE stream exceeds MaxBodyBytes")
+	}
+	if !strings.Contains(err.Error(), "SSE stream exceeds 512-byte bound") {
+		t.Errorf("error = %v, want the aggregate stream bound", err)
+	}
+}
+
 func TestSearchStructuredContent(t *testing.T) {
 	// The results document may arrive as structuredContent rather than inside
 	// a text block; the client prefers it.
@@ -453,7 +541,7 @@ func TestSearchToolError(t *testing.T) {
 
 func TestSearchToolCallNotRetried(t *testing.T) {
 	// tools/call may invoke a billable upstream search; it is single-attempt.
-	// A server error on tools/call must not be retried.
+	// A tools/call reply that cannot be decoded must not be retried.
 	fake := NewFakeServer(nil, WithRawToolResult("this is not json"))
 	defer fake.Close()
 
