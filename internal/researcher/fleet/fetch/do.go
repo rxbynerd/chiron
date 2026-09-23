@@ -19,9 +19,10 @@ func (e *HTTPStatusError) Error() string {
 }
 
 // Fetch retrieves rawURL and returns its content, bounded by MaxContentBytes.
-// The call is bounded by RequestTimeout (a tighter caller deadline wins). The
-// URL scheme must be http/https, and the destination host must pass the SSRF
-// guard both before the request and after every redirect.
+// The call, name resolution included, is bounded by RequestTimeout (a tighter
+// caller deadline wins). The URL scheme must be http/https, and the
+// destination must pass the SSRF guard before the request, on every redirect
+// and at every dial.
 //
 // A refused destination wraps ErrRefusedDestination and a non-2xx response
 // wraps an *HTTPStatusError; any other failure is a plain error. Fetch never
@@ -36,12 +37,13 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error) {
 	if err := validateScheme(u); err != nil {
 		return Page{}, err
 	}
-	if err := guardHost(u, c.allowLoopback); err != nil {
-		return Page{}, err
-	}
 
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
+
+	if err := c.guard.checkURL(ctx, u); err != nil {
+		return Page{}, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {

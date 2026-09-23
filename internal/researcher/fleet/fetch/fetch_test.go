@@ -4,19 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// publicIP is a documentation address the guard treats as public. Tests only
+// reach it through a testDialer route.
+const publicIP = "203.0.113.10"
 
 // newClient builds a Client, failing the test on a construction error.
 func newClient(t *testing.T, mutate ...func(*Options)) *Client {
 	t.Helper()
 	// Tests reach loopback httptest servers, so AllowLoopback defaults true
-	// here; the SSRF-refusal tests flip it off explicitly.
-	opts := Options{AllowLoopback: true}
+	// here; the SSRF-refusal tests flip it off explicitly. The default
+	// resolver answers nothing, so no test reaches real DNS.
+	opts := Options{AllowLoopback: true, Resolver: &fakeResolver{}}
 	for _, m := range mutate {
 		m(&opts)
 	}
@@ -25,6 +35,88 @@ func newClient(t *testing.T, mutate ...func(*Options)) *Client {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+// fakeResolver answers lookups from script without touching DNS. Each lookup
+// of a host consumes its next answer, the last one repeating; a host with no
+// script is not found.
+type fakeResolver struct {
+	mu      sync.Mutex
+	script  map[string][][]string
+	lookups int
+}
+
+func (r *fakeResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups++
+	answers := r.script[host]
+	if len(answers) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	answer := answers[0]
+	if len(answers) > 1 {
+		r.script[host] = answers[1:]
+	}
+	addrs := make([]net.IPAddr, 0, len(answer))
+	for _, s := range answer {
+		addrs = append(addrs, net.IPAddr{IP: net.ParseIP(s)})
+	}
+	return addrs, nil
+}
+
+func (r *fakeResolver) lookupCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lookups
+}
+
+// resolverFunc adapts a function to the Resolver interface.
+type resolverFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
+
+func (f resolverFunc) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return f(ctx, host)
+}
+
+// testDialer is a Transport.DialContext that records every address it is
+// asked to dial. An address in route connects to its loopback target, any
+// other loopback address connects directly, and anything else is refused, so
+// no test reaches the real network.
+type testDialer struct {
+	route map[string]string
+	mu    sync.Mutex
+	addrs []string
+}
+
+func (d *testDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	d.addrs = append(d.addrs, addr)
+	d.mu.Unlock()
+
+	target, ok := d.route[addr]
+	if !ok {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if ip, err := netip.ParseAddr(host); err != nil || !ip.IsLoopback() {
+			return nil, fmt.Errorf("test dialer: refusing non-loopback address %s", addr)
+		}
+		target = addr
+	}
+	var nd net.Dialer
+	return nd.DialContext(ctx, network, target)
+}
+
+func (d *testDialer) dialed() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.addrs)
+}
+
+// client returns an *http.Client whose transport dials through d.
+func (d *testDialer) client() *http.Client {
+	return &http.Client{Transport: &http.Transport{DialContext: d.DialContext}}
 }
 
 func TestFetchHappyPath(t *testing.T) {
@@ -69,8 +161,7 @@ func TestFetchLoopbackRefusedWithoutAllow(t *testing.T) {
 }
 
 func TestFetchPrivateAddressRefused(t *testing.T) {
-	// Literal private/link-local/unspecified addresses are refused by the
-	// guard directly (no DNS needed), so these do not touch the network.
+	// Literal internal addresses are refused without DNS and without a dial.
 	tests := []struct {
 		name string
 		url  string
@@ -91,12 +182,19 @@ func TestFetchPrivateAddressRefused(t *testing.T) {
 		{"6to4 metadata", "http://[2002:a9fe:a9fe::1]/x"},
 		{"zoned link-local", "http://[fe80::1%25eth0]/x"},
 	}
-	c := newClient(t, func(o *Options) { o.AllowLoopback = false })
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dialer := &testDialer{}
+			c := newClient(t, func(o *Options) {
+				o.AllowLoopback = false
+				o.HTTPClient = dialer.client()
+			})
 			_, err := c.Fetch(context.Background(), tt.url)
 			if !errors.Is(err, ErrRefusedDestination) {
 				t.Errorf("Fetch(%q) error = %v, want ErrRefusedDestination", tt.url, err)
+			}
+			if got := dialer.dialed(); len(got) != 0 {
+				t.Errorf("dialled %v, want no connection attempt", got)
 			}
 		})
 	}
@@ -113,12 +211,19 @@ func TestFetchAllowLoopbackDoesNotRelaxPrivate(t *testing.T) {
 		{"rfc1918 still refused", "http://10.0.0.1/x"},
 		{"link-local metadata still refused", "http://169.254.169.254/latest/meta-data"},
 	}
-	c := newClient(t, func(o *Options) { o.AllowLoopback = true })
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dialer := &testDialer{}
+			c := newClient(t, func(o *Options) {
+				o.AllowLoopback = true
+				o.HTTPClient = dialer.client()
+			})
 			_, err := c.Fetch(context.Background(), tt.url)
 			if !errors.Is(err, ErrRefusedDestination) {
 				t.Errorf("Fetch(%q) under AllowLoopback error = %v, want ErrRefusedDestination", tt.url, err)
+			}
+			if got := dialer.dialed(); len(got) != 0 {
+				t.Errorf("dialled %v, want no connection attempt", got)
 			}
 		})
 	}
@@ -231,10 +336,14 @@ func TestFetchRedirectToPrivateRefused(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(t) // AllowLoopback true
+	dialer := &testDialer{}
+	c := newClient(t, func(o *Options) { o.HTTPClient = dialer.client() }) // AllowLoopback true
 	_, err := c.Fetch(context.Background(), server.URL)
 	if !errors.Is(err, ErrRefusedDestination) {
 		t.Fatalf("error = %v, want ErrRefusedDestination on the redirect", err)
+	}
+	if got, want := dialer.dialed(), []string{server.Listener.Addr().String()}; !slices.Equal(got, want) {
+		t.Errorf("dialled %v, want only the start server %v", got, want)
 	}
 }
 
@@ -247,7 +356,8 @@ func TestFetchRefusedRedirectNeverLeaksUserinfo(t *testing.T) {
 	defer server.Close()
 
 	withCreds := strings.Replace(server.URL, "http://", "http://user:s3cr3t@", 1)
-	c := newClient(t)
+	dialer := &testDialer{}
+	c := newClient(t, func(o *Options) { o.HTTPClient = dialer.client() })
 	_, err := c.Fetch(context.Background(), withCreds)
 	if !errors.Is(err, ErrRefusedDestination) {
 		t.Fatalf("error = %v, want ErrRefusedDestination on the redirect", err)
@@ -259,12 +369,13 @@ func TestFetchRefusedRedirectNeverLeaksUserinfo(t *testing.T) {
 
 func TestFetchRedirectDepthCapped(t *testing.T) {
 	// An endless redirect loop is stopped by the depth cap rather than
-	// followed forever.
+	// followed forever: the first request plus four followed redirects reach
+	// the server, and the fifth redirect is refused.
 	var server *httptest.Server
-	hops := 0
+	var hops atomic.Int32
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hops++
-		http.Redirect(w, r, server.URL+fmt.Sprintf("/%d", hops), http.StatusFound)
+		n := hops.Add(1)
+		http.Redirect(w, r, server.URL+fmt.Sprintf("/%d", n), http.StatusFound)
 	}))
 	defer server.Close()
 
@@ -273,8 +384,11 @@ func TestFetchRedirectDepthCapped(t *testing.T) {
 	if err == nil {
 		t.Fatal("Fetch should stop an endless redirect chain")
 	}
-	if !strings.Contains(err.Error(), "redirect") {
-		t.Errorf("error = %v, want a redirect-cap error", err)
+	if !strings.Contains(err.Error(), fmt.Sprintf("stopped after %d redirects", maxRedirects)) {
+		t.Errorf("error = %v, want the redirect-cap error", err)
+	}
+	if got := hops.Load(); got != maxRedirects {
+		t.Errorf("server saw %d requests, want %d", got, maxRedirects)
 	}
 }
 

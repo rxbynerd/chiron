@@ -3,32 +3,26 @@
 // search tool (docs/V2-RESEARCH-AGENT §1, §5). It is the second and last
 // read-only network tool a Chiron research worker may use.
 //
-// It is the first Chiron component to fetch arbitrary URLs, so its security
-// posture is deliberate. Unlike the model and search clients — which POST a
-// credential to one configured, validated endpoint — web_fetch dials hosts
-// chosen by an upstream search result, and carries NO Chiron credential. The
-// dominant risk is therefore Server-Side Request Forgery (SSRF, CWE-918): a
-// crafted or compromised search result pointing web_fetch at an internal
-// address. The guard here refuses loopback, private, link-local, CGNAT,
-// multicast, reserved and other special-purpose destinations, including an
-// IPv4 address embedded in an IPv6 one (see isInternal), and re-checks the
-// destination on every redirect so a redirect to an internal host is refused
-// too.
+// Unlike the model and search clients — which POST a credential to one
+// configured, validated endpoint — web_fetch dials hosts chosen by an upstream
+// search result and carries NO Chiron credential, so the dominant risk is
+// Server-Side Request Forgery (SSRF, CWE-918). The guard refuses internal
+// destinations (see isInternal) when the connection is dialled: the transport
+// resolves the host itself, refuses if any address is internal, and connects
+// only to the addresses it checked, so neither DNS rebinding nor a redirect
+// reaches an unchecked address. The transport never uses a proxy. The same
+// check runs before the request and on every redirect to fail fast.
 //
-// HTTP hardening otherwise follows the Gemini adapter (internal/interactions):
-// bounded body reads, a redirect-depth cap, and a per-call timeout that yields
-// to a tighter caller deadline. A body over the bound is truncated-and-marked
-// rather than an error — partial page text is still useful research input
-// (see docs/DECISIONS.md), which is the deliberate difference from the model
-// adapter, where an oversize response is an error.
+// Reads are bounded, redirects are capped, and each call has a timeout that
+// yields to a tighter caller deadline. A body over the bound is
+// truncated-and-marked rather than an error, because partial page text is
+// still useful research input (docs/DECISIONS.md).
 package fetch
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -41,20 +35,22 @@ const (
 	maxRedirects           = 5
 )
 
-// ErrRefusedDestination is wrapped by every error that refuses a URL because
-// its destination is an internal address, whether checked before the request
-// or on a redirect.
-var ErrRefusedDestination = errors.New("fetch: refused destination")
-
 // Options configures a Client.
 type Options struct {
-	// HTTPClient supplies the underlying client. nil builds one. A
-	// caller-supplied client is shallow-copied so the redirect policy can be
-	// set without mutating the caller's client; leave its Timeout zero —
-	// per-call deadlines come from RequestTimeout.
+	// HTTPClient supplies the underlying client. nil builds one on a clone of
+	// http.DefaultTransport. The client is shallow-copied and its Transport,
+	// which must be nil or an *http.Transport without a TLS dialer, is cloned
+	// with the SSRF guard installed and the proxy removed; the caller's values
+	// are not mutated. The transport's DialContext, if set, makes each
+	// connection to a checked address. Leave Timeout zero — per-call
+	// deadlines come from RequestTimeout.
 	HTTPClient *http.Client
-	// RequestTimeout bounds each Fetch call including reading the body.
-	// Default 30s. A caller-supplied context deadline still wins if tighter.
+	// Resolver looks up hostnames for the SSRF guard. nil uses
+	// net.DefaultResolver.
+	Resolver Resolver
+	// RequestTimeout bounds each Fetch call, including name resolution and
+	// reading the body. Default 30s. A caller-supplied context deadline still
+	// wins if tighter.
 	RequestTimeout time.Duration
 	// MaxContentBytes bounds how much of a page body is read. Default 8 MiB.
 	// A source exceeding the bound is truncated and Page.Truncated is set —
@@ -75,33 +71,36 @@ type Options struct {
 // redirect cap.
 type Client struct {
 	httpClient      *http.Client
+	guard           guard
 	requestTimeout  time.Duration
 	maxContentBytes int64
-	allowLoopback   bool
 }
 
-// New builds a Client. There is nothing credential-bearing to validate; the
-// options only tune bounds and the loopback allowance.
+// New builds a Client. It fails only if Options.HTTPClient has a transport
+// the SSRF guard cannot wrap.
 func New(opts Options) (*Client, error) {
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	allowLoopback := opts.AllowLoopback
+	resolver := opts.Resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	g := guard{resolver: resolver, allowLoopback: opts.AllowLoopback}
 
-	// The redirect policy enforces the depth cap and re-checks the SSRF guard
-	// on every hop: a 2xx URL that redirects to an internal address must be
-	// refused too. It is set on a shallow copy so a caller-supplied client is
-	// not mutated.
+	transport, err := guardedTransport(httpClient.Transport, g)
+	if err != nil {
+		return nil, err
+	}
+
 	hc := *httpClient
+	hc.Transport = transport
 	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= maxRedirects {
 			return fmt.Errorf("fetch: stopped after %d redirects", maxRedirects)
 		}
-		if err := guardHost(req.URL, allowLoopback); err != nil {
-			return err
-		}
-		return nil
+		return g.checkURL(req.Context(), req.URL)
 	}
 
 	requestTimeout := opts.RequestTimeout
@@ -115,9 +114,9 @@ func New(opts Options) (*Client, error) {
 
 	return &Client{
 		httpClient:      &hc,
+		guard:           g,
 		requestTimeout:  requestTimeout,
 		maxContentBytes: maxContentBytes,
-		allowLoopback:   allowLoopback,
 	}, nil
 }
 
@@ -143,49 +142,6 @@ func validateScheme(u *url.URL) error {
 	default:
 		return fmt.Errorf("fetch: unsupported URL scheme %q (only http and https)", u.Scheme)
 	}
-}
-
-// guardHost is the SSRF guard: it refuses a destination whose host resolves to
-// an internal address. It resolves the hostname to IPs and rejects if ANY
-// resolved address is internal — refusing on the union is the safe default,
-// since a permissive resolver answer could otherwise smuggle an internal
-// target past the check. allowLoopback narrows what counts as internal
-// (loopback + unspecified become permitted) but never relaxes private or
-// link-local, so a redirect from a loopback test server to an internal
-// production address is still caught.
-//
-// This is a best-effort, resolve-then-check guard. It does NOT pin the
-// checked IP for the actual dial: between this lookup and the connection the
-// name could re-resolve to a different address (DNS rebinding), and a redirect
-// is re-checked here but likewise not pinned. Connection-time IP pinning via a
-// custom DialContext is a deliberate follow-up, recorded in docs/DECISIONS.md,
-// not implemented here.
-func guardHost(u *url.URL, allowLoopback bool) error {
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("fetch: URL has no host")
-	}
-
-	// A literal IP is checked directly; a name is resolved and every answer
-	// checked.
-	if ip, err := netip.ParseAddr(host); err == nil {
-		if isInternal(ip, allowLoopback) {
-			return fmt.Errorf("%w: %s is an internal address", ErrRefusedDestination, host)
-		}
-		return nil
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("fetch: resolving %s: %v", host, err)
-	}
-	for _, ip := range ips {
-		addr, _ := netip.AddrFromSlice(ip)
-		if isInternal(addr, allowLoopback) {
-			return fmt.Errorf("%w: %s resolves to internal address %s", ErrRefusedDestination, host, ip)
-		}
-	}
-	return nil
 }
 
 // sanitizeURL returns u with any userinfo (user:password@) stripped, so the
