@@ -134,7 +134,9 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   scrubber guarantees the API key never transits a span, but the queries
   themselves are visible to whatever endpoint is configured: treat the
   collector address as deployment configuration, not a user-settable
-  knob. In GKE v2, restrict both to operator-supplied Secrets.
+  knob. In GKE v2, restrict both to operator-supplied Secrets. An
+  explicit `--otlp-endpoint` flag or the Langfuse key pair (below) takes
+  precedence over these variables.
 
 ## Security-sensitive configuration (in-process research agents)
 
@@ -175,6 +177,24 @@ credentials.
   rejected for `worker`/`fleet` at validation so a caller never believes a
   cap or feature applied when the loop ignores it. `stream` is accepted
   and ignored.
+
+The `telemetry` config block (`internal/config` `TelemetryConfig`) is
+separate from `fleet` and validated for every agent, not only
+`worker`/`fleet`:
+
+- `telemetry.otlp_endpoint` / `telemetry.langfuse_endpoint` — validated
+  with the same rule as `CHIRON_GEMINI_BASE_URL`. The collector or
+  Langfuse endpoint receives every span, including research queries and
+  the run's spend, so it is deployment configuration, not a user-settable
+  knob. `telemetry.langfuse_endpoint` needs both key refs below; with
+  neither endpoint set, the standard `OTEL_EXPORTER_OTLP_*` variables
+  still apply, but an explicit endpoint here always wins.
+- `telemetry.langfuse_public_key_ref` / `telemetry.langfuse_secret_key_ref`
+  — `secret://` references, required together, literals rejected without
+  being echoed. Resolved once at the composition root and handed to the
+  exporter only, as an `Authorization: Basic` header; nothing else reads
+  them. `internal/secret.Scrub` recognises the `pk-lf-`/`sk-lf-` key
+  shape and Basic credentials on every output path (spans, stderr, logs).
 
 These are config fields, not environment variables — they are per-run
 research configuration, not process-wide test hooks. If a later wave adds

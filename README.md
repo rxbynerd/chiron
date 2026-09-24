@@ -70,6 +70,10 @@ chiron follow-up <interaction-id> --query "..."
 | `--api-key-ref` | `secret://GEMINI_API_KEY` | Never a literal key. |
 | `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; the worker uses `--fleet-ceiling`). |
 | `--timeout <dur>` | `30m` | Wall-clock; hard cap 60m (the agent's own limit). |
+| `--otlp-endpoint <url>` | unset | OTLP/HTTP collector base URL for spans; `/v1/traces` is appended. Absolute `https://`, `http://` loopback only. See "Observability" below. |
+| `--langfuse-endpoint <url>` | Langfuse Cloud once the key refs are set | Langfuse OTLP base URL; same scheme rule. |
+| `--langfuse-public-key-ref` | — | `secret://` reference to the Langfuse public key (never a literal); required with `--langfuse-secret-key-ref`. |
+| `--langfuse-secret-key-ref` | — | `secret://` reference to the Langfuse secret key (never a literal); required with `--langfuse-public-key-ref`. |
 
 All four commands accept the same flag surface; configuration resolves
 as documented defaults → base config (`--config` file or piped stdin) →
@@ -212,6 +216,29 @@ A recalled Billet memory the answer relies on is listed under Sources as
 its title and `billet://memory/<id>` locator, not as a link. Recalls count
 towards the same three-strike tool-failure bound as search and fetch.
 
+### Observability
+
+Spans and per-run metrics can be forwarded to an OTLP collector or to
+Langfuse, on top of the standard `OTEL_EXPORTER_OTLP_ENDPOINT` /
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` variables. An explicit flag always
+wins over the environment, and precedence is otherwise most-specific
+first: the Langfuse key pair, then `--otlp-endpoint`, then the
+`OTEL_EXPORTER_OTLP_*` variables, then the no-op tracer. A run forwards to
+one destination: `--otlp-endpoint` and the Langfuse keys conflict.
+
+```sh
+chiron research --agent worker \
+  --langfuse-public-key-ref secret://LANGFUSE_PUBLIC_KEY \
+  --langfuse-secret-key-ref secret://LANGFUSE_SECRET_KEY \
+  --query "Competitive landscape of 10BASE-T1L PHY vendors"
+```
+
+`--langfuse-public-key-ref` and `--langfuse-secret-key-ref` are required
+together; with both set and no `--langfuse-endpoint`, spans go to Langfuse
+Cloud. Every span carries the research query and the run's spend, so the
+collector or Langfuse project this points at is deployment configuration,
+not a debugging toggle.
+
 ### Exit codes
 
 The research outcome is machine-readable from the exit code alone, so
@@ -248,7 +275,7 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | Variable | Purpose |
 | --- | --- |
 | `GEMINI_API_KEY` | The API key, read via the default `secret://GEMINI_API_KEY` reference. Any `secret://env/NAME` or `secret://file/<absolute path>` reference works instead. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. `--otlp-endpoint` and the `--langfuse-*` flags take precedence over these — see "Observability" above. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
 | `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
 
