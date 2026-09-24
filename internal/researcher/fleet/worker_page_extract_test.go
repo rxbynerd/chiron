@@ -1,6 +1,8 @@
 package fleet
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -457,7 +459,11 @@ func TestExtractAdversarial(t *testing.T) {
 }
 
 func BenchmarkHTMLToText(b *testing.B) {
-	var cases []struct{ name, src string }
+	news, err := os.ReadFile(filepath.Join("testdata", "pages", "news-article.html"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	cases := []struct{ name, src string }{{"news article", string(news)}}
 	for _, p := range adversarialPages() {
 		cases = append(cases, struct{ name, src string }{p.name, p.src})
 	}

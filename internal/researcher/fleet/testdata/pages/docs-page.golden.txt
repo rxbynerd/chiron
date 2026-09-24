@@ -1,0 +1,20 @@
+Configuring retries
+
+The client retries idempotent requests that fail with a connection error or a 503 response. Retries use exponential backoff with full jitter.
+
+Options
+
+max_attempts
+
+The total number of attempts, including the first. Defaults to 3.
+
+base_delay
+
+The initial backoff delay. Defaults to 200 ms.
+
+Example
+
+// Retry up to five times.
+client := widget.New(widget.WithRetries(5))
+
+Non-idempotent requests, such as POST, are never retried automatically.
