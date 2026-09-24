@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"net/url"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -31,16 +33,44 @@ type OTel struct {
 	tr oteltrace.Tracer
 }
 
+// OTelOption configures the OTLP/HTTP exporter NewOTel builds.
+type OTelOption func(*otelConfig)
+
+type otelConfig struct {
+	exporter []otlptracehttp.Option
+}
+
+// WithHeaders sends a copy of h on every export request. Header values
+// may be credentials: they go to the exporter only, never to a log or a
+// span.
+func WithHeaders(h map[string]string) OTelOption {
+	headers := maps.Clone(h)
+	return func(c *otelConfig) {
+		c.exporter = append(c.exporter, otlptracehttp.WithHeaders(headers))
+	}
+}
+
 // NewOTel builds the OTLP/HTTP exporter and returns the tracer plus a
 // shutdown function that flushes pending spans; callers must invoke it
-// before exit or trailing spans are lost. An empty endpointURL defers to
-// the standard OTEL_EXPORTER_OTLP_* environment variables.
-func NewOTel(ctx context.Context, endpointURL string) (*OTel, func(context.Context) error, error) {
-	var opts []otlptracehttp.Option
-	if endpointURL != "" {
-		opts = append(opts, otlptracehttp.WithEndpointURL(endpointURL))
+// before exit or trailing spans are lost. endpointURL is an OTLP base URL
+// with the meaning of OTEL_EXPORTER_OTLP_ENDPOINT: spans are sent to its
+// path plus /v1/traces. An empty endpointURL defers to the standard
+// OTEL_EXPORTER_OTLP_* environment variables.
+func NewOTel(ctx context.Context, endpointURL string, opts ...OTelOption) (*OTel, func(context.Context) error, error) {
+	var cfg otelConfig
+	for _, opt := range opts {
+		opt(&cfg)
 	}
-	exp, err := otlptracehttp.New(ctx, opts...)
+	var exporterOpts []otlptracehttp.Option
+	if endpointURL != "" {
+		traces, err := tracesURL(endpointURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		exporterOpts = append(exporterOpts, otlptracehttp.WithEndpointURL(traces))
+	}
+	exporterOpts = append(exporterOpts, cfg.exporter...)
+	exp, err := otlptracehttp.New(ctx, exporterOpts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("trace: creating OTLP exporter: %w", err)
 	}
@@ -56,6 +86,16 @@ func NewOTel(ctx context.Context, endpointURL string) (*OTel, func(context.Conte
 		sdktrace.WithResource(res),
 	)
 	return &OTel{tr: tp.Tracer(instrumentationName)}, tp.Shutdown, nil
+}
+
+// tracesURL appends the OTLP/HTTP traces path to a base URL. The error
+// never echoes the URL, which may carry userinfo.
+func tracesURL(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return "", errors.New("trace: the OTLP endpoint must be an absolute http(s) URL")
+	}
+	return u.JoinPath("v1", "traces").String(), nil
 }
 
 // StartSpan implements Tracer. Nesting rides on OTel's own context
