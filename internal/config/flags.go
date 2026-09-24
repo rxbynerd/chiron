@@ -16,7 +16,7 @@ import (
 func RegisterFlags(fs *pflag.FlagSet) {
 	d := Default()
 	fs.String("query", "", "research question (alternatively the positional argument)")
-	fs.String("agent", d.Agent, fmt.Sprintf("agent tier: %q or %q", AgentDeepResearch, AgentDeepResearchMax))
+	fs.String("agent", d.Agent, fmt.Sprintf("agent: %q, %q, %q or %q", AgentDeepResearch, AgentDeepResearchMax, AgentWorker, AgentFleet))
 	fs.Bool("plan", false, "collaborative planning: review and refine the plan before spending")
 	fs.Bool("accept-plan", false, "with --plan, approve the first proposed plan without prompting")
 	fs.String("model", "", "follow-up Q&A model (chiron follow-up; adapter default if unset)")
@@ -31,8 +31,27 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.StringP("output", "o", d.Output, fmt.Sprintf("run output: %q, %q or %q", OutputText, OutputJSON, OutputNone))
 	fs.String("out", "", "write the Markdown report to this path instead of stdout")
 	fs.String("api-key-ref", d.APIKeyRef, "secret:// reference to the API key (never a literal)")
-	fs.Float64("budget", 0, "estimated-cost cap in GBP; unset means uncapped")
+	fs.Float64("budget", 0, "estimated-cost cap in GBP for the deep-research tiers; unset means uncapped (worker/fleet: --fleet-ceiling)")
 	fs.Duration("timeout", time.Duration(d.Timeout), fmt.Sprintf("wall-clock timeout (hard cap %s)", MaxTimeout))
+
+	// In-process research knobs (--agent worker/fleet), prefixed fleet- to
+	// stay clear of the deep-research levers they sit beside; defaults come
+	// from Default().Fleet.
+	fs.String("fleet-model-endpoint", "", "standard-model base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-model-name", "", "standard frontier model name (required for worker/fleet)")
+	fs.String("fleet-model-key-ref", "", "secret:// reference to the standard-model key (never a literal)")
+	fs.String("fleet-search-endpoint", "", "web-search MCP base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-search-key-ref", "", "secret:// reference to the search-MCP key (never a literal)")
+	fs.Int("fleet-max-turns", d.Fleet.MaxTurns, "per-worker search->read->synthesise turn cap")
+	fs.Int("fleet-max-tokens", d.Fleet.MaxTokens, "per-worker model token ceiling; 0 means uncapped")
+	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker estimated-cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags)")
+	fs.Float64("fleet-price-input", d.Fleet.PriceInputGBPPerMTok, "model price in GBP per million prompt tokens (for --fleet-ceiling)")
+	fs.Float64("fleet-price-output", d.Fleet.PriceOutputGBPPerMTok, "model price in GBP per million completion tokens (for --fleet-ceiling)")
+	fs.Int("fleet-max-page-bytes", d.Fleet.MaxPageBytes, "bound on one fetched page's text before it enters the transcript")
+	fs.Duration("fleet-worker-timeout", time.Duration(d.Fleet.WorkerTimeout), "per-worker wall-clock timeout")
+	fs.Int("fleet-max-workers", d.Fleet.MaxWorkers, "maximum workers the fleet lead may dispatch")
+	fs.Int("fleet-concurrency", d.Fleet.Concurrency, "maximum workers running at once (<= fleet-max-workers)")
+	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q (%q is reserved and not yet implemented)", MemoryNoop, MemoryInMemory))
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -92,6 +111,37 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 		case "timeout":
 			d, _ := fs.GetDuration(f.Name)
 			cfg.Timeout = Duration(d)
+		case "fleet-model-endpoint":
+			cfg.Fleet.ModelEndpoint = mustString(fs, f.Name)
+		case "fleet-model-name":
+			cfg.Fleet.ModelName = mustString(fs, f.Name)
+		case "fleet-model-key-ref":
+			cfg.Fleet.ModelKeyRef = mustString(fs, f.Name)
+		case "fleet-search-endpoint":
+			cfg.Fleet.SearchEndpoint = mustString(fs, f.Name)
+		case "fleet-search-key-ref":
+			cfg.Fleet.SearchKeyRef = mustString(fs, f.Name)
+		case "fleet-max-turns":
+			cfg.Fleet.MaxTurns, _ = fs.GetInt(f.Name)
+		case "fleet-max-tokens":
+			cfg.Fleet.MaxTokens, _ = fs.GetInt(f.Name)
+		case "fleet-ceiling":
+			cfg.Fleet.CeilingGBP, _ = fs.GetFloat64(f.Name)
+		case "fleet-price-input":
+			cfg.Fleet.PriceInputGBPPerMTok, _ = fs.GetFloat64(f.Name)
+		case "fleet-price-output":
+			cfg.Fleet.PriceOutputGBPPerMTok, _ = fs.GetFloat64(f.Name)
+		case "fleet-max-page-bytes":
+			cfg.Fleet.MaxPageBytes, _ = fs.GetInt(f.Name)
+		case "fleet-worker-timeout":
+			d, _ := fs.GetDuration(f.Name)
+			cfg.Fleet.WorkerTimeout = Duration(d)
+		case "fleet-max-workers":
+			cfg.Fleet.MaxWorkers, _ = fs.GetInt(f.Name)
+		case "fleet-concurrency":
+			cfg.Fleet.Concurrency, _ = fs.GetInt(f.Name)
+		case "fleet-memory":
+			cfg.Fleet.Memory = mustString(fs, f.Name)
 		}
 	})
 

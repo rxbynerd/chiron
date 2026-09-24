@@ -1,11 +1,8 @@
-// Package fleet is the v2 Researcher seam: a stirrup-fleet orchestrator
-// that plans, decomposes, and delegates a research question across
-// parallel Stirrup jobs (internal sources) and Gemini Deep Research
-// workers (external sources), per PROPOSAL.md §6. To the run core it is
-// just another Researcher — the orchestration complexity stays behind
-// Start/Await/Result.
-//
-// v1 declares the seam only: every method returns ErrNotImplemented.
+// Package fleet holds Chiron's own in-process research agents behind the
+// Researcher seam: Worker, a bounded search -> read -> synthesise loop over
+// one standard model with a web-search MCP tool and web_fetch, and Fleet,
+// the placeholder for the lead orchestrator that will fan out many workers
+// (docs/V2-RESEARCH-AGENT.md §6). To the run core both are just Researchers.
 package fleet
 
 import (
@@ -17,13 +14,12 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// ErrNotImplemented is returned by every Fleet method: the stirrup-fleet
-// orchestrator is a v2 binding, not implemented in v1.
-var ErrNotImplemented = errors.New("stirrup-fleet researcher is a v2 seam, not implemented in v1")
+// ErrNotImplemented is returned by every Fleet method: the fleet lead
+// orchestrator is not implemented yet.
+var ErrNotImplemented = errors.New("the fleet researcher is not implemented yet; use --agent worker")
 
-// Fleet is the placeholder stirrup-fleet Researcher. It compiles and
-// satisfies the Researcher interface so v2 can bind it from
-// ResearchConfig without touching the core, but it carries no
+// Fleet is the placeholder fleet Researcher. It satisfies the Researcher
+// interface so the composition root can name it, but carries no
 // orchestrator.
 type Fleet struct{}
 
@@ -32,17 +28,17 @@ var _ researcher.Researcher = Fleet{}
 // New returns the placeholder fleet researcher.
 func New() Fleet { return Fleet{} }
 
-// Start always fails: the fleet orchestrator is a v2 seam.
+// Start always fails: the fleet orchestrator is not implemented.
 func (Fleet) Start(_ context.Context, _ researcher.Task) (string, error) {
 	return "", fmt.Errorf("fleet: start: %w", ErrNotImplemented)
 }
 
-// Await always fails: the fleet orchestrator is a v2 seam.
+// Await always fails: the fleet orchestrator is not implemented.
 func (Fleet) Await(_ context.Context, _ string) error {
 	return fmt.Errorf("fleet: await: %w", ErrNotImplemented)
 }
 
-// Result always fails: the fleet orchestrator is a v2 seam.
+// Result always fails: the fleet orchestrator is not implemented.
 func (Fleet) Result(_ context.Context, _ string) (*types.Interaction, error) {
 	return nil, fmt.Errorf("fleet: result: %w", ErrNotImplemented)
 }

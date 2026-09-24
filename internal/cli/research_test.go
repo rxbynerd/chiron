@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rxbynerd/chiron/internal/researcher/fleet"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -366,6 +369,68 @@ func TestResearchRequiresActionExitCode(t *testing.T) {
 func TestResearchRequiresQuery(t *testing.T) {
 	if _, _, err := execute(t, "research"); err == nil {
 		t.Error("research without a query must fail before any seam is constructed")
+	}
+}
+
+// TestFleetAgentNotImplemented: the fleet orchestrator passes config
+// validation but has no researcher, so the run fails with a clear error at
+// the seam-selection point, before any secret is resolved or request made.
+// It is a usage error, not a research outcome.
+func TestFleetAgentNotImplemented(t *testing.T) {
+	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "-o", "none")
+	if err == nil {
+		t.Fatal("--agent fleet must fail until the researcher exists")
+	}
+	if !errors.Is(err, fleet.ErrNotImplemented) {
+		t.Errorf("err = %v, want fleet.ErrNotImplemented", err)
+	}
+	if !strings.Contains(err.Error(), "--agent worker") {
+		t.Errorf("err = %v, want a pointer to the working agent", err)
+	}
+	if _, ok := errors.AsType[*ExitError](err); ok {
+		t.Errorf("an unimplemented agent is a usage error, not a research outcome: %v", err)
+	}
+}
+
+// TestWorkerAgentIsWired proves --agent worker constructs a real in-process
+// worker researcher at the composition root: the run reaches and completes the
+// worker loop through the unchanged run core. The model searches once and
+// answers citing the search result, so the run needs a loopback model endpoint
+// and a fake search MCP; the report lands on stdout with the worker's front
+// matter. The fuller golden-report assertion lives in the fleet package.
+func TestWorkerAgentIsWired(t *testing.T) {
+	modelSrv := model.NewFakeServer(
+		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
+		model.FakeReply{
+			Content:      `{"action":"final","answer":"# Worker answer\n\nThe sky is blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
+			FinishReason: "stop",
+			Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
+		},
+	)
+	defer modelSrv.Close()
+	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
+	defer searchSrv.Close()
+	t.Setenv("MODEL_KEY", "test-model-key")
+
+	stdout, stderr, err := execute(t,
+		"research", "--query", "why is the sky blue",
+		"--agent", "worker", "-o", "text",
+		"--fleet-model-endpoint", modelSrv.URL(),
+		"--fleet-model-name", "test-model",
+		"--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-search-endpoint", searchSrv.URL(),
+	)
+	if err != nil {
+		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "# Worker answer") {
+		t.Errorf("stdout missing the worker's report body:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "agent: worker") {
+		t.Errorf("stdout missing the worker agent in front matter:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "https://example.org/sky") {
+		t.Errorf("stdout missing the cited source:\n%s", stdout)
 	}
 }
 

@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,9 +28,24 @@ import (
 // Agent tiers (PROPOSAL §3): the max tier is more comprehensive at roughly
 // twice the cost. Mapping tiers to model identifiers is the Gemini
 // adapter's concern, not config's.
+//
+// worker and fleet select Chiron's own in-process external-web research
+// agents (V2-RESEARCH-AGENT §4): worker is a single search -> read ->
+// synthesise loop, fleet is a lead orchestrator over bounded workers. Both
+// draw their knobs from Fleet below; the deep-research tiers ignore it.
 const (
 	AgentDeepResearch    = "deep-research"
 	AgentDeepResearchMax = "deep-research-max"
+	AgentWorker          = "worker"
+	AgentFleet           = "fleet"
+)
+
+// Memory bindings for the in-process research agents (V2-RESEARCH-AGENT §4).
+// noop holds no Chiron-side context; inmemory is reserved for the in-process
+// ContextStore and rejected until that store exists.
+const (
+	MemoryNoop     = "noop"
+	MemoryInMemory = "inmemory"
 )
 
 // Run output modes, mirroring Stirrup's output surface.
@@ -95,9 +112,75 @@ type ResearchConfig struct {
 	BudgetGBP float64 `json:"budget_gbp,omitempty" yaml:"budget_gbp,omitempty"`
 	// Timeout is the wall-clock limit for the run (hard cap MaxTimeout).
 	Timeout Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	// Fleet configures the in-process research agents (worker/fleet). It
+	// is ignored by the deep-research tiers and validated only when Agent
+	// selects worker or fleet, so a deep-research run stays valid with a
+	// zero Fleet.
+	Fleet FleetConfig `json:"fleet,omitzero" yaml:"fleet,omitempty"`
 }
 
-// Default returns the documented defaults (PROPOSAL §4.3).
+// FleetConfig holds the knobs for Chiron's in-process research agents
+// (V2-RESEARCH-AGENT §4): the standard-model and search-MCP endpoints they
+// call, the structural spend caps that bound a run, and the memory binding.
+// Endpoints and key references are validated like CHIRON_GEMINI_BASE_URL —
+// credentials travel to whatever endpoint is set, so an unvalidated override
+// is a key-exfiltration and SSRF channel.
+//
+// Endpoint and key fields are optional at the config layer and required by
+// the composition root when the agent runs; the caps carry documented
+// defaults so a bare `--agent worker` run is already bounded.
+type FleetConfig struct {
+	// ModelEndpoint is the standard-model base URL. Absolute https://,
+	// with http:// permitted for loopback test servers only. Distinct
+	// from ResearchConfig.Model, which is the Gemini follow-up model.
+	ModelEndpoint string `json:"model_endpoint,omitempty" yaml:"model_endpoint,omitempty"`
+	// ModelName selects the standard frontier model the lead and workers
+	// drive. The adapter has no default; the composition root requires it.
+	ModelName string `json:"model_name,omitempty" yaml:"model_name,omitempty"`
+	// ModelKeyRef is a secret:// reference to the standard-model API key —
+	// never a literal.
+	ModelKeyRef string `json:"model_key_ref,omitempty" yaml:"model_key_ref,omitempty"`
+	// SearchEndpoint is the web-search MCP base URL, validated like
+	// ModelEndpoint.
+	SearchEndpoint string `json:"search_endpoint,omitempty" yaml:"search_endpoint,omitempty"`
+	// SearchKeyRef is a secret:// reference to the search-MCP key — never
+	// a literal.
+	SearchKeyRef string `json:"search_key_ref,omitempty" yaml:"search_key_ref,omitempty"`
+	// MaxTurns caps the search -> read -> synthesise turns of one worker.
+	// Positive; the primary runaway-worker guard.
+	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
+	// MaxTokens caps a worker's cumulative model tokens; zero means
+	// uncapped on tokens (the turn and time caps still bound the loop).
+	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
+	// CeilingGBP caps a worker's estimated model spend; zero means
+	// uncapped on cost, mirroring BudgetGBP. The estimate is derived from
+	// the price fields below, so a non-zero ceiling requires them. Token
+	// and GBP ceilings are both kept: tokens bound a loop deterministically
+	// with no price table, GBP expresses the operator's spend intent.
+	CeilingGBP float64 `json:"ceiling_gbp,omitempty" yaml:"ceiling_gbp,omitempty"`
+	// PriceInputGBPPerMTok and PriceOutputGBPPerMTok price a million prompt
+	// and completion tokens of the configured model, in GBP. Zero leaves the
+	// run's estimated cost at zero.
+	PriceInputGBPPerMTok  float64 `json:"price_input_gbp_per_mtok,omitempty" yaml:"price_input_gbp_per_mtok,omitempty"`
+	PriceOutputGBPPerMTok float64 `json:"price_output_gbp_per_mtok,omitempty" yaml:"price_output_gbp_per_mtok,omitempty"`
+	// MaxPageBytes bounds the text of one fetched page, after HTML is
+	// reduced to text, before it enters a worker's transcript. Positive.
+	MaxPageBytes int `json:"max_page_bytes,omitempty" yaml:"max_page_bytes,omitempty"`
+	// WorkerTimeout is the per-worker wall-clock limit. Positive.
+	WorkerTimeout Duration `json:"worker_timeout,omitempty" yaml:"worker_timeout,omitempty"`
+	// MaxWorkers caps how many workers the lead may dispatch in one run.
+	// Positive; only meaningful for the fleet agent.
+	MaxWorkers int `json:"max_workers,omitempty" yaml:"max_workers,omitempty"`
+	// Concurrency caps how many workers run at once. Positive; must not
+	// exceed MaxWorkers.
+	Concurrency int `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
+	// Memory selects the ContextStore binding: noop (inmemory is reserved).
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+}
+
+// Default returns the documented defaults (PROPOSAL §4.3). The Fleet
+// defaults bound an in-process run out of the box; they are inert for the
+// deep-research tiers, which never read them.
 func Default() ResearchConfig {
 	return ResearchConfig{
 		Agent:     AgentDeepResearch,
@@ -105,6 +188,24 @@ func Default() ResearchConfig {
 		Output:    OutputText,
 		APIKeyRef: DefaultAPIKeyRef,
 		Timeout:   Duration(30 * time.Minute),
+		Fleet:     defaultFleet(),
+	}
+}
+
+// defaultFleet returns the documented caps (V2-RESEARCH-AGENT §4): a small
+// per-worker turn budget, a token cap that bounds spend without a price
+// table, a page bound small relative to a model context window, a
+// per-worker timeout well inside the run's own limit, a bounded fan-out,
+// and the no-op memory binding. Endpoints and key references stay empty.
+func defaultFleet() FleetConfig {
+	return FleetConfig{
+		MaxTurns:      8,
+		MaxTokens:     400_000,
+		MaxPageBytes:  64 << 10,
+		WorkerTimeout: Duration(5 * time.Minute),
+		MaxWorkers:    5,
+		Concurrency:   3,
+		Memory:        MemoryNoop,
 	}
 }
 
@@ -144,8 +245,16 @@ func (c ResearchConfig) EncodeJSON(w io.Writer) error {
 func (c ResearchConfig) Validate() error {
 	switch c.Agent {
 	case AgentDeepResearch, AgentDeepResearchMax:
+	case AgentWorker, AgentFleet:
+		if err := c.Fleet.validate(c.Agent); err != nil {
+			return err
+		}
+		if err := c.rejectDeepResearchLevers(); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("agent: %q is not %q or %q", c.Agent, AgentDeepResearch, AgentDeepResearchMax)
+		return fmt.Errorf("agent: %q is not one of %q, %q, %q or %q",
+			c.Agent, AgentDeepResearch, AgentDeepResearchMax, AgentWorker, AgentFleet)
 	}
 	switch c.Output {
 	case OutputText, OutputJSON, OutputNone:
@@ -171,6 +280,161 @@ func (c ResearchConfig) Validate() error {
 		if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
 			return fmt.Errorf("mcp: server %q URL %q must be http(s) — MCP servers are remote endpoints", name, url)
 		}
+	}
+	return nil
+}
+
+// rejectDeepResearchLevers refuses the levers that only the Gemini
+// deep-research adapter honours when an in-process agent is selected, so a
+// spend or planning control is never silently ignored. Stream is exempt: it
+// defaults on and has no spend meaning.
+func (c ResearchConfig) rejectDeepResearchLevers() error {
+	set := []struct {
+		name string
+		on   bool
+		hint string
+	}{
+		{"budget", c.BudgetGBP != 0, "use fleet.ceiling_gbp with the price fields, or fleet.max_tokens"},
+		{"plan", c.Plan, "the in-process agents have no plan phase"},
+		{"accept_plan", c.AcceptPlan, "the in-process agents have no plan phase"},
+		{"model", c.Model != "", "use fleet.model_name"},
+		{"visualise", c.Visualise, "the in-process agents produce no charts"},
+		{"tools", len(c.Tools) > 0, "the in-process agents use fleet.search_endpoint and web_fetch only"},
+		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint"},
+		{"file_search", len(c.FileSearch) > 0, "the in-process agents search the external web only"},
+		{"inputs", len(c.Inputs) > 0, "the in-process agents take no input documents"},
+		{"template", c.Template != "", "the in-process agents do not take an output template"},
+	}
+	for _, lever := range set {
+		if lever.on {
+			return fmt.Errorf("%s: applies to the deep-research tiers only and is not honoured by agent %q; %s", lever.name, c.Agent, lever.hint)
+		}
+	}
+	return nil
+}
+
+// validate checks the in-process research knobs. It runs only when Agent
+// is worker or fleet, so a deep-research run stays valid with a zero
+// FleetConfig. Endpoints and key references are optional here (the
+// composition root requires them); when present they must satisfy the same
+// rules the Gemini base-URL override does. agent gates the fleet-only caps:
+// a single worker has no fan-out, so MaxWorkers/Concurrency are enforced for
+// fleet only.
+func (f FleetConfig) validate(agent string) error {
+	if err := validEndpoint("fleet.model_endpoint", f.ModelEndpoint); err != nil {
+		return err
+	}
+	if err := validEndpoint("fleet.search_endpoint", f.SearchEndpoint); err != nil {
+		return err
+	}
+	if err := validKeyRef("fleet.model_key_ref", f.ModelKeyRef); err != nil {
+		return err
+	}
+	if err := validKeyRef("fleet.search_key_ref", f.SearchKeyRef); err != nil {
+		return err
+	}
+	if f.MaxTurns <= 0 {
+		return fmt.Errorf("fleet.max_turns: %d is not positive — a worker needs at least one turn", f.MaxTurns)
+	}
+	if f.MaxTokens < 0 {
+		return fmt.Errorf("fleet.max_tokens: %d is negative", f.MaxTokens)
+	}
+	if f.CeilingGBP < 0 {
+		return fmt.Errorf("fleet.ceiling_gbp: %v GBP is negative", f.CeilingGBP)
+	}
+	if f.PriceInputGBPPerMTok < 0 || f.PriceOutputGBPPerMTok < 0 {
+		return fmt.Errorf("fleet.price_input_gbp_per_mtok / fleet.price_output_gbp_per_mtok: %v / %v must not be negative",
+			f.PriceInputGBPPerMTok, f.PriceOutputGBPPerMTok)
+	}
+	if f.CeilingGBP > 0 && f.PriceInputGBPPerMTok == 0 && f.PriceOutputGBPPerMTok == 0 {
+		return errors.New("fleet.ceiling_gbp: a cost ceiling needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against")
+	}
+	if f.MaxPageBytes <= 0 {
+		return fmt.Errorf("fleet.max_page_bytes: %d is not positive", f.MaxPageBytes)
+	}
+	if d := time.Duration(f.WorkerTimeout); d <= 0 {
+		return fmt.Errorf("fleet.worker_timeout: %s is not positive", d)
+	}
+	if agent == AgentFleet {
+		if f.MaxWorkers <= 0 {
+			return fmt.Errorf("fleet.max_workers: %d is not positive", f.MaxWorkers)
+		}
+		if f.Concurrency <= 0 {
+			return fmt.Errorf("fleet.concurrency: %d is not positive", f.Concurrency)
+		}
+		if f.Concurrency > f.MaxWorkers {
+			return fmt.Errorf("fleet.concurrency: %d exceeds fleet.max_workers %d", f.Concurrency, f.MaxWorkers)
+		}
+	}
+	switch f.Memory {
+	case MemoryNoop:
+	case MemoryInMemory:
+		return fmt.Errorf("fleet.memory: %q is not implemented yet; use %q", f.Memory, MemoryNoop)
+	default:
+		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
+	}
+	return nil
+}
+
+// validEndpoint admits an unset endpoint (a later wave requires it) and,
+// when set, applies the CHIRON_GEMINI_BASE_URL rule: an absolute https://
+// URL, with http:// permitted for loopback hosts only. Credentials are
+// sent to whatever endpoint is configured, so a cleartext or internal
+// override would be a key-exfiltration and SSRF channel (CWE-918,
+// CWE-319). The message never echoes a credential — only the endpoint.
+func validEndpoint(field, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
+		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
+	}
+	return nil
+}
+
+// describeEndpoint names an endpoint in an error without echoing the raw
+// value, which may embed a credential in its userinfo.
+func describeEndpoint(u *url.URL) string {
+	if u == nil {
+		return "an unparseable URL"
+	}
+	return fmt.Sprintf("scheme %q host %q", u.Scheme, u.Host)
+}
+
+// allowedEndpointScheme admits https anywhere and http on loopback only —
+// the same rule the Gemini base-URL override enforces in internal/cli,
+// kept in step with it. It cannot import that copy without a cycle
+// (internal/cli imports internal/config), so the rule is mirrored here.
+func allowedEndpointScheme(u *url.URL) bool {
+	switch u.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := u.Hostname()
+		if host == "localhost" {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	default:
+		return false
+	}
+}
+
+// validKeyRef admits an unset reference and, when set, requires the
+// secret:// form — literal keys never live in config. The message never
+// echoes the value, so a mistakenly pasted literal cannot leak through a
+// validation error.
+func validKeyRef(field, ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if !strings.HasPrefix(ref, "secret://") {
+		return fmt.Errorf("%s: is not a secret:// reference — literal keys never live in config", field)
 	}
 	return nil
 }

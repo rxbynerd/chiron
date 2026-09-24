@@ -571,3 +571,585 @@ Remediation makes the lint contract explicit instead of inherited:
 Peppering the 28 sites with `_ =` assignments was rejected — it adds
 noise at call sites the Go ecosystem conventionally leaves bare, and
 the next linter default change would simply produce a different batch.
+
+## 2026-07-01 — Config surface for the in-process research agents (worker/fleet)
+
+V2-RESEARCH-AGENT §4 extends `ResearchConfig.Agent` with two Chiron-owned
+in-process agents beside the Gemini Deep Research stopgap: `worker` (a
+single search → read → synthesise loop) and `fleet` (a lead orchestrator
+over bounded workers). This chunk adds the config and CLI surface only; the
+researchers themselves are wired in a later chunk, so the composition root
+recognises the two values and returns a clear typed "not yet wired" error
+rather than a nil researcher or a silent Gemini fallback. No new dependency
+is introduced.
+
+The Wave 3/4 knobs live in a nested `Fleet FleetConfig` block rather than
+being flattened onto `ResearchConfig`, so the deep-research paths ignore
+them wholesale and a zero `Fleet` never invalidates a deep-research run.
+`Fleet.validate` runs only when `Agent` is `worker`/`fleet`. Fields:
+
+- Standard model: `ModelEndpoint` (URL), `ModelName`, `ModelKeyRef`
+  (`secret://`). `ModelName` is deliberately distinct from the pre-existing
+  `ResearchConfig.Model`, which selects the Gemini *follow-up* model
+  (docs/INTERACTIONS-API.md §3) — conflating them would couple two
+  unrelated model choices.
+- Search MCP: `SearchEndpoint` (URL), `SearchKeyRef` (`secret://`).
+- Worker caps: `MaxTurns` (int, positive — the primary runaway guard),
+  `MaxTokens` (int) and `CeilingGBP` (float) as the spend ceiling,
+  `WorkerTimeout` (the config `Duration`).
+- Fleet caps: `MaxWorkers` and `Concurrency` (both positive; concurrency
+  must not exceed max-workers), enforced for `fleet` only — a lone worker
+  has no fan-out to bound.
+- `Memory`: `noop` | `inmemory` (default `noop`); `paddock-embedded` waits
+  for Wave 6.
+
+Both a token ceiling *and* a GBP ceiling are kept rather than picking one.
+`MaxTokens` bounds a single worker loop deterministically in tests with no
+price table (the CI fakes have no cost), while `CeilingGBP` expresses the
+operator's spend intent in the same GBP unit and zero-means-uncapped
+semantics as the existing `BudgetGBP`. Both default to zero (uncapped on
+that dimension); the turn and time caps still bound the loop, so a bare
+`--agent worker` run is never unbounded. Defaults: `MaxTurns` 8,
+`WorkerTimeout` 5m, `MaxWorkers` 5, `Concurrency` 3, `Memory` noop.
+
+Endpoint overrides are validated with the exact `CHIRON_GEMINI_BASE_URL`
+rule (C1-SEC-1): an absolute `https://` URL, `http://` admitted for
+loopback hosts only. Credentials travel to whatever endpoint is
+configured, so an unvalidated override is a key-exfiltration and SSRF
+channel (CWE-918, CWE-319). The scheme check is mirrored in
+`internal/config` rather than shared with the `internal/cli` copy, because
+`internal/cli` imports `internal/config` and the reverse import would
+cycle; both are kept in step by comment. Key references, when set, must be
+`secret://` and the "literal key" error never echoes the value, matching
+the `api_key_ref` rule. Endpoint and key fields are optional at the config
+layer (a later wave resolves and requires them); the caps are validated
+eagerly.
+
+Wave 3 prefers config fields to new environment variables for the model
+and search overrides — the endpoints are per-run research configuration,
+not process-wide test hooks like `CHIRON_GEMINI_BASE_URL`. No new
+security-sensitive env var is added; `AGENTS.md` records the `Fleet`
+endpoint/key fields as security-sensitive configuration on the same
+rationale (credentials are sent to the configured endpoint).
+
+## 2026-07-01 — Standard-model adapter: OpenAI-compatible Chat Completions
+
+Wave 3 needs a model substrate for the in-process research lead and workers
+(docs/V2-RESEARCH-AGENT §5). `internal/researcher/fleet/model` is a small,
+hand-rolled `net/http` client for one standard frontier model. No vendor AI
+SDK; standard library `net/http` + `encoding/json` only. No new dependency.
+
+**Wire choice: minimal OpenAI-compatible Chat Completions, not a full
+Responses adapter.** The adapter targets the bare `POST /chat/completions`
+request/response: a `model`, a `messages` array of `{role, content}`, an
+optional `max_tokens`, and an optional `response_format` for structured
+output; the reply is read from `choices[0].message.content`,
+`choices[0].finish_reason`, and `usage`. This satisfies the "one standard
+frontier model" deliverable while staying inside the V2-RESEARCH-AGENT
+non-negotiable "no full OpenAI Responses adapter in Chiron": the Responses
+API's item/output/tool-call surface, streaming event taxonomy, and
+stateful conversation objects are all absent. All wire structs are
+unexported and internal to the package; callers see only `Request`,
+`Response`, `Usage`, `Message`/`Role`, and `Generate`. Adding provider
+surface beyond what the lead/worker need would re-open this decision.
+
+**Base-URL/path convention.** `Options.Endpoint` is a base URL (e.g.
+`https://api.openai.com/v1`); the client appends `/chat/completions`. This
+mirrors the Gemini adapter's `BaseURL` treatment and lets tests point at an
+`httptest.Server` root. Auth is `Authorization: Bearer <key>` header only —
+never a URL, query, log, error, or trace. `Options.APIKey` is the
+already-resolved literal value; this adapter never dereferences `secret://`
+(resolution stays at the CLI composition root), and it does not import
+`internal/secret` for resolution — only `secret.Scrub` for diagnostics.
+
+**Structured output is provider-native, via a `Request.JSONSchema` field.**
+Setting it (with `SchemaName`) emits `response_format: {type: json_schema,
+json_schema: {name, schema, strict: true}}`; `Response.Content` is then the
+JSON string the model returns, which the caller parses. A single `Generate`
+method covers both text and structured paths so the hardening lives in one
+place; the lead's decompose/cite calls set the field, worker
+reasoning/synthesis calls leave it nil.
+
+**No auto-retry of the paid POST.** An ambiguous 5xx may already have billed
+a model turn, so `Generate` makes exactly one attempt — the same reasoning
+the Gemini adapter applies to `POST /interactions`. This adapter only POSTs,
+so there is no retry path at all (contrast the idempotent GETs in
+`internal/interactions`, which do retry). A test asserts request count == 1
+on a 5xx.
+
+**Duplicated hardening is accepted pending a shared helper.** Three pieces
+of security logic are reimplemented here rather than shared:
+`allowedEndpointScheme` (absolute `https://`, `http://` loopback only) is
+copied from `internal/config` / `internal/cli` — the C3A precedent for the
+endpoint validator — because this seam cannot import the CLI/config layer
+without inverting the dependency; and `refuseCrossHostRedirects` +
+`readBounded` are reimplemented from `internal/interactions`, where they are
+unexported. Config already validates the endpoint, but the adapter
+re-validates in `New` because it is a reusable seam that must not trust its
+caller to have checked. Extracting a shared `internal/httpx` (or similar)
+helper for redirect policy, bounded reads, and the loopback scheme rule is
+deferred; when a third consumer lands it should be revisited.
+
+**Credential-scrub belt-and-braces.** The key is only ever in the
+`Authorization` header, so Chiron never puts it in a request body or URL.
+But a provider *error body* (a 401 in particular) can echo the submitted
+key back, and `secret.Scrub`'s high-entropy backstop is heuristic — an
+`sk-`-style key with structured segments can fall below its entropy bar. So
+diagnostics are scrubbed by exact match against the client's own key first,
+then through `secret.Scrub` for any other credential shape. A test feeds a
+401 body containing the key and asserts it is absent from the returned
+error.
+
+**Test fake shipped as exported package code, not a `_test.go` helper.**
+`FakeServer` (an `httptest.Server`-backed fake with scripted replies and
+request recording) lives in `fake.go` — non-test build — so the later
+worker and lead chunks can reuse one fake model transport for CI
+(docs/V2-RESEARCH-AGENT §8 requires a shared fake). The cost is that
+`net/http/httptest` becomes an import of the package's normal build; this is
+the deliberate trade for cross-chunk reuse of a single scripted transport,
+and the package is a test-support-heavy adapter. Callers own the fake's
+lifecycle (build at the call site, `defer Close`).
+
+## 2026-07-01 — Search MCP client and its assumed tool-result shape
+
+Wave 3 needs the first of the worker's two read-only network tools
+(docs/V2-RESEARCH-AGENT §5): `internal/researcher/fleet/search`, a
+hand-rolled `net/http` client for a web-search tool exposed over MCP
+(JSON-RPC 2.0 over "Streamable HTTP"). No vendor SDK; standard library
+`net/http` + `encoding/json` + `bufio` (for the SSE path) only. No new
+dependency.
+
+**Minimal flow, not a general MCP client.** The client implements only
+`initialize` → `notifications/initialized` → `tools/call` for one configured
+search tool. It captures any `Mcp-Session-Id` from the initialize response
+and echoes it on the following requests. There is no resources/prompts/
+sampling surface, no server-initiated request handling, and no session
+resumption beyond echoing the id — adding any of that would re-open this
+decision. `initialize`/`initialized`/`tools/call` are each single-attempt:
+`tools/call` may drive a billable upstream search, so it is not auto-retried
+(the same reasoning the model adapter applies to its paid POST); the cheap
+handshake calls are not retried either, keeping the flow's cost ceiling
+obvious.
+
+**Two reply framings, both bounded.** A Streamable-HTTP `tools/call` POST may
+return `application/json` (one JSON-RPC message) or `text/event-stream` (SSE
+frames carrying JSON-RPC messages). Both are handled: the JSON path is the
+common case; the SSE path is read with a minimally reimplemented reader that
+mirrors the line-oriented scan / `data:` accumulation / blank-line dispatch
+discipline of `internal/interactions.Stream` but only extracts the single
+response frame (this transport needs one reply, not a reconnecting feed).
+Every read — JSON body and SSE aggregate — is bounded by `MaxBodyBytes`; an
+oversize reply is an error, not a silent truncation (contrast the fetch
+client below, where truncation is acceptable).
+
+**Assumed tool-result shape.** The search tool's `tools/call` result is
+assumed to carry a JSON document shaped
+`{"results":[{"title","url","snippet"}, ...]}`, either as `structuredContent`
+or serialised inside a `text` content block. The client prefers
+`structuredContent`, then scans text blocks. **Graceful degradation:** if
+neither carries a recognised results document, the first non-empty text
+content block is surfaced as a single `Result{Snippet: ...}` rather than
+erroring, so a differently-shaped-but-useful reply still feeds the worker
+something. An empty `results` array is treated as a valid zero-hit success
+(distinguished from "no results key" so arbitrary JSON is not mistaken for a
+zero-hit reply); `isError: true` on the tool result is surfaced as an error.
+Downstream (worker/lead) code must respect this shape and this
+degrade-don't-error posture.
+
+**Security mirrors the sibling adapters.** The endpoint is validated in `New`
+(absolute `https://`, `http://` loopback only) defensively even though config
+validates it too, because the seam must not trust its caller; the search key
+travels only in the `Authorization: Bearer` header and is scrubbed from every
+diagnostic by exact match plus `secret.Scrub`; cross-host redirects carrying
+the credential are refused. `allowedEndpointScheme`, `refuseCrossHostRedirects`
+and `readBounded` are reimplemented here, the same accepted duplication noted
+for the model adapter pending a shared `internal/httpx` helper.
+
+**Fake shipped in `fake.go`, not `_test.go`.** As with the model adapter, an
+`httptest.Server`-backed `FakeServer` lives in the non-test build so the later
+worker/lead chunks reuse one fake search MCP for CI (docs/V2-RESEARCH-AGENT
+§8). It scripts results, records requests, exposes total and `tools/call`-only
+call counts, and has options for an assigned session id, an SSE reply framing,
+and a verbatim tool result (for unexpected-shape / oversize cases). Callers
+own its lifecycle.
+
+## 2026-07-01 — web_fetch client: SSRF posture and oversize truncation
+
+Wave 3's second read-only worker tool (docs/V2-RESEARCH-AGENT §5) is
+`internal/researcher/fleet/fetch`, a hand-rolled `net/http` client that
+retrieves the content of an UNTRUSTED external URL discovered by the search
+tool. No vendor SDK; `net/http` only. No new dependency. This is the first
+Chiron component to fetch arbitrary URLs, so the security posture is recorded
+in full.
+
+**SSRF guard (CWE-918).** Unlike the model and search clients — which POST a
+credential to one configured, validated endpoint — web_fetch dials hosts
+chosen by an upstream search result and carries NO Chiron credential, so the
+dominant risk is server-side request forgery. Only `http`/`https` schemes are
+accepted (`file:`, `ftp:`, `data:`, `javascript:`, `gopher:`, ... are
+rejected). Before the request and again after every redirect, the destination
+host is resolved and refused if any resolved address is loopback, private
+(RFC1918 / RFC4193), link-local (unicast or multicast, covering 169.254/16 and
+fe80::/10), or unspecified — refusing on the union of resolved addresses is
+the safe default. Re-checking on redirect is essential: a public URL that
+302s to `http://169.254.169.254/…` must be caught.
+
+**`AllowLoopback` narrows, it does not blanket-disable.** The `AllowLoopback`
+option (default false; tests set it true to reach loopback `httptest` servers)
+exempts *only* loopback and the unspecified address. It deliberately does NOT
+relax the refusal of private or link-local addresses, so a loopback test
+harness — or a loopback page that redirects onward — still cannot reach an
+internal production or cloud-metadata address. Production configuration leaves
+it false.
+
+**Connection-time IP pinning was a deliberate follow-up here (superseded
+2026-09-23).** As first built, the guard was resolve-then-check: it did not
+pin the checked IP for the actual dial, so between the guard's `LookupIP` and
+the connection the name could re-resolve to a different address (DNS
+rebinding), and a redirect target was re-checked but likewise not pinned. The
+2026-09-23 entry "web_fetch: connection-time SSRF pinning and the
+refused-destination error" closes that race with a guarded `DialContext` and
+records the current guard.
+
+**Oversize body is truncated-and-marked, not an error.** `MaxContentBytes`
+bounds the body read. A source exceeding it yields `Page.Content` = the
+bounded prefix with `Page.Truncated = true`, rather than the error the model
+and search adapters return on oversize. The justification: those adapters read
+a structured message whose clipped form is meaningless or a smuggling risk,
+whereas a partial page is still useful research text for the worker to reason
+over, and truncation is flagged so the caller knows it is a prefix. A redirect
+depth cap and a per-call `RequestTimeout` (yielding to a tighter caller
+deadline) bound the call otherwise.
+
+**No credentials, but userinfo is still scrubbed.** web_fetch sends no Chiron
+key. But a fetched URL may carry userinfo (`user:pass@host`); that is stripped
+from the returned `Page.URL` and from every diagnostic (parse-and-restrip,
+with a coarse fallback for an unparseable URL) so an embedded credential
+cannot leak through a log, citation, or error. Reads are idempotent, so a
+caller MAY retry a failed fetch knowingly, but the client itself does not
+retry — keeping one call's cost and time ceiling obvious.
+
+## 2026-07-01 — In-process worker loop: action schema, Wave 4 factoring, cost signal
+
+Wave 3's capstone (docs/V2-RESEARCH-AGENT §5) is the in-process research
+worker: `internal/researcher/fleet/worker.go` plus its prompt
+(`worker_prompt.go`), action schema (`worker_action.go`) and single-query
+Researcher binding (`worker_researcher.go`). It ties the landed model, search
+and web_fetch clients into a bounded search -> read -> reason -> synthesise
+loop and maps the result onto one `types.Interaction` the existing formatter
+renders. No new dependency; no vendor SDK. This entry records the three
+decisions the plan called out.
+
+**The action schema is a closed three-verb vocabulary, enforced twice.** Each
+turn the model is asked for exactly one action via provider-native structured
+output (`model.Request.JSONSchema` + `SchemaName`, i.e. `response_format`
+`json_schema` with `strict: true`). The schema is an object with a required
+`action` discriminator constrained by `enum` to exactly three values, plus the
+per-action fields:
+
+- `search` — `{ "action": "search", "query": string }`
+- `fetch` — `{ "action": "fetch", "url": string }`
+- `final` — `{ "action": "final", "answer": string, "citations": [ { "url": string, "title"?: string } ] }`
+
+`additionalProperties` is false at the top level and on each citation. The
+prompt restates the same contract in prose so a model that only reads
+instructions and one that only obeys the schema agree. This is the ONLY surface
+through which the model can influence the world, and it is enforced twice: the
+provider `enum` bars a fourth kind on the wire, and `parseAction` decodes
+strictly (`DisallowUnknownFields`) and rejects any unrecognised kind — `shell`,
+`write`, `exec`, or anything else — and any known kind missing its required
+field. The loop's dispatch is a closed `switch` with no default execution
+branch, so a side-effecting or malformed action can only be *refused* (the run
+ends `failed` with a scrubbed detail and no side effect), never run. This is
+the research-only-by-construction guarantee (V2-RESEARCH-AGENT §1), pinned by
+`TestRunWorkerRefusesSideEffectingActions`. `fetch` is further scoped to URLs
+that appeared in a prior search result (a per-run allow-list), defence in depth
+over the fetch client's own SSRF guard; a fetch of an unseen URL is a
+recoverable nudge back to the model, not a fatal error.
+
+**`RunWorker(ctx, WorkerDeps, Brief) Finding` is factored for Wave 4 reuse.**
+The plan requires the lead to reuse the worker per brief, so the loop is a
+free function over three small types, not a method on the single-query adapter:
+
+- `Brief{ Objective, OutputFormat, SourceGuidance, Boundaries string }` — one
+  unit of work; blank fields fall back to instructive defaults so a minimal
+  brief still yields a coherent prompt.
+- `Finding{ Text string; Citations []types.Citation; Usage types.Usage; Status types.Status; Detail string }`
+  — the outcome; already-deduplicated citations, accumulated usage, a terminal
+  status and a diagnostic detail.
+- `WorkerDeps{ Model *model.Client; Search *search.Client; Fetch *fetch.Client; Tracer trace.Tracer; Caps Caps }`
+  — the shared collaborators; the lead and every worker share one set of
+  clients, only the `Brief` and `Caps` differ per run.
+- `Caps{ MaxTurns int; MaxTokens int; CeilingGBP float64; Timeout time.Duration }`
+  — the structural caps.
+
+`RunWorker` never returns an error: every outcome — a final answer
+(`completed`), a cap stop (`incomplete`), or a tool/model failure (`failed`) —
+is expressed as a `Finding`, so a caller gets a uniform result to map or store.
+Partial citations gathered before any stop are preserved on all outcomes, so a
+bounded or failed run never discards the sources it found. Wave 4's lead
+dispatches one `RunWorker` per decomposed brief under its own fan-out and
+concurrency caps, stores each `Finding` by reference, and synthesises over the
+references — it does not need the single-query `Worker` type, which is one
+caller of the same loop. The `Worker` Researcher allocates an opaque local
+`wkr_<128-bit-hex>` id, launches `RunWorker` in a goroutine, returns the id
+immediately (§3), and maps the `Finding` onto one `types.Interaction`
+(`agent="worker"`, `tools=[web_search, web_fetch]`, one text output, the
+citations, the accumulated usage). The local id is a handle, not a durable
+resume token: a crashed in-process run cannot be recovered by `chiron get`
+(§3), the accepted limitation until control-plane durability lands.
+
+**The cost signal is tokens and search count; GBP is best-effort.** Usage
+accumulates across turns: input/output tokens summed from each model turn, and
+a search count incremented per `search` action. `EstimatedCostGBP` stays 0
+unless a rate is wired in — there is no price table in CI, and inventing one
+would make the cost cap non-deterministic. The token and search counters are
+therefore the primary spend signal; the token cap (`MaxTokens`) bounds a run
+deterministically without any pricing, and the GBP ceiling (`CeilingGBP`)
+expresses operator intent for when a rate exists (both are honoured: exceeding
+either ends the loop `incomplete`). A single turn's completion is capped to the
+remaining token budget so no one turn overshoots the accumulated cap by a full
+max-completion. Best-effort worker spans and search/token/cost metrics are
+emitted through the shared trace vocabulary (`SpanWorker` added to
+`internal/trace/names.go`; the fixed run-core span names are unchanged) when a
+tracer is injected; a failed emission never fails the run.
+
+**Composition-root wiring.** `--agent worker` is flipped to real construction
+in `internal/cli/research.go`; `--agent fleet` still returns the not-yet-wired
+error (Wave 4). The seam lifecycle is split so a worker run resolves only the
+fleet key references (`fleet.model_key_ref`, and `fleet.search_key_ref` when
+set) at the composition root — never inside the loop — and does not require the
+Gemini key. `fleet.worker_timeout` maps onto both the whole-run cap and each
+per-call timeout (no single call outlasts the worker's budget). The fetch
+client keeps `AllowLoopback` false in production; only tests flip it on to
+reach loopback fakes. The model client mandates an explicit model identifier,
+so `fleet.model_name` is required at the root rather than sent empty.
+
+## 2026-09-23 — web_fetch: connection-time SSRF pinning and the refused-destination error
+
+Remediates the cycle-3 review findings against
+`internal/researcher/fleet/fetch` (C3-SEC-1, C3-SEC-3, C3-SEC-8, C3-CODE-11,
+C3-CODE-12, C3-TEST-4, and the fetch side of C3-CODE-3 and C3-CODE-4). It
+supersedes the "Connection-time IP pinning is a deliberate follow-up"
+paragraph of the 2026-07-01 web_fetch entry. No new dependency.
+
+**The SSRF check runs when the connection is dialled.** The client's
+transport is a clone of `http.DefaultTransport` (or of a caller-supplied
+`*http.Transport`) with a `DialContext` installed by the guard. That dialer
+resolves the host itself through the injectable `Resolver` (`LookupIPAddr`
+with the request context; `net.DefaultResolver` by default), refuses if any
+answer is internal, and passes only the checked `IP:port` to the underlying
+dialer. The address connected to is therefore the address checked: neither a
+TTL-0 rebinding answer nor a redirect hop can reach an unchecked address. The
+request URL is unchanged, so TLS SNI, certificate verification and the `Host`
+header stay on the hostname. The pre-flight check, now inside the
+`RequestTimeout` context, and the `CheckRedirect` re-check, on
+`req.Context()`, remain as fast refusals ahead of the dial; the redirect cap
+stays at 5. Resolving in the guard rather than checking in a
+`net.Dialer.Control` hook keeps the refuse-on-any-answer rule (a `Control`
+hook sees only the address being connected) and gives the DNS branch a seam
+that tests can fake without the network.
+
+**Accepted costs of pinning.**
+
+- Each fetch resolves twice, once before the request and once at the dial;
+  Go keeps no DNS cache.
+- Checked addresses are dialled one after another in resolver order, so the
+  IPv4/IPv6 racing of Happy Eyeballs is lost. A black-holed first address
+  costs the dialer's timeout (bounded by `RequestTimeout`) before the next is
+  tried.
+- The transport never uses a proxy: `HTTP_PROXY`/`HTTPS_PROXY` are ignored
+  and a caller transport's `Proxy` is dropped, because a proxy resolves names
+  with its own resolver, beyond the guard's reach. An operator egress proxy
+  is therefore unsupported; admitting one needs an explicit opt-in that
+  knowingly moves the SSRF boundary to the proxy.
+- A caller-supplied `HTTPClient` must have a nil transport or an
+  `*http.Transport` without `DialTLS`/`DialTLSContext` (the transport sends
+  HTTPS through a custom TLS dialer instead of `DialContext`); `New` returns
+  an error otherwise. The caller's client and transport are cloned, never
+  mutated, and the caller's `DialContext`, if set, makes each connection to a
+  checked address.
+
+**The address classifier is an explicit table.** `isInternal` works on
+`netip.Addr`. Beyond loopback and unspecified it refuses 0.0.0.0/8, 10/8,
+100.64.0.0/10 (CGNAT, including the 100.100.100.200 metadata address),
+169.254/16, 172.16/12, 192.0.0.0/24, 192.168/16, 198.18.0.0/15, 224.0.0.0/4,
+240.0.0.0/4 (including 255.255.255.255), 64:ff9b:1::/48 (local-use NAT64),
+fc00::/7, fe80::/10, fec0::/10 and ff00::/8. IPv4-mapped addresses are
+unmapped, zones are stripped (a zoned address never matches a
+`netip.Prefix`), an unparseable address is refused, and the IPv4 address
+carried by NAT64 (64:ff9b::/96), 6to4 (2002::/16) and IPv4-compatible
+(::/96) addresses is extracted and re-checked without the `AllowLoopback`
+exemption. `AllowLoopback` still exempts only loopback and unspecified. The
+documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
+2001:db8::/32) are not refused, since nothing routes them; the tests use
+203.0.113.10 as a stand-in public address. An allow-only-global rule was
+the alternative; the explicit table is kept because each row can be
+reviewed and is enumerated by `TestIsInternal`.
+
+**Refusals and status failures are typed.** Every SSRF refusal wraps the
+exported sentinel `ErrRefusedDestination`, and a non-2xx response wraps an
+exported `*HTTPStatusError{Status}`, so a caller can tell a refused
+destination (a signal about the search result) from an ordinary fetch
+failure with `errors.Is`/`errors.As`. `client.Do` returns a `*url.Error`
+naming the request URL with its userinfo, so a refusal is re-wrapped from
+the cause beneath that layer, whose message holds only a host and an
+address. Every other transport failure is still flattened and scrubbed of
+userinfo.
+
+**Requests identify Chiron, and the default body bound is 1 MiB.** Requests
+carry `User-Agent: chiron/2 (+https://github.com/rxbynerd/chiron;
+research-only web_fetch)`, overridable with `Options.UserAgent`, and
+`Accept: text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.5`. Go's
+default agent draws 403s from many CDNs, and a site operator can now see who
+is fetching and why. The default `MaxContentBytes` drops from 8 MiB to
+1 MiB. It is a memory backstop, not a transcript budget: a caller that feeds
+pages to a model passes its own, tighter bound.
+
+## 2026-09-23 — Standard-model and search clients: strict-schema fake, max_completion_tokens, redirect downgrade
+
+Cycle-3 review remediation for `internal/researcher/fleet/model` and
+`internal/researcher/fleet/search`. No new dependency.
+
+**`max_completion_tokens` replaces `max_tokens` on the wire.** OpenAI's Chat
+Completions API rejects `max_tokens` for GPT-5-family and o-series models and
+documents `max_completion_tokens` as its replacement; the replacement also
+counts reasoning tokens, which is the bound a per-turn cap needs.
+`Request.MaxTokens` keeps its name, so callers are unaffected; only the wire
+field changes, amending the "optional `max_tokens`" wording of the 2026-07-01
+standard-model entry. An OpenAI-compatible server that predates the field may
+ignore it and leave a turn uncapped server-side; when a worker token cap is
+configured, the worker's cumulative check still stops the loop.
+
+**The fake model enforces strict structured output.** `Generate` always sends
+`strict: true` for a structured request, and the provider rejects a strict
+schema unless every object, at any depth, sets `additionalProperties: false`
+and lists every property in `required` (an optional field becomes a union with
+`null`). The fake accepted any schema, so a non-compliant schema passed CI and
+failed every real run on its first turn. `model.ValidateStrictSchema` now
+encodes those two rules, walking `properties`, `$defs`/`definitions`, `items`,
+`prefixItems`, `anyOf`/`oneOf`/`allOf` and `not`, and `FakeServer` answers a
+failing strict request with HTTP 400 and OpenAI's `invalid_request_error`
+envelope, recording the call without consuming a scripted reply. The
+validator is exported in the non-test build, beside the fake, so a package
+that builds a schema can unit-test it directly. It checks only these two
+rules, not the whole strict-mode subset (supported keywords, nesting limits,
+root type), so a green fake is necessary but not sufficient.
+
+**Redirects: no scheme downgrade.** Both credential-bearing clients refused
+cross-host redirects but followed a same-host `https` to `http` redirect, and
+`net/http` re-sends `Authorization` to any target on the same hostname
+whatever its scheme, so the key would travel in cleartext. The redirect
+policy, renamed from `refuseCrossHostRedirects` to `refuseUnsafeRedirects` in
+both packages, now also refuses a non-`https` target when the original request
+was `https`; same-host `https` redirects and the three-hop cap are unchanged.
+The v1 `internal/interactions.refuseCrossHostRedirects` has the same shape and
+is not changed by this entry. Alongside this, both clients reject an endpoint
+that embeds userinfo, and no endpoint error echoes a value containing `@`.
+
+**MCP transport conformance.** The search client now follows three more rules
+of the 2025-06-18 Streamable-HTTP transport. It sends `MCP-Protocol-Version`
+on every request after `initialize`, using the `protocolVersion` the server
+returned, or the client's own revision when the result names none; a
+different revision is still tolerated rather than refused, since the client
+relies only on the JSON-RPC envelope. It requires a reply's `id` to match the
+request's on both framings, accepting a null id only on an error reply, and
+skips SSE frames that carry a `method` (server requests and notifications,
+which it does not answer). When `initialize` issued an `Mcp-Session-Id`,
+`Search` ends the session with a best-effort `DELETE` before returning,
+whatever the outcome; the `DELETE` runs under the search's own deadline and
+its result is ignored, since a server may answer 405. A session still lives
+for one `Search`: reusing one across searches would save two round trips per
+query but needs re-initialisation on a 404 and concurrency control, and is
+deferred. The tool name and query argument key stay configurable through
+`Options.ToolName` and `Options.QueryArgKey` (defaults `search` and `query`).
+
+## 2026-09-23 — Cycle-3 remediation: worker loop, spend levers, CLI surface and wave order
+
+Cycle 3 (docs/reviews/cycle-3-brief.md) reviewed the v2 research-agent PR
+after it had sat unmerged for two months. The tree was green but the worker
+could not complete a run against a real provider or a real page. This entry
+records the decisions taken while remediating the worker loop, the config
+and CLI surface, and the planning record; the fetch and model/search client
+entries above cover their packages. No new dependency was introduced.
+
+**Cancellation and bounded stops.** `Worker.Start` runs the loop under a
+context detached from the caller's cancellation but not from its deadline,
+and `Await` cancels the run when its own context ends, so no paid turn
+outlives the caller. A stop that lands mid-call (deadline, cancellation, a
+`length` finish reason) ends the run `incomplete`, never `failed`: the
+distinction is what the exit code reports (2 for both, with the status in
+the front matter), and a cap stop is a bounded outcome, not a fault.
+`CompletedAt` is the loop's end, recorded before the done channel closes.
+
+**Tool failures are feedback, bounded at three.** A failed fetch or search
+(HTTP status, refused destination, unusable content type, MCP error) is fed
+back to the model as a user turn so it can choose another source, because a
+single dead link failing a paid run wastes every turn before it. Three
+consecutive failures end the run `failed`; a success resets the count. The
+loop also refuses to fetch a URL that appeared in no search result.
+
+**Page reduction in the loop, in stdlib.** Fetched pages pass through
+`pageText`: HTML is reduced to visible text with a tolerant scanner (no
+parser dependency), other textual media types pass through, everything else
+is reported to the model as unreadable. The result is bounded by
+`fleet.max_page_bytes` (default 64 KiB) after reduction, so the per-turn
+transcript growth is deterministic. The fetch client's own 1 MiB bound is a
+memory backstop, not the transcript budget.
+
+**Untrusted content is fenced and defanged; the answer is sanitised.** Tool
+results are wrapped in fixed delimiters, the system prompt declares the
+fenced text data, and every retrieved string has `<<<` runs broken so a page
+cannot close the fence. Final citations are restricted to URLs the worker
+saw, with the dropped count on the span. The final answer has images
+rewritten to links, HTML removed and `secret.Scrub` applied before it
+becomes a `Finding`, so a rendered report cannot fire a beacon carrying the
+query. Fixed delimiters plus defanging were chosen over a per-run nonce for
+deterministic tests and golden files.
+
+**Spend levers are real or rejected.** `fleet.max_tokens` defaults to
+400 000 and `fleet.worker_timeout` to five minutes, so a default worker run
+is bounded without any operator input. `fleet.ceiling_gbp` is enforced only
+when `fleet.price_input_gbp_per_mtok` and `fleet.price_output_gbp_per_mtok`
+are set; a ceiling without prices is a validation error rather than an inert
+cap. This supersedes the 2026-07-01 statement that `EstimatedCostGBP` stays
+zero: it is computed from the configured prices, and stays zero only when
+none are given. The Gemini-only levers (`budget`, `plan`, `accept_plan`,
+`model`, `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`)
+are rejected for `worker`/`fleet` so a caller never believes a cap applied
+when the loop ignores it. `fleet.memory: inmemory` is rejected until the
+store exists. Fleet endpoints must not carry userinfo, a query string or a
+fragment, and validation errors describe them by scheme and host only.
+
+**Per-worker spend lives on the span.** The worker records search count,
+tokens and estimated cost as attributes on its own span and emits no
+run-level metric; the run core records those once from the returned
+`Usage`. Emitting both counted every worker run twice.
+
+**`wkr_` ids are refused by `get` and `follow-up`.** The local handle
+cannot be resumed after process death, and forwarding it to Gemini produced
+a misleading provider error. Both commands refuse it locally with a message
+that says so.
+
+**Loopback fetch is a test-only switch.** `CHIRON_FETCH_ALLOW_LOOPBACK=1`
+lets the CLI e2e test serve a page from httptest; any other non-empty value
+is a startup error. It never relaxes the private-network, link-local or
+metadata refusals. It is listed with the other security-sensitive
+environment variables in AGENTS.md.
+
+**Fleet remains a typed not-implemented error.** `--agent fleet` returns
+`fleet.ErrNotImplemented` from the composition root; the earlier plain
+error is gone so callers can test for it with `errors.Is`.
+
+**Wave order.** Wave 3 (the in-process worker) landed before Wave 1
+(ConnectRPC control plane) and Wave 2 (Langfuse/OTLP flags). The
+prove-first pivot makes the worker the critical path and neither earlier
+wave is a prerequisite for a bounded local run; the CLI is the only
+entrypoint until Wave 1. Waves 1 and 2 are tracked as issues rather than
+blocking this merge.
+
+**Deferred to issues.** Config-file provenance for endpoint plus credential
+(C3-17), the SP-A search backend and tool-name configuration, HTML
+extraction quality beyond the tag scanner, fakes out of the binary, a shared
+httpx helper, MCP protocol-version enforcement and session reuse, per-turn
+progress events, and durable recovery of worker runs.
