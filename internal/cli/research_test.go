@@ -15,7 +15,9 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -399,16 +401,16 @@ func TestFleetAgentNotImplemented(t *testing.T) {
 // and a fake search MCP; the report lands on stdout with the worker's front
 // matter. The fuller golden-report assertion lives in the fleet package.
 func TestWorkerAgentIsWired(t *testing.T) {
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
-		model.FakeReply{
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
+		modeltest.FakeReply{
 			Content:      `{"action":"final","answer":"# Worker answer\n\nThe sky is blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
 		},
 	)
 	defer modelSrv.Close()
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 	defer searchSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 
