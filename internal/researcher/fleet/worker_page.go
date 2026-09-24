@@ -1,7 +1,6 @@
 package fleet
 
 import (
-	"html"
 	"mime"
 	"net/http"
 	"strings"
@@ -15,11 +14,11 @@ type renderedPage struct {
 }
 
 // pageText reduces a fetched page to bounded plain text for the transcript.
-// HTML is stripped to its visible text; other textual media types are passed
-// through; anything else (images, PDFs, archives) is reported as unusable so
-// the loop feeds that back to the model instead of inlining bytes. The result
-// is valid UTF-8, whitespace-collapsed, and cut at maxBytes on a rune
-// boundary.
+// HTML is reduced to the visible text of its main content; other textual
+// media types are passed through; anything else (images, PDFs, archives) is
+// reported as unusable so the loop feeds that back to the model instead of
+// inlining bytes. The result is valid UTF-8, whitespace-collapsed, and cut at
+// maxBytes on a rune boundary after extraction.
 func pageText(page fetchedPage, maxBytes int) (renderedPage, bool) {
 	mediaType, _, _ := mime.ParseMediaType(page.ContentType)
 	if mediaType == "" {
@@ -64,81 +63,21 @@ func isTextualMediaType(mediaType string) bool {
 	return false
 }
 
-// skippedElements are HTML elements whose content is never visible text.
-var skippedElements = map[string]bool{
-	"script": true, "style": true, "noscript": true, "template": true,
-	"svg": true, "head": true, "iframe": true, "object": true,
-}
-
-// blockElements are HTML elements that start a new line of visible text.
-var blockElements = map[string]bool{
-	"p": true, "div": true, "br": true, "li": true, "ul": true, "ol": true,
-	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
-	"tr": true, "table": true, "thead": true, "tbody": true, "section": true,
-	"article": true, "header": true, "footer": true, "nav": true, "aside": true,
-	"blockquote": true, "pre": true, "hr": true, "dt": true, "dd": true,
-	"figure": true, "figcaption": true, "main": true, "form": true, "title": true,
-}
-
-// htmlToText strips markup from an HTML document, dropping the content of
-// non-visible elements, turning block-element and table-cell openings into
-// newlines and tabs, and decoding entities. It is a tolerant scanner, not a parser:
+// htmlToText reduces an HTML document to the visible text of its main
+// content (see pageDoc.contentRoots), with block-element and table-cell
+// openings as newlines and tabs and entities decoded. When that content has
+// no letters or digits but the whole document does, the whole document's
+// visible text is returned instead. It is a tolerant scanner, not a parser:
 // malformed markup degrades to leftover text rather than an error.
 func htmlToText(src string) string {
-	var b strings.Builder
-	b.Grow(len(src) / 2)
-	i := 0
-	for i < len(src) {
-		c := src[i]
-		if c != '<' || !opensMarkup(src, i) {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		if strings.HasPrefix(src[i:], "<!--") {
-			end := strings.Index(src[i+4:], "-->")
-			if end < 0 {
-				break
-			}
-			i += 4 + end + 3
-			continue
-		}
-		tagEnd := findTagEnd(src, i)
-		if tagEnd < 0 {
-			break
-		}
-		name, closing := tagName(src[i+1 : tagEnd])
-		i = tagEnd + 1
-		if name == "" {
-			continue
-		}
-		if !closing && skippedElements[name] {
-			// Skip to the matching close tag; nested same-name elements do
-			// not occur for these element types.
-			close := indexCloseTag(src, i, name)
-			if close < 0 {
-				break
-			}
-			i = close
-			if end := findTagEnd(src, i); end >= 0 {
-				i = end + 1
-			} else {
-				break
-			}
-			b.WriteByte('\n')
-			continue
-		}
-		if closing {
-			continue
-		}
-		switch {
-		case blockElements[name]:
-			b.WriteByte('\n')
-		case name == "td" || name == "th":
-			b.WriteByte('\t')
+	doc := parsePage(src)
+	text := doc.render(doc.contentRoots(), true)
+	if !hasLetterOrDigit(text) {
+		if all := doc.render([]int32{0}, false); hasLetterOrDigit(all) {
+			return all
 		}
 	}
-	return html.UnescapeString(b.String())
+	return text
 }
 
 // opensMarkup reports whether the '<' at src[i] starts a tag, comment or
