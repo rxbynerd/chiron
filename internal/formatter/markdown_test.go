@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,116 @@ func TestMarkdownFormat(t *testing.T) {
 				CompletedAt: finished,
 			},
 		},
+		{
+			// A web citation title carrying raw HTML, plus emphasis and
+			// code markers, must render as inert text: escapeInline
+			// covers the same characters here as it does for
+			// knowledge-source titles.
+			name: "citation-html-title",
+			in: &types.Interaction{
+				ID:      "v1_html",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit citation titles for raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# HTML titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/report", Title: "Breaking <img src=https://attacker.example/x> *news* _now_ `verified`"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A web citation URI carrying a space and raw HTML must stay
+			// a valid CommonMark link destination: the space and angle
+			// brackets are percent-encoded so the link cannot fall back
+			// to literal text.
+			name: "citation-uri-space-html",
+			in: &types.Interaction{
+				ID:      "v1_urispace",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit citation URIs for raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# URI hygiene\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.com/a <img src=x>", Title: "Suspicious URI"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// An empty title falls back to the URI as link text; that
+			// fallback text is escaped exactly like an explicit title.
+			name: "citation-empty-title-escaped-uri",
+			in: &types.Interaction{
+				ID:      "v1_emptytitle",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit fallback link text",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Fallback text\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/foo_bar*baz"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// An empty title's URI fallback feeds the same string
+			// through escapeInline for the link text and
+			// webLinkDestination for the destination: both transforms
+			// must fire correctly on one shared, untrusted string.
+			name: "citation-empty-title-html-uri",
+			in: &types.Interaction{
+				ID:      "v1_emptyhtml",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit fallback link text against raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Fallback text\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/<script> report"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A literal backslash immediately before a raw tag escapes
+			// itself first, then the tag: the title still round-trips
+			// to fully inert text rather than unmasking the tag.
+			name: "citation-backslash-html-title",
+			in: &types.Interaction{
+				ID:      "v1_backslash",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit backslash-adjacent HTML in citation titles",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Backslash titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/backslash", Title: `\<img src=x>`},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A title with an embedded newline and repeated spaces
+			// still collapses to single spaces, matching escapeInline's
+			// existing whitespace handling at this call site.
+			name: "citation-title-whitespace",
+			in: &types.Interaction{
+				ID:      "v1_whitespace",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit whitespace collapse in citation titles",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Whitespace titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/whitespace", Title: "Multiple   spaces\nand a newline"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -264,9 +375,83 @@ func TestMarkdownFormat(t *testing.T) {
 	}
 }
 
+// TestMarkdownFormatNoLiveHTMLInBody proves that a citation title
+// carrying an <img> tag cannot reach the rendered body as live HTML.
+// The YAML front matter carries the raw title as data for
+// front-matter-aware viewers; this test does not scan it.
+func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
+	in := &types.Interaction{
+		ID:      "v1_livehtml",
+		Agent:   "deep-research-preview-04-2026",
+		Query:   "Audit citation titles for raw HTML",
+		Status:  types.StatusCompleted,
+		Outputs: []types.Output{{Type: types.OutputText, Text: "# HTML titles\n\nFindings."}},
+		Citations: []types.Citation{
+			{URI: "https://example.org/report", Title: "Breaking <img src=https://attacker.example/x> news"},
+		},
+		CreatedAt:   started,
+		CompletedAt: finished,
+	}
+
+	got, err := NewMarkdown().Format(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+
+	const frontMatterEnd = "---\n\n"
+	i := strings.Index(string(got.Markdown), frontMatterEnd)
+	if i < 0 {
+		t.Fatalf("no front-matter close delimiter found in:\n%s", got.Markdown)
+	}
+	body := string(got.Markdown)[i+len(frontMatterEnd):]
+
+	if !strings.Contains(body, `\<img src=https://attacker.example/x\>`) {
+		t.Errorf("body does not contain the expected escaped tag:\n%s", body)
+	}
+	for i, r := range body {
+		if r != '<' {
+			continue
+		}
+		backslashes := 0
+		for j := i - 1; j >= 0 && body[j] == '\\'; j-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			t.Errorf("unescaped %q at byte %d in body (preceded by %d backslashes):\n%s", "<", i, backslashes, body)
+		}
+	}
+}
+
 func TestMarkdownFormatNilInteraction(t *testing.T) {
 	if _, err := NewMarkdown().Format(context.Background(), nil); err == nil {
 		t.Error("Format(nil) must error, not render an empty document")
+	}
+}
+
+// TestWebLinkDestination asserts every ASCII control byte and DEL is
+// percent-encoded as uppercase %XX, and that an already percent-encoded
+// sequence is left untouched rather than having its "%" re-encoded.
+func TestWebLinkDestination(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"nul", "\x00", "%00"},
+		{"bel", "\x07", "%07"},
+		{"tab", "\t", "%09"},
+		{"lf", "\n", "%0A"},
+		{"cr", "\r", "%0D"},
+		{"esc", "\x1B", "%1B"},
+		{"del", "\x7F", "%7F"},
+		{"no-double-encode", "https://example.org/a%20b?x=1%29", "https://example.org/a%20b?x=1%29"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webLinkDestination.Replace(tt.in); got != tt.want {
+				t.Errorf("webLinkDestination.Replace(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

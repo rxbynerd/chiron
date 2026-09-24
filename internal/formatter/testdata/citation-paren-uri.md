@@ -16,4 +16,4 @@ Findings.
 
 ## Sources
 
-1. [Foo (bar)](https://example.org/wiki/Foo_(bar%29)
+1. [Foo (bar)](https://example.org/wiki/Foo_%28bar%29)
