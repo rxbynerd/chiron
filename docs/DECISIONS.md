@@ -1336,7 +1336,10 @@ membership as satisfying a ceiling — only real, non-zero price fields do
 `SeedModelPrices` was never called; that error omits the "not in the
 built-in price table" claim, since the model is not, in fact, missing. An
 unpriced ceiling on a model absent from the table names the model
-directly.
+directly. `ModelPrice` also carries `InputUSDPerMTok`, `OutputUSDPerMTok`
+and `USDToGBP` alongside the two GBP fields `Validate` and
+`SeedModelPrices` use, so a future provenance-displaying command has the
+raw figures without a second lookup; no caller reads them yet.
 
 **What is excluded, and why** (from the research packet). `gpt-5.6-sol`
 is verified but sold at a promotional price the vendor states holds "at
