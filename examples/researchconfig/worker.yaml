@@ -25,7 +25,9 @@ fleet:
   max_page_bytes: 65536
   # gpt-5.5 is in the built-in price table (README.md, "Model prices"), so
   # ceiling_gbp works without price_input_gbp_per_mtok/price_output_gbp_per_mtok
-  # set below. Uncomment either to override the table for this model.
+  # set below. Seeding is all-or-nothing: uncomment both lines together to
+  # override the table, not just one — a single override leaves the other
+  # field at an unpriced 0, not the table's rate.
   # price_input_gbp_per_mtok: 1.5
   # price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5

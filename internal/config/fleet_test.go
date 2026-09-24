@@ -110,6 +110,12 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"ceiling without a price", func(c *ResearchConfig) {
 			c.Fleet.PriceInputGBPPerMTok, c.Fleet.PriceOutputGBPPerMTok = 0, 0
 		}},
+		{"ceiling with only the input price set", func(c *ResearchConfig) {
+			c.Fleet.PriceOutputGBPPerMTok = 0
+		}},
+		{"ceiling with only the output price set", func(c *ResearchConfig) {
+			c.Fleet.PriceInputGBPPerMTok = 0
+		}},
 		{"price negative", func(c *ResearchConfig) { c.Fleet.PriceOutputGBPPerMTok = -1 }},
 		{"page bytes zero", func(c *ResearchConfig) { c.Fleet.MaxPageBytes = 0 }},
 		{"worker timeout zero", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = 0 }},

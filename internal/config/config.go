@@ -389,9 +389,9 @@ func (f FleetConfig) validate(agent string) error {
 		return fmt.Errorf("fleet.price_input_gbp_per_mtok / fleet.price_output_gbp_per_mtok: %v / %v must not be negative",
 			f.PriceInputGBPPerMTok, f.PriceOutputGBPPerMTok)
 	}
-	if f.CeilingGBP > 0 && f.PriceInputGBPPerMTok == 0 && f.PriceOutputGBPPerMTok == 0 {
+	if f.CeilingGBP > 0 && (f.PriceInputGBPPerMTok == 0 || f.PriceOutputGBPPerMTok == 0) {
 		if _, ok := LookupModelPrice(f.ModelName); !ok {
-			return fmt.Errorf("fleet.ceiling_gbp: a cost ceiling needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against, and fleet.model_name %q is not in the built-in price table", f.ModelName)
+			return fmt.Errorf("fleet.ceiling_gbp: needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against; fleet.model_name %q is not in the built-in price table", f.ModelName)
 		}
 		return errors.New("fleet.ceiling_gbp: a cost ceiling needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against")
 	}
