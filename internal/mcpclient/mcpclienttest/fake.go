@@ -1,4 +1,7 @@
-package mcpclient
+// Package mcpclienttest ships mcpclient.Client's scripted test double.
+// It is a separate package from internal/mcpclient so net/http/httptest,
+// needed only to script the double, never links into the chiron binary.
+package mcpclienttest
 
 import (
 	"encoding/json"
@@ -6,12 +9,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+
+	"github.com/rxbynerd/chiron/internal/mcpclient"
+)
+
+// The MCP transport header names the fake reads and sets; mirrored from
+// internal/mcpclient's unexported constants since the fake speaks the wire
+// protocol directly rather than reaching across the package boundary.
+const (
+	mcpSessionHeader         = "Mcp-Session-Id"
+	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
 // FakeHandler scripts a FakeServer's tools/call replies. A returned error
 // becomes a JSON-RPC error reply carrying its text; a ToolResult with IsError
 // set models a tool-level failure.
-type FakeHandler func(tool string, args map[string]any) (ToolResult, error)
+type FakeHandler func(tool string, args map[string]any) (mcpclient.ToolResult, error)
 
 // FakeServer is an httptest-backed Streamable-HTTP MCP server shared by every
 // package that drives an MCP tool in tests. It answers initialize,
@@ -84,7 +97,7 @@ func WithRawResult(raw string) FakeOption {
 // handler. A nil handler answers every call with an empty result. Call Close
 // when done.
 func NewFakeServer(handler FakeHandler, opts ...FakeOption) *FakeServer {
-	f := &FakeServer{handler: handler, protocolVersion: ProtocolVersion}
+	f := &FakeServer{handler: handler, protocolVersion: mcpclient.ProtocolVersion}
 	for _, o := range opts {
 		o(f)
 	}
@@ -212,7 +225,7 @@ func (f *FakeServer) writeToolResult(w http.ResponseWriter, id int, tool string,
 			resp = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":%s}}`, id, mustJSON(err.Error()))
 		} else {
 			if result.Content == nil {
-				result.Content = []ContentBlock{}
+				result.Content = []mcpclient.ContentBlock{}
 			}
 			resp = fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, id, mustJSON(result))
 		}
