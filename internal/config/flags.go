@@ -65,6 +65,13 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-exa-endpoint", "", "Exa API base URL, normally https://api.exa.ai (absolute https://, http:// loopback only; overrides "+EnvFleetExaEndpoint+"; refused in a base config)")
 	fs.String("fleet-exa-key-ref", "", "secret:// reference to the Exa key (never a literal; serves both roles)")
 	fs.Bool(FlagSearchSendObjective, false, "send the research objective to the search provider with each query (exa only; refused in a base config)")
+
+	// Span forwarding. With none set, the OTEL_EXPORTER_OTLP_* variables
+	// still apply.
+	fs.String("otlp-endpoint", "", "OTLP/HTTP collector base URL for spans (absolute https://, http:// loopback only)")
+	fs.String("langfuse-endpoint", "", fmt.Sprintf("Langfuse OTLP base URL (absolute https://, http:// loopback only; %s when unset)", DefaultLangfuseEndpoint))
+	fs.String("langfuse-public-key-ref", "", "secret:// reference to the Langfuse public key (never a literal)")
+	fs.String("langfuse-secret-key-ref", "", "secret:// reference to the Langfuse secret key (never a literal)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -181,6 +188,14 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.ExaKeyRef = mustString(fs, f.Name)
 		case FlagSearchSendObjective:
 			cfg.Fleet.SearchSendObjective = mustBool(fs, f.Name)
+		case "otlp-endpoint":
+			cfg.Telemetry.OTLPEndpoint = mustString(fs, f.Name)
+		case "langfuse-endpoint":
+			cfg.Telemetry.LangfuseEndpoint = mustString(fs, f.Name)
+		case "langfuse-public-key-ref":
+			cfg.Telemetry.LangfusePublicKeyRef = mustString(fs, f.Name)
+		case "langfuse-secret-key-ref":
+			cfg.Telemetry.LangfuseSecretKeyRef = mustString(fs, f.Name)
 		}
 	})
 
