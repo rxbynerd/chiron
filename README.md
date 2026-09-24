@@ -162,7 +162,7 @@ chiron research --agent worker \
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
-| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags, unless `--fleet-model-name` is in the built-in price table (below). |
+| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags, or neither when `--fleet-model-name` is in the built-in price table (below). |
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens; seeded from the built-in price table for a known model when both are unset. |
 | `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |

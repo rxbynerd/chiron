@@ -1339,7 +1339,14 @@ unpriced ceiling on a model absent from the table names the model
 directly. `ModelPrice` also carries `InputUSDPerMTok`, `OutputUSDPerMTok`
 and `USDToGBP` alongside the two GBP fields `Validate` and
 `SeedModelPrices` use, so a future provenance-displaying command has the
-raw figures without a second lookup; no caller reads them yet.
+raw figures without a second lookup; no caller reads them yet. Because
+seeding is all-or-nothing, one explicit price suppresses it and leaves
+the other field at a literal zero, so `Validate` now requires both GBP
+price fields non-zero once a ceiling is set — a ceiling with only one
+price set is rejected the same as a ceiling with neither, since a zero
+price would leave one token direction uncounted and the ceiling would be
+silently under-enforced. This is the same "spend levers are real or
+rejected" rule as the 2026-09-23 entry.
 
 **What is excluded, and why** (from the research packet). `gpt-5.6-sol`
 is verified but sold at a promotional price the vendor states holds "at
