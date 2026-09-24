@@ -2,6 +2,7 @@ package secret
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -49,12 +50,55 @@ func TestScrubPatterns(t *testing.T) {
 	}
 }
 
+// Langfuse project keys: a pk-lf- or sk-lf- prefix and a lower-case UUID,
+// which the high-entropy backstop alone does not catch.
+const (
+	fakeLangfusePublic = "pk-lf-1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+	fakeLangfuseSecret = "sk-lf-6d5c4b3a-2f1e-0d9c-8b7a-6f5e4d3c2b1a"
+)
+
+func TestScrubLangfuseAndBasicCredentials(t *testing.T) {
+	langfuseBasic := base64.StdEncoding.EncodeToString([]byte(fakeLangfusePublic + ":" + fakeLangfuseSecret))
+	shortBasic := base64.StdEncoding.EncodeToString([]byte("user:pass"))
+
+	tests := []struct {
+		name   string
+		in     string
+		leaked string // must not survive scrubbing
+	}{
+		{"langfuse public key", "public key " + fakeLangfusePublic + " rejected", fakeLangfusePublic},
+		{"langfuse secret key json", `{"secretKey":"` + fakeLangfuseSecret + `"}`, fakeLangfuseSecret},
+		{"langfuse key non-uuid tail", "using sk-lf-abcdefghij_klmnopqrst-uv now", "abcdefghij_klmnopqrst-uv"},
+		{"authorization basic header", "Authorization: Basic " + langfuseBasic, langfuseBasic},
+		{"authorization basic lowercase", "authorization: basic " + shortBasic, shortBasic},
+		{"authorization basic json", `{"Authorization":"Basic ` + shortBasic + `"}`, shortBasic},
+		{"authorization basic unpadded", "Authorization: Basic " + strings.TrimRight(langfuseBasic, "="), strings.TrimRight(langfuseBasic, "=")},
+		{"bare basic credential", "sent Basic " + shortBasic + " to the collector", shortBasic},
+		{"bare basic langfuse credential", "credential Basic " + langfuseBasic, langfuseBasic},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Scrub(tt.in)
+			if strings.Contains(got, tt.leaked) {
+				t.Fatalf("Scrub(%q) = %q; credential survived", tt.in, got)
+			}
+			if !strings.Contains(got, "[REDACTED") {
+				t.Fatalf("Scrub(%q) = %q; no redaction marker", tt.in, got)
+			}
+		})
+	}
+}
+
 func TestScrubLeavesProseAlone(t *testing.T) {
 	tests := []string{
 		"polling interaction for status, attempt 3 of 12",
 		"credentialPatternScrubbingHandlerWrapperImplementation", // long identifier, no digits
 		"the research agent searched 14 sources in 32 minutes",
 		"wrote report to /tmp/chiron/deep-research-output.md",
+		"a basic search found 3 results",
+		"Basic research methods apply here",
+		"Basic auth is disabled; the basic idea is simple",
+		"keys carry a pk-lf- or sk-lf- prefix",
 	}
 	for _, in := range tests {
 		if got := Scrub(in); got != in {
