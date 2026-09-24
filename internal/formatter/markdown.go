@@ -70,15 +70,9 @@ type source struct {
 }
 
 // markdown renders the source as a numbered-list entry body. Title and
-// URI are API-provided and untrusted, so link text always goes through
-// escapeInline — the same treatment as knowledge-source titles — even
-// when the URI stands in for an empty title. A web destination also has
-// ")", ASCII whitespace, and "<"/">" percent-encoded: left raw, any of
-// them can make CommonMark reject the inline-link form and fall back to
-// literal text, at which point raw HTML in the URI would render live. A
-// knowledge store locator cannot resolve in a viewer, so it renders as
-// its escaped title and the locator in inline code, never as a link.
-// Scheme filtering happens earlier, in collectSources.
+// URI are untrusted API input: link text goes through escapeInline, and
+// the destination is percent-encoded separately (see webLinkDestination).
+// A knowledge store locator renders as escaped title plus locator in code.
 func (s source) markdown() string {
 	if isKnowledgeURI(s.URI) {
 		uri := strings.ReplaceAll(strings.Join(strings.Fields(s.URI), "%20"), "`", "%60")
@@ -94,20 +88,24 @@ func (s source) markdown() string {
 	return fmt.Sprintf("[%s](%s)", escapeInline(title), webLinkDestination.Replace(s.URI))
 }
 
-// webLinkDestination percent-encodes the characters that would break
-// CommonMark's inline-link destination grammar or force a fallback to
-// literal text: ")" ends the destination early, and ASCII whitespace or
-// "<"/">" makes the destination invalid, at which point any HTML the URI
-// carries would no longer be inside a link and would render live.
-var webLinkDestination = strings.NewReplacer(
-	")", "%29",
-	" ", "%20",
-	"\t", "%09",
-	"\n", "%0A",
-	"\r", "%0D",
-	"<", "%3C",
-	">", "%3E",
-)
+// webLinkDestination percent-encodes bytes that would break CommonMark's
+// inline-link destination grammar or force a fallback to literal text,
+// where raw HTML in the URI would then render live: "(", ")", ASCII
+// whitespace, "<", ">", and every ASCII control byte (0x00-0x1F, 0x7F).
+var webLinkDestination = func() *strings.Replacer {
+	pairs := []string{
+		"(", "%28",
+		")", "%29",
+		" ", "%20",
+		"<", "%3C",
+		">", "%3E",
+	}
+	for b := 0; b <= 0x1F; b++ {
+		pairs = append(pairs, string(rune(b)), fmt.Sprintf("%%%02X", b))
+	}
+	pairs = append(pairs, string(rune(0x7F)), fmt.Sprintf("%%%02X", 0x7F))
+	return strings.NewReplacer(pairs...)
+}()
 
 // Format renders the interaction. The body is the last text output —
 // the final report; earlier text outputs are interim and thought
