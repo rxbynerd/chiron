@@ -58,6 +58,13 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
 	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
 	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet only)")
+
+	// Span forwarding. With none set, the OTEL_EXPORTER_OTLP_* variables
+	// still apply.
+	fs.String("otlp-endpoint", "", "OTLP/HTTP collector base URL for spans (absolute https://, http:// loopback only)")
+	fs.String("langfuse-endpoint", "", fmt.Sprintf("Langfuse OTLP base URL (absolute https://, http:// loopback only; %s when unset)", DefaultLangfuseEndpoint))
+	fs.String("langfuse-public-key-ref", "", "secret:// reference to the Langfuse public key (never a literal)")
+	fs.String("langfuse-secret-key-ref", "", "secret:// reference to the Langfuse secret key (never a literal)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -160,6 +167,14 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.KnowledgeLimit, _ = fs.GetInt(f.Name)
 		case "fleet-knowledge-remember":
 			cfg.Fleet.KnowledgeRemember = mustBool(fs, f.Name)
+		case "otlp-endpoint":
+			cfg.Telemetry.OTLPEndpoint = mustString(fs, f.Name)
+		case "langfuse-endpoint":
+			cfg.Telemetry.LangfuseEndpoint = mustString(fs, f.Name)
+		case "langfuse-public-key-ref":
+			cfg.Telemetry.LangfusePublicKeyRef = mustString(fs, f.Name)
+		case "langfuse-secret-key-ref":
+			cfg.Telemetry.LangfuseSecretKeyRef = mustString(fs, f.Name)
 		}
 	})
 

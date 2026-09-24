@@ -137,6 +137,9 @@ type ResearchConfig struct {
 	// selects worker or fleet, so a deep-research run stays valid with a
 	// zero Fleet.
 	Fleet FleetConfig `json:"fleet,omitzero" yaml:"fleet,omitempty"`
+	// Telemetry forwards the run's spans to an OTLP collector or Langfuse.
+	// It applies to every agent.
+	Telemetry TelemetryConfig `json:"telemetry,omitzero" yaml:"telemetry,omitempty"`
 }
 
 // FleetConfig holds the knobs for Chiron's in-process research agents
@@ -318,6 +321,9 @@ func (c ResearchConfig) Validate() error {
 		if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
 			return fmt.Errorf("mcp: server %q URL %q must be http(s) — MCP servers are remote endpoints", name, url)
 		}
+	}
+	if err := c.Telemetry.validate(); err != nil {
+		return err
 	}
 	return nil
 }
