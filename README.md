@@ -162,8 +162,8 @@ chiron research --agent worker \
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
-| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags. |
-| `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
+| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags, unless `--fleet-model-name` is in the built-in price table (below). |
+| `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens; seeded from the built-in price table for a known model when both are unset. |
 | `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
 | `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider. |
@@ -183,6 +183,36 @@ refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
 `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
 `--template`) are rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+
+#### Model prices
+
+`--fleet-ceiling` needs both price flags to estimate spend against, but
+`chiron research-config`/`chiron research` seed
+`--fleet-price-input`/`--fleet-price-output` from a built-in table when
+`--fleet-model-name` names a known model and both prices are still unset;
+an explicit price always wins, and an unrecognised model with a ceiling
+still fails validation. The table converts each vendor's standard-tier,
+uncached, short-context list price to GBP at a fixed rate, so it is a
+planning estimate for the ceiling, not a bill; `research-config` emits the
+seeded values into its JSON, so a later pipeline stage that changes
+`fleet.model_name` must restate the prices itself.
+
+| Model | Input GBP/MTok | Output GBP/MTok | Checked |
+| --- | --- | --- | --- |
+| `gpt-5.5` | 3.7695 | 22.617 | 2026-09-25 |
+| `gpt-5.4-mini` | 0.5654 | 3.3926 | 2026-09-25 |
+| `gpt-5.4-nano` | 0.1508 | 0.9424 | 2026-09-25 |
+| `gpt-5.6-terra` | 1.5078 | 9.0468 | 2026-09-25 |
+| `gpt-5.6-luna` | 0.1508 | 0.9047 | 2026-09-25 |
+| `claude-fable-5-1` | 7.539 | 37.695 | 2026-09-25 |
+| `claude-opus-5-5` | 3.0156 | 15.078 | 2026-09-25 |
+| `claude-sonnet-5` | 1.5078 | 7.539 | 2026-09-25 |
+| `claude-haiku-4-5-20251001` | 0.7539 | 3.7695 | 2026-09-25 |
+
+The four Claude rows price Anthropic's OpenAI-compatible Chat Completions
+endpoint, which Anthropic describes as for testing and comparison rather
+than production and which does not support prompt caching; see
+`docs/DECISIONS.md` for the full sourcing and the estimate's known biases.
 
 #### Organisational knowledge (Billet, Alexandria)
 

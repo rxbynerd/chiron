@@ -23,10 +23,11 @@ fleet:
   max_tokens: 400000
   worker_timeout: 5m
   max_page_bytes: 65536
-  # ceiling_gbp is honoured only with both prices set (GBP per million
-  # prompt / completion tokens); a ceiling without prices is rejected.
-  price_input_gbp_per_mtok: 1.5
-  price_output_gbp_per_mtok: 12
+  # gpt-5.5 is in the built-in price table (README.md, "Model prices"), so
+  # ceiling_gbp works without price_input_gbp_per_mtok/price_output_gbp_per_mtok
+  # set below. Uncomment either to override the table for this model.
+  # price_input_gbp_per_mtok: 1.5
+  # price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5
   # Organisational knowledge (docs/KNOWLEDGE.md). Uncomment to let the
   # worker recall from a knowledge store; the endpoint follows the same
