@@ -10,16 +10,18 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
 // newWorker builds a Worker over fakes, failing the test on construction
 // error. The model fake is scripted by the caller; search returns the given
 // results.
-func newWorker(t *testing.T, modelSrv *model.FakeServer, results []search.Result) *Worker {
+func newWorker(t *testing.T, modelSrv *modeltest.FakeServer, results []search.Result) *Worker {
 	t.Helper()
-	searchSrv := search.NewFakeServer(results)
+	searchSrv := searchtest.NewFakeServer(results)
 	t.Cleanup(searchSrv.Close)
 	w, err := NewWorker(WorkerDeps{
 		Model:  newModelClient(t, modelSrv),
@@ -38,8 +40,8 @@ func newWorker(t *testing.T, modelSrv *model.FakeServer, results []search.Result
 // the Finding onto an Interaction with the worker's agent, tools, query, one
 // text output, and the cited source.
 func TestWorkerStartAwaitResult(t *testing.T) {
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
 		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
 	)
 	defer modelSrv.Close()
@@ -91,7 +93,7 @@ func TestWorkerStartAwaitResult(t *testing.T) {
 // TestWorkerUnknownIDRejected: Await and Result on an id this Worker never
 // issued are programming faults reported as errors, not panics or hangs.
 func TestWorkerUnknownIDRejected(t *testing.T) {
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	w := newWorker(t, modelSrv, nil)
 
@@ -115,7 +117,7 @@ func TestWorkerResultBeforeCompletionIsInProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.New: %v", err)
 	}
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
 		Model:  mc,
@@ -167,7 +169,7 @@ func TestWorkerStartReturnsImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.New: %v", err)
 	}
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
 		Model:  mc,
@@ -210,7 +212,7 @@ func TestWorkerAwaitRespectsContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.New: %v", err)
 	}
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
 		Model:  mc,
@@ -237,7 +239,7 @@ func TestWorkerAwaitRespectsContext(t *testing.T) {
 // TestWorkerRejectsFollowUp: the in-process worker has no stored interaction
 // chain, so a follow-up task is rejected at Start before any work.
 func TestWorkerRejectsFollowUp(t *testing.T) {
-	modelSrv := model.NewFakeServer(finalReply("x"))
+	modelSrv := modeltest.NewFakeServer(finalReply("x"))
 	defer modelSrv.Close()
 	w := newWorker(t, modelSrv, nil)
 
@@ -250,9 +252,9 @@ func TestWorkerRejectsFollowUp(t *testing.T) {
 // missing, so a misconfigured worker never emits a resume handle for a run
 // that cannot proceed.
 func TestNewWorkerValidatesDeps(t *testing.T) {
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	good := WorkerDeps{
 		Model:  newModelClient(t, modelSrv),
@@ -290,12 +292,12 @@ func TestWorkerScrubsModelCredential(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	// The fake echoes the key in its 401 body — the provider-echo path the
 	// model adapter warns about.
-	modelSrv := model.NewFakeServer(model.FakeReply{
+	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{
 		Status:     http.StatusUnauthorized,
 		StatusBody: `{"error":{"message":"invalid api key ` + key + `"}}`,
 	})
 	defer modelSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 
 	mc, err := model.New(model.Options{Endpoint: modelSrv.URL(), Model: "m", APIKey: key})
@@ -352,8 +354,8 @@ func TestWorkerScrubsSearchCredential(t *testing.T) {
 		t.Fatalf("search.New: %v", err)
 	}
 	// The model searches on turn 1, which triggers the leaky tools/call.
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
 

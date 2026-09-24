@@ -11,14 +11,16 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
 // newModelClient builds a model.Client pointed at a fake server, failing the
 // test on construction error. The fake serves loopback, which the model
 // client's endpoint validation admits for http.
-func newModelClient(t *testing.T, srv *model.FakeServer) *model.Client {
+func newModelClient(t *testing.T, srv *modeltest.FakeServer) *model.Client {
 	t.Helper()
 	c, err := model.New(model.Options{
 		Endpoint: srv.URL(),
@@ -32,7 +34,7 @@ func newModelClient(t *testing.T, srv *model.FakeServer) *model.Client {
 }
 
 // newSearchClient builds a search.Client pointed at a fake MCP server.
-func newSearchClient(t *testing.T, srv *search.FakeServer) *search.Client {
+func newSearchClient(t *testing.T, srv *searchtest.FakeServer) *search.Client {
 	t.Helper()
 	c, err := search.New(search.Options{
 		Endpoint: srv.URL(),
@@ -56,7 +58,7 @@ func newFetchClient(t *testing.T) *fetch.Client {
 
 // finalReply scripts a model turn that ends the loop with a final answer and
 // the given citation URLs.
-func finalReply(answer string, urls ...string) model.FakeReply {
+func finalReply(answer string, urls ...string) modeltest.FakeReply {
 	var cites strings.Builder
 	for i, u := range urls {
 		if i > 0 {
@@ -65,7 +67,7 @@ func finalReply(answer string, urls ...string) model.FakeReply {
 		cites.WriteString(`{"url":"` + u + `","title":"src"}`)
 	}
 	content := `{"action":"final","answer":` + jsonString(answer) + `,"citations":[` + cites.String() + `]}`
-	return model.FakeReply{Content: content, FinishReason: "stop", Usage: model.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}}
+	return modeltest.FakeReply{Content: content, FinishReason: "stop", Usage: model.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}}
 }
 
 // jsonString quotes s as a JSON string literal for embedding in a scripted
@@ -90,14 +92,14 @@ func TestRunWorkerSearchFetchFinal(t *testing.T) {
 	}))
 	defer page.Close()
 
-	searchSrv := search.NewFakeServer([]search.Result{
+	searchSrv := searchtest.NewFakeServer([]search.Result{
 		{Title: "Why the sky is blue", URL: page.URL, Snippet: "scattering"},
 	})
 	defer searchSrv.Close()
 
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"why is the sky blue"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 30, OutputTokens: 8, TotalTokens: 38}},
-		model.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 60, OutputTokens: 6, TotalTokens: 66}},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"why is the sky blue"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 30, OutputTokens: 8, TotalTokens: 38}},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 60, OutputTokens: 6, TotalTokens: 66}},
 		finalReply("# Answer\n\nThe sky is blue due to Rayleigh scattering.", page.URL, page.URL),
 	)
 	defer modelSrv.Close()
@@ -135,11 +137,11 @@ func TestRunWorkerSearchFetchFinal(t *testing.T) {
 // model turn: a 5xx surfaces as a Failed finding and the model is called
 // exactly once, never re-attempted — a paid turn may already be billed.
 func TestRunWorkerNoRetryOnPaidTurn(t *testing.T) {
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":"boom"}`},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":"boom"}`},
 	)
 	defer modelSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 
 	deps := WorkerDeps{
@@ -178,13 +180,13 @@ func TestRunWorkerRefusesSideEffectingActions(t *testing.T) {
 		{"extra field smuggling", `{"action":"final","answer":"x","exec":"rm -rf /"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			modelSrv := model.NewFakeServer(
-				model.FakeReply{Content: tt.content, FinishReason: "stop"},
+			modelSrv := modeltest.NewFakeServer(
+				modeltest.FakeReply{Content: tt.content, FinishReason: "stop"},
 			)
 			defer modelSrv.Close()
 			// A search server that fails the test if ever reached — a refused
 			// action must not fall through to a tool call.
-			searchSrv := search.NewFakeServer([]search.Result{{URL: "https://example.org"}})
+			searchSrv := searchtest.NewFakeServer([]search.Result{{URL: "https://example.org"}})
 			defer searchSrv.Close()
 			// A fetch client whose server errors if reached.
 			fetchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,22 +228,22 @@ func TestRunWorkerCapsStopDeterministically(t *testing.T) {
 	// gatherable even though the model never delivers a final answer. (The
 	// worker gathers citations from final actions, so to exercise "partial
 	// citations preserved" we drive a final on the last allowed turn instead.)
-	searchSrv := search.NewFakeServer([]search.Result{
+	searchSrv := searchtest.NewFakeServer([]search.Result{
 		{Title: "R", URL: "https://example.org/a", Snippet: "s"},
 	})
 	defer searchSrv.Close()
 
 	// Script more search turns than the cap allows: every turn is a search, so
 	// the loop can never reach a final and must stop on the turn cap.
-	var replies []model.FakeReply
+	var replies []modeltest.FakeReply
 	for i := 0; i < 10; i++ {
-		replies = append(replies, model.FakeReply{
+		replies = append(replies, modeltest.FakeReply{
 			Content:      `{"action":"search","query":"again"}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
 		})
 	}
-	modelSrv := model.NewFakeServer(replies...)
+	modelSrv := modeltest.NewFakeServer(replies...)
 	defer modelSrv.Close()
 
 	c := caps()
@@ -274,11 +276,11 @@ func TestRunWorkerCapsStopDeterministically(t *testing.T) {
 // the accumulated tokens are preserved on the Failed finding, never discarded
 // (docs/V2-RESEARCH-AGENT §8).
 func TestRunWorkerFailurePreservesUsage(t *testing.T) {
-	searchSrv := search.NewFakeServer([]search.Result{{URL: "https://example.org/a"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{URL: "https://example.org/a"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 4, TotalTokens: 24}},
-		model.FakeReply{Status: http.StatusBadGateway, StatusBody: "upstream down"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 4, TotalTokens: 24}},
+		modeltest.FakeReply{Status: http.StatusBadGateway, StatusBody: "upstream down"},
 	)
 	defer modelSrv.Close()
 
@@ -308,13 +310,13 @@ func TestRunWorkerFailurePreservesUsage(t *testing.T) {
 // result; a URL it never encountered is dropped rather than reported as a
 // source.
 func TestRunWorkerFinalCitationsRestrictedToSeenURLs(t *testing.T) {
-	searchSrv := search.NewFakeServer([]search.Result{
+	searchSrv := searchtest.NewFakeServer([]search.Result{
 		{Title: "A", URL: "https://a.example"},
 		{Title: "B", URL: "https://b.example"},
 	})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
 		finalReply("answer", "https://a.example", "https://b.example", "https://a.example", "https://invented.example/never-seen"),
 	)
 	defer modelSrv.Close()
@@ -348,12 +350,12 @@ func TestRunWorkerRefusesUnseenFetchURL(t *testing.T) {
 		t.Error("fetch server reached — an unseen URL must not be fetched")
 	}))
 	defer fetchSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 
-	modelSrv := model.NewFakeServer(
+	modelSrv := modeltest.NewFakeServer(
 		// Turn 1: fetch a URL that was never in a search result.
-		model.FakeReply{Content: `{"action":"fetch","url":"` + fetchSrv.URL + `"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + fetchSrv.URL + `"}`, FinishReason: "stop"},
 		// Turn 2: give up and answer.
 		finalReply("done"),
 	)
@@ -381,9 +383,9 @@ func TestRunWorkerRefusesUnseenFetchURL(t *testing.T) {
 // Incomplete before any model turn, with a diagnostic — the wall-clock bound
 // stops the run deterministically without an error.
 func TestRunWorkerTimeoutIsIncomplete(t *testing.T) {
-	modelSrv := model.NewFakeServer() // never reached.
+	modelSrv := modeltest.NewFakeServer() // never reached.
 	defer modelSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())

