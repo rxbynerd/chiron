@@ -1,4 +1,8 @@
-package alexandria
+// Package alexandriatest ships alexandria.Client's scripted test double. It
+// is a separate package from internal/memory/alexandria so
+// net/http/httptest, needed only to script the double, never links into the
+// chiron binary.
+package alexandriatest
 
 import (
 	"encoding/json"
@@ -8,20 +12,28 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+
+	"github.com/rxbynerd/chiron/internal/memory/alexandria"
 )
+
+// searchPath mirrors alexandria's unexported search endpoint path (see
+// internal/memory/alexandria/alexandria.go); the fake speaks the wire
+// protocol directly rather than reaching into alexandria's unexported
+// constant.
+const searchPath = "/v1/search"
 
 // FakeServer is an httptest-backed stand-in for Alexandria's GET /v1/search,
 // shared by every package that drives recall in tests. It answers with a
-// scripted SearchResponse (or raw body), records each request, and never
-// touches the real network. Callers own its lifecycle: build it at the call
-// site and defer Close.
+// scripted alexandria.SearchResponse (or raw body), records each request,
+// and never touches the real network. Callers own its lifecycle: build it
+// at the call site and defer Close.
 //
 // Construct with NewFakeServer and point a Client at it via
-// Options{Endpoint: fake.URL(), ...}.
+// alexandria.Options{Endpoint: fake.URL(), ...}.
 type FakeServer struct {
 	server *httptest.Server
 
-	doc        SearchResponse
+	doc        alexandria.SearchResponse
 	rawBody    string
 	status     int
 	statusBody string
@@ -80,7 +92,7 @@ func WithOversizedBody(n int) FakeOption {
 
 // NewFakeServer starts a fake Alexandria search endpoint answering with doc.
 // Call Close when done.
-func NewFakeServer(doc SearchResponse, opts ...FakeOption) *FakeServer {
+func NewFakeServer(doc alexandria.SearchResponse, opts ...FakeOption) *FakeServer {
 	f := &FakeServer{doc: doc, headers: http.Header{}}
 	for _, o := range opts {
 		o(f)
@@ -135,7 +147,7 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		doc := f.doc
 		if doc.Results == nil {
-			doc.Results = []SearchResult{}
+			doc.Results = []alexandria.SearchResult{}
 		}
 		body, err := json.Marshal(doc)
 		if err != nil {
