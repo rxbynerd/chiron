@@ -2,6 +2,7 @@ package config
 
 import (
 	"math"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,26 @@ func TestLookupModelPriceExactCaseSensitiveMatch(t *testing.T) {
 				t.Errorf("LookupModelPrice(%q) hit; want a miss", id)
 			}
 		})
+	}
+}
+
+// TestExampleWorkerConfigValidatesAfterSeeding decodes the shipped worker
+// base config and runs it through the same seed-then-validate path
+// resolveConfig uses, so a table row the example relies on (gpt-5.5) being
+// renamed or removed is caught here rather than only at run time.
+func TestExampleWorkerConfigValidatesAfterSeeding(t *testing.T) {
+	f, err := os.Open("../../examples/researchconfig/worker.yaml")
+	if err != nil {
+		t.Fatalf("open example config: %v", err)
+	}
+	defer f.Close()
+	cfg, err := Decode(f)
+	if err != nil {
+		t.Fatalf("decode example config: %v", err)
+	}
+	cfg.SeedModelPrices()
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("examples/researchconfig/worker.yaml no longer validates after seeding: %v", err)
 	}
 }
 
