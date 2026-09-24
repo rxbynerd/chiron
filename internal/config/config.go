@@ -174,13 +174,18 @@ type FleetConfig struct {
 	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 	// CeilingGBP caps a worker's estimated model spend; zero means
 	// uncapped on cost, mirroring BudgetGBP. The estimate is derived from
-	// the price fields below, so a non-zero ceiling requires them. Token
-	// and GBP ceilings are both kept: tokens bound a loop deterministically
-	// with no price table, GBP expresses the operator's spend intent.
+	// the price fields below, so a non-zero ceiling requires them: config
+	// resolution seeds both from the built-in price table when ModelName
+	// is known and both are still zero, but an explicit value always
+	// wins. Token and GBP ceilings are both kept: tokens bound a loop
+	// deterministically with no price table, GBP expresses the operator's
+	// spend intent.
 	CeilingGBP float64 `json:"ceiling_gbp,omitempty" yaml:"ceiling_gbp,omitempty"`
 	// PriceInputGBPPerMTok and PriceOutputGBPPerMTok price a million prompt
-	// and completion tokens of the configured model, in GBP. Zero leaves the
-	// run's estimated cost at zero.
+	// and completion tokens of the configured model, in GBP. Resolution
+	// seeds both from the built-in price table (SeedModelPrices) when
+	// ModelName is known and both are still zero; either one set
+	// explicitly leaves both alone.
 	PriceInputGBPPerMTok  float64 `json:"price_input_gbp_per_mtok,omitempty" yaml:"price_input_gbp_per_mtok,omitempty"`
 	PriceOutputGBPPerMTok float64 `json:"price_output_gbp_per_mtok,omitempty" yaml:"price_output_gbp_per_mtok,omitempty"`
 	// MaxPageBytes bounds the text of one fetched page, after HTML is
@@ -384,7 +389,10 @@ func (f FleetConfig) validate(agent string) error {
 		return fmt.Errorf("fleet.price_input_gbp_per_mtok / fleet.price_output_gbp_per_mtok: %v / %v must not be negative",
 			f.PriceInputGBPPerMTok, f.PriceOutputGBPPerMTok)
 	}
-	if f.CeilingGBP > 0 && f.PriceInputGBPPerMTok == 0 && f.PriceOutputGBPPerMTok == 0 {
+	if f.CeilingGBP > 0 && (f.PriceInputGBPPerMTok == 0 || f.PriceOutputGBPPerMTok == 0) {
+		if _, ok := LookupModelPrice(f.ModelName); !ok {
+			return fmt.Errorf("fleet.ceiling_gbp: needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against; fleet.model_name %q is not in the built-in price table", f.ModelName)
+		}
 		return errors.New("fleet.ceiling_gbp: a cost ceiling needs fleet.price_input_gbp_per_mtok and fleet.price_output_gbp_per_mtok to estimate spend against")
 	}
 	if f.MaxPageBytes <= 0 {

@@ -110,6 +110,12 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"ceiling without a price", func(c *ResearchConfig) {
 			c.Fleet.PriceInputGBPPerMTok, c.Fleet.PriceOutputGBPPerMTok = 0, 0
 		}},
+		{"ceiling with only the input price set", func(c *ResearchConfig) {
+			c.Fleet.PriceOutputGBPPerMTok = 0
+		}},
+		{"ceiling with only the output price set", func(c *ResearchConfig) {
+			c.Fleet.PriceInputGBPPerMTok = 0
+		}},
 		{"price negative", func(c *ResearchConfig) { c.Fleet.PriceOutputGBPPerMTok = -1 }},
 		{"page bytes zero", func(c *ResearchConfig) { c.Fleet.MaxPageBytes = 0 }},
 		{"worker timeout zero", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = 0 }},
@@ -279,5 +285,66 @@ func TestDefaultFleetIsBounded(t *testing.T) {
 	f := Default().Fleet
 	if f.MaxTurns <= 0 || f.MaxTokens <= 0 || f.MaxPageBytes <= 0 || time.Duration(f.WorkerTimeout) <= 0 {
 		t.Errorf("default fleet caps are not all positive: %+v", f)
+	}
+}
+
+// TestValidateCeilingAfterSeedModelPrices: a ceiling on a known model
+// validates once SeedModelPrices has run, mirroring the resolveConfig
+// order (seed, then validate).
+func TestValidateCeilingAfterSeedModelPrices(t *testing.T) {
+	cfg := validWorker()
+	cfg.Fleet.ModelName = "gpt-5.5"
+	cfg.Fleet.PriceInputGBPPerMTok, cfg.Fleet.PriceOutputGBPPerMTok = 0, 0
+	cfg.Fleet.CeilingGBP = 2
+
+	cfg.SeedModelPrices()
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate after SeedModelPrices: %v", err)
+	}
+}
+
+// TestValidateCeilingUnknownModelNamesThePriceTable: an unknown model with
+// a ceiling and no prices fails, naming both price fields, the price
+// table, and the model id — the caller should not have to guess which
+// model was rejected.
+func TestValidateCeilingUnknownModelNamesThePriceTable(t *testing.T) {
+	cfg := validWorker()
+	cfg.Fleet.ModelName = "not-a-real-model"
+	cfg.Fleet.PriceInputGBPPerMTok, cfg.Fleet.PriceOutputGBPPerMTok = 0, 0
+	cfg.Fleet.CeilingGBP = 2
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("an unknown model with a ceiling and no prices validated")
+	}
+	for _, want := range []string{"fleet.price_input_gbp_per_mtok", "fleet.price_output_gbp_per_mtok", "price table", "not-a-real-model"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+// TestValidateCeilingKnownModelWithoutSeedingStillFails: Validate never
+// treats a known model as satisfying the ceiling on its own — only
+// SeedModelPrices (or an explicit price) can — and the message must not
+// claim the model is missing from the table when it is not.
+func TestValidateCeilingKnownModelWithoutSeedingStillFails(t *testing.T) {
+	cfg := validWorker()
+	cfg.Fleet.ModelName = "gpt-5.5"
+	cfg.Fleet.PriceInputGBPPerMTok, cfg.Fleet.PriceOutputGBPPerMTok = 0, 0
+	cfg.Fleet.CeilingGBP = 2
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("a known model with a ceiling but no seeded prices validated")
+	}
+	if strings.Contains(err.Error(), "not in the built-in price table") {
+		t.Errorf("error wrongly claims gpt-5.5 is not in the table: %v", err)
+	}
+	for _, want := range []string{"fleet.price_input_gbp_per_mtok", "fleet.price_output_gbp_per_mtok"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
 	}
 }

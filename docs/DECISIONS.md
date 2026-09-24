@@ -1278,3 +1278,124 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-25 — Built-in model price table seeds the worker's price fields
+
+Issue #13: `fleet.ceiling_gbp` required both price flags on every run,
+even for a model with a well-known published price, so an operator had to
+look up and hand-transcribe USD list prices before a ceiling could be
+used at all. `internal/config/prices.go` adds a curated map of nine
+verified model ids to their standard-tier (not batch, priority/flex, or
+cached input; short-context) USD list prices, `LookupModelPrice` to
+convert one to GBP, and `ResearchConfig.SeedModelPrices` to fill both
+fleet price fields from it. `internal/cli.resolveConfig` calls it
+immediately before `Validate`, so `research-config` and `research`
+resolve a known model's prices identically.
+
+Rows (USD per MTok, input/output; official vendor source; checked
+2026-09-25):
+
+| id | input | output | source |
+| --- | --- | --- | --- |
+| `gpt-5.5` | 5.00 | 30.00 | https://developers.openai.com/api/docs/models/gpt-5.5 |
+| `gpt-5.4-mini` | 0.75 | 4.50 | https://developers.openai.com/api/docs/models/gpt-5.4-mini |
+| `gpt-5.4-nano` | 0.20 | 1.25 | https://developers.openai.com/api/docs/models/gpt-5.4-nano |
+| `gpt-5.6-terra` | 2.00 | 12.00 | https://developers.openai.com/api/docs/models/gpt-5.6-terra |
+| `gpt-5.6-luna` | 0.20 | 1.20 | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| `claude-fable-5-1` | 10.00 | 50.00 | https://platform.claude.com/docs/en/about-claude/pricing |
+| `claude-opus-5-5` | 4.00 | 20.00 | https://platform.claude.com/docs/en/about-claude/pricing |
+| `claude-sonnet-5` | 2.00 | 10.00 | https://platform.claude.com/docs/en/about-claude/pricing |
+| `claude-haiku-4-5-20251001` | 1.00 | 5.00 | https://platform.claude.com/docs/en/about-claude/pricing |
+
+**Rate.** GBP is USD × 0.7539, the Bank of England XUDLUSS daily spot rate
+for 23 Sep 2026 (1.3265 USD per GBP, inverted and rounded to 4 dp;
+source https://www.bankofengland.co.uk/boeapps/database/_iadb-fromshowcolumns.asp?csv.x=yes&Datefrom=20/Sep/2026&Dateto=30/Sep/2026&SeriesCodes=XUDLUSS&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N).
+This is deliberately not the `usdToGBPPlanningRate` (0.79) that
+`internal/researcher/gemini/cost.go` uses for the Gemini tiers' estimate:
+0.79 reproduces PROPOSAL §2's published GBP envelope for a fixed USD
+range and was never meant to track FX day to day, while this table
+converts real per-token list prices and is re-checked, and re-dated, by
+hand, so it uses a cited spot rate instead. 0.79 is about 4.8% above
+0.7539 — conservative for the Gemini estimate (it overstates GBP cost)
+but the wrong direction for a per-token ceiling here — so the two rates
+stay independent and the Gemini planning constant is untouched by this
+change. GBP is rounded with `math.Round(usd*rate*1e4)/1e4` (4 dp), so the
+emitted JSON carries no binary-conversion noise.
+
+**Seeding.** `SeedModelPrices` touches only
+`fleet.price_input_gbp_per_mtok` and `fleet.price_output_gbp_per_mtok`,
+and only when both are exactly zero, `Agent` is `worker` or `fleet`, and
+`fleet.model_name` hits the table by an exact, case-sensitive id match —
+no trimming, normalisation or prefix match, since a near-miss silently
+seeding the wrong price is worse than a miss. Either field set to a
+non-zero value, by a flag or a base config, leaves both alone: an
+explicit price always wins over the table, and ceiling presence plays no
+part in whether seeding happens. `Validate` itself never treats table
+membership as satisfying a ceiling — only real, non-zero price fields do
+— so an unpriced ceiling on a known model still fails if
+`SeedModelPrices` was never called; that error omits the "not in the
+built-in price table" claim, since the model is not, in fact, missing. An
+unpriced ceiling on a model absent from the table names the model
+directly. `ModelPrice` also carries `InputUSDPerMTok`, `OutputUSDPerMTok`
+and `USDToGBP` alongside the two GBP fields `Validate` and
+`SeedModelPrices` use, so a future provenance-displaying command has the
+raw figures without a second lookup; no caller reads them yet. Because
+seeding is all-or-nothing, one explicit price suppresses it and leaves
+the other field at a literal zero, so `Validate` now requires both GBP
+price fields non-zero once a ceiling is set — a ceiling with only one
+price set is rejected the same as a ceiling with neither, since a zero
+price would leave one token direction uncounted and the ceiling would be
+silently under-enforced. This is the same "spend levers are real or
+rejected" rule as the 2026-09-23 entry.
+
+**What is excluded, and why** (from the research packet). `gpt-5.6-sol`
+is verified but sold at a promotional price the vendor states holds "at
+least through November 21, 2026" without stating the post-promotion
+price, so seeding it would silently under-price a ceiling once the
+promotion ends. `gpt-5.5-pro` is verified but is Responses/Batch only,
+unreachable from a Chat Completions worker. `gpt-5.5-mini` and
+`gpt-5.5-nano` do not exist as API ids; the vendor's current mini/nano
+tiers are `gpt-5.4-mini`/`gpt-5.4-nano`. `gpt-6-astra`, `gpt-6-sol` and
+`gpt-6-luna` are verified and priced but outside this change's GPT-5
+scope — candidates for a follow-up. The dateless `claude-haiku-4-5` alias
+is deliberately not a second key: the table keys exact API ids, and only
+the dated snapshot `claude-haiku-4-5-20251001` was checked.
+
+**Claude rows and the compatibility layer.** All four Claude prices are
+reached, from this worker, through Anthropic's OpenAI-compatible Chat
+Completions endpoint (`https://api.anthropic.com/v1/`), which Anthropic's
+own docs describe as intended "to test and compare model capabilities"
+and "not considered a long-term or production-ready solution", and which
+does not support prompt caching, so the cached-input rate never applies
+here. Whether the endpoint's `usage.completion_tokens` includes
+adaptive-thinking tokens is unconfirmed; thinking is always on for
+`claude-fable-5-1` and `claude-opus-5-5` and is billed as output, so a
+ceiling estimate may under-count for those two if the field excludes
+them. `claude-haiku-4-5-20251001`'s retirement is "not sooner than
+October 15, 2026", so it is not deprecated as of this table.
+
+**The estimate is a biased planning figure, not a bill**, in both
+directions. It assumes every input token is uncached, which over-states
+cost against a run that reuses a system prompt or search results across
+turns — no row is priced at its vendor's cache-hit rate. It also applies
+no row's long-context surcharge: all nine list prices are the
+short-context rate, so a request that crosses OpenAI's >272K-token
+threshold or a long Claude context is under-priced by the table. Both are
+accepted trade-offs for a planning ceiling; modelling either surcharge is
+deferred to a later pass if a worker's prompts start approaching those
+thresholds.
+
+**Pipeline composition.** `research-config` emits the seeded prices into
+its JSON, not a marker that they came from the table, so a later pipeline
+stage that changes `fleet.model_name` — including one reading a prior
+stage's stdout via `--config -` — inherits the old model's stale prices
+rather than re-seeding: `SeedModelPrices` only fires when both price
+fields are still zero, and by that point they already carry the first
+stage's seeded values. A pipeline stage that changes the model must
+restate the prices itself, or clear them so the next resolution can
+re-seed for the new model.
+
+**The table is maintained by hand.** Each row's `checked` date records
+when its USD price was last confirmed against the vendor's page; nothing
+in the codebase re-verifies a row automatically, so a stale price is a
+manual-review risk the checked date is meant to surface, not eliminate.
