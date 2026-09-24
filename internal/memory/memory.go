@@ -1,12 +1,14 @@
-// Package memory defines the ContextStore seam: agentic memory for
-// research runs. Defining the interface now — and *not* implementing it —
-// is a deliberate decision (PROPOSAL §5): a single Gemini task needs no
-// Chiron-side memory, so v1 binds Noop, and v2 binds an external
-// implementation (the Paddock project) without touching the core.
+// Package memory defines the agentic-memory seam for research runs. It has
+// two halves. Recaller and Rememberer are long-term, cross-session memory:
+// an external knowledge store (Billet, Alexandria) satisfies them through the
+// adapters in this package's subpackages, and the research worker consults
+// them as its recall action (docs/KNOWLEDGE.md). The session and artifact
+// plane (OpenSession, Put, Get) is bound only to Noop (PROPOSAL §5).
 //
-// The interface is declared locally rather than imported from paddockapi,
-// per PADDOCK §8.4: Paddock satisfies it structurally, so neither project
-// hard-depends on the other and Chiron stays buildable without Paddock.
+// The interfaces are declared locally rather than imported from any store's
+// own module, per PADDOCK §8.4: a store satisfies them structurally, so
+// neither project hard-depends on the other and Chiron stays buildable
+// without any of them.
 package memory
 
 import (
@@ -72,10 +74,24 @@ type Recalled struct {
 	Score     float64   `json:"score,omitempty"`
 }
 
-// ContextStore is the agentic-memory seam: short-term (within-session)
-// artifacts written by reference, and long-term (cross-session) memory
-// with semantic recall. Chiron stores and recalls; what to remember and
-// when to forget are policy, and policy stays with the caller.
+// Recaller retrieves long-term memory semantically related to a query. The
+// namespace scopes the lookup where the store supports it (Alexandria: a
+// space); a store that binds its namespace server-side (Billet) copies the
+// value into each Reference and otherwise ignores it.
+type Recaller interface {
+	Recall(ctx context.Context, ns Namespace, q Query) ([]Recalled, error)
+}
+
+// Rememberer stores one item of durable long-term memory and returns a
+// Reference to it.
+type Rememberer interface {
+	Remember(ctx context.Context, ns Namespace, m Memory) (Reference, error)
+}
+
+// ContextStore is the full agentic-memory seam: short-term (within-session)
+// artifacts written by reference, plus the long-term Rememberer and Recaller
+// halves. Chiron stores and recalls; what to remember and when to forget are
+// policy, and policy stays with the caller.
 type ContextStore interface {
 	// OpenSession opens the session-scoped, TTL'd namespace for one run.
 	OpenSession(ctx context.Context, ref SessionRef) (Session, error)
@@ -86,9 +102,6 @@ type ContextStore interface {
 	// Get fetches an artifact by Reference.
 	Get(ctx context.Context, ref Reference) (io.ReadCloser, ArtifactMeta, error)
 
-	// Remember stores one item of durable long-term memory.
-	Remember(ctx context.Context, ns Namespace, m Memory) (Reference, error)
-
-	// Recall retrieves long-term memory semantically related to the query.
-	Recall(ctx context.Context, ns Namespace, q Query) ([]Recalled, error)
+	Rememberer
+	Recaller
 }

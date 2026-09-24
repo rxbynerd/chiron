@@ -106,6 +106,7 @@ type Usage struct {
 	ToolUseTokens    int     `json:"tool_use_tokens,omitempty"`
 	ThoughtTokens    int     `json:"thought_tokens,omitempty"`
 	SearchCount      int     `json:"search_count,omitempty"`
+	RecallCount      int     `json:"recall_count,omitempty"`
 	PollCount        int     `json:"poll_count,omitempty"`
 	ReconnectCount   int     `json:"reconnect_count,omitempty"`
 	EstimatedCostGBP float64 `json:"estimated_cost_gbp,omitempty"`

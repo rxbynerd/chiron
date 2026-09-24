@@ -37,8 +37,9 @@ with actions pinned to full commit SHAs.
 | `internal/run` | The pure-function research core: `Run` (start→await→retrieve→format→emit) and `Resume`. Depends only on the seam interfaces; takes a context and `Deps`, reads no environment. |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. |
 | `internal/researcher/gemini` | The Deep Research adapter: tier mapping and cost table, input grounding, prompt template, streaming await with reconnect and poll fallback, planner binding, follow-up mode. Creates are never auto-retried (money). |
-| `internal/researcher/fleet` | v2 in-process research agents. `RunWorker` is the bounded search→fetch→final loop on one standard model (turn, token, GBP-ceiling and wall-clock caps; tool failures fed back to the model with a three-strike bound; citations restricted to fetched URLs); `Worker` wraps it as a `Researcher` with opaque `wkr_` ids that `get`/`follow-up` refuse. `--agent fleet` (lead over several workers) still returns `ErrNotImplemented`. |
-| `internal/researcher/fleet/search` | Hand-rolled Streamable-HTTP MCP client for the web-search tool: `initialize` handshake, `tools/call` with bounded JSON or SSE responses, key header-only and scrubbed. Ships an exported fake server for downstream tests. `Options.Endpoint`/key ref are security-sensitive for the same reason as the model client. |
+| `internal/researcher/fleet` | v2 in-process research agents. `RunWorker` is the bounded search→fetch→final loop on one standard model (turn, token, GBP-ceiling and wall-clock caps; tool failures fed back to the model with a three-strike bound; citations restricted to URLs it saw and, with a knowledge store, locators it recalled), plus a `recall` action when `WorkerDeps.Knowledge` is set; `Worker` wraps it as a `Researcher` with opaque `wkr_` ids that `get`/`follow-up` refuse, and saves a completed finding back when `WorkerDeps.Remember` is set (docs/KNOWLEDGE.md). `--agent fleet` (lead over several workers) still returns `ErrNotImplemented`. |
+| `internal/researcher/fleet/search` | The web-search tool's result-shape layer over `internal/mcpclient`: calls `search` and maps `{results:[{title,url,snippet}]}`, degrading to a prose snippet rather than erroring. Ships an exported fake server for downstream tests. `Options.Endpoint`/key ref are security-sensitive for the same reason as the model client. |
+| `internal/mcpclient` | Hand-rolled Streamable-HTTP MCP transport shared by search and Billet: `initialize` handshake, `tools/call` with bounded JSON or SSE responses, best-effort session DELETE, cross-host and https-to-http redirects refused, key header-only and scrubbed, no retries. Ships a generic scripted `FakeServer`. |
 | `internal/researcher/fleet/fetch` | The `web_fetch` client: SSRF-guarded (private, loopback, link-local, CGNAT, NAT64/6to4, metadata ranges refused at dial time with pinned IPs; no proxy; redirects re-validated), bounded reads with truncation reported, `AllowLoopback` for tests only (see `CHIRON_FETCH_ALLOW_LOOPBACK`). |
 | `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. Ships an exported `FakeServer` for downstream tests. `Options.ModelEndpoint`/`ModelKeyRef` (via config) are security-sensitive — credentials travel to the configured endpoint. |
 | `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
@@ -47,7 +48,9 @@ with actions pinned to full commit SHAs.
 | `internal/transport` | `Transport` seam: run events out of the core. `Stdio` NDJSON on stderr (v1); `grpc` stub for v2. Event kinds mirror `proto/chiron/v1` one-to-one. |
 | `internal/trace` | `Tracer` seam with three bindings: OTel (OTLP/HTTP), JSONL (local debug), Noop. `names.go` fixes the span/metric vocabulary; all payloads scrubbed. |
 | `internal/secret` | `secret://` resolver (env, file backends), the credential-pattern `Scrub` primitive, and the scrubbing slog handler. Literal keys never appear in config, logs, traces, or stderr. |
-| `internal/memory` | `ContextStore` seam + `Noop` only — deliberately unimplemented (PROPOSAL §5); fulfilled externally by Paddock in v2. Declared locally, never imported from paddockapi (see DECISIONS.md). |
+| `internal/memory` | The agentic-memory seam, declared locally (never imported from any store's module; see DECISIONS.md). `Recaller`/`Rememberer` are long-term memory, bound to external knowledge stores by the subpackages below and consumed by the worker's recall action and save-back. `ContextStore` embeds both plus the session and artifact plane, which still binds only `Noop` pending the Wave 4 in-memory store or Paddock. |
+| `internal/memory/billet` | Billet adapter over `internal/mcpclient`: `Recall` calls `search_memory` (no degrade-to-prose: a reply without `records` is an error; each record bounded on read), `Remember` calls `save_memory` (content over 256 KiB refused before any request). Locators are `billet://memory/<id>`. Ships `FakeServer` and the `CHIRON_BILLET_BIN` interop test. |
+| `internal/memory/alexandria` | Alexandria adapter over REST `GET /v1/search` (the path its own plugin uses): bearer token, optional Cloudflare Access headers, space slug validated, redirects never followed, body bounded, `degraded` surfaced as a label. `Recaller` only. Ships `FakeServer`. |
 | `proto/chiron/v1` | The v2 control-plane contract as a Buf module. Generated Go is deliberately not committed in v1 (see DECISIONS.md). |
 
 ## Ground rules
@@ -91,11 +94,19 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
 - Create `httptest.Server` at the call site with `defer server.Close()`;
   do not hide server lifecycle inside helper functions — the call site
   owns and varies the handler.
-  The exported `model.FakeServer` and `search.FakeServer` are the one
-  carve-out: they are scripted protocol doubles shared across packages,
-  still created and closed at the call site (see DECISIONS.md,
+  The exported `model.FakeServer`, `search.FakeServer`,
+  `mcpclient.FakeServer`, `billet.FakeServer` and `alexandria.FakeServer`
+  are the one carve-out: they are scripted protocol doubles shared across
+  packages, still created and closed at the call site (see DECISIONS.md,
   2026-07-01 standard-model adapter entry, for why they live beside the
-  clients rather than in test-support packages).
+  clients rather than in test-support packages). `billet.FakeServer`
+  records what a save-back sent (`SavedContents()`); `alexandria.FakeServer`
+  records the query string, bearer and Access headers.
+- The fleet package tests the worker against in-test function adapters for
+  `memory.Recaller`/`memory.Rememberer`, never an adapter package.
+- `TestLiveBillet` is the one test that talks to a real server: it is
+  skipped unless `CHIRON_BILLET_BIN` names a `billet` binary, which it starts
+  on a free loopback port.
 - For new SSE tests in any package, use an `sseWrite`-style helper
   (`t.Helper()`; calls `http.Flusher.Flush()` after writing) rather
   than raw `io.WriteString` literals, so a handler that keeps the
@@ -130,8 +141,9 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
 The `--agent worker`/`fleet` paths add a `fleet` config block
 (`internal/config` `FleetConfig`) whose endpoint and key fields are as
 security-sensitive as `CHIRON_GEMINI_BASE_URL`, for the same reason: the
-standard-model and search-MCP keys travel to whatever endpoint the config
-names, so whoever controls those fields receives the credentials.
+standard-model, search-MCP and knowledge store keys travel to whatever
+endpoint the config names, so whoever controls those fields receives the
+credentials.
 
 - `fleet.model_endpoint` / `fleet.search_endpoint` — validated at
   `ResearchConfig.Validate` with the `CHIRON_GEMINI_BASE_URL` rule:
@@ -141,6 +153,15 @@ names, so whoever controls those fields receives the credentials.
   cycle); keep the two in step.
 - `fleet.model_key_ref` / `fleet.search_key_ref` — must be `secret://`
   references; literals are rejected and never echoed in the error.
+- `fleet.knowledge_endpoint` / `fleet.knowledge_key_ref` — the knowledge
+  store pair, validated exactly like the search pair. The composition root
+  requires the endpoint when `fleet.knowledge_provider` is set and the key
+  for `alexandria`. With no provider every other `fleet.knowledge_*` field
+  must be empty or default. `fleet.knowledge_remember` (Billet only) sends
+  each completed finding, built from public-web content, to the store; it
+  is off by default and named on the Interaction's tool list. Issue #28 (a
+  config file can choose both a credential and its destination) applies to
+  this pair as it does to the model and search pairs.
 - `fleet.model_name` is required for `worker`/`fleet`; the model client
   never sends an empty identifier.
 - Spend caps: `fleet.max_turns`, `fleet.max_tokens` and

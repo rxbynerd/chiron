@@ -209,6 +209,31 @@ func TestMarkdownFormat(t *testing.T) {
 				CompletedAt: finished,
 			},
 		},
+		{
+			// A billet:// memory locator or a kb:// ref is kept as a
+			// source but rendered as its escaped title plus the locator
+			// in inline code, never a link; other non-web schemes stay
+			// dropped, and the recall count lands in front matter.
+			name: "citation-billet-uri",
+			in: &types.Interaction{
+				ID:      "wkr_billet",
+				Agent:   "worker",
+				Query:   "What did we decide about PHY vendors?",
+				Tools:   []string{"web_search", "web_fetch", "knowledge_recall"},
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# PHY vendors\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "billet://memory/0b1c2d", Title: "PHY vendor [decision](javascript:x) *2026*"},
+					{URI: "billet://memory/untitled`id"},
+					{URI: "kb://source/1234#L10-L14", Title: "Vendor notes"},
+					{URI: "javascript:alert(1)", Title: "Dropped"},
+					{URI: "https://example.org/phy", Title: "PHY overview"},
+				},
+				Usage:       types.Usage{SearchCount: 1, RecallCount: 2},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
 	}
 
 	for _, tc := range cases {

@@ -1,6 +1,7 @@
 // Package fleet holds Chiron's own in-process research agents behind the
 // Researcher seam: Worker, a bounded search -> read -> synthesise loop over
-// one standard model with a web-search MCP tool and web_fetch, and Fleet,
+// one standard model with a web-search MCP tool, web_fetch and, when
+// configured, knowledge store recall (docs/KNOWLEDGE.md), and Fleet,
 // the placeholder for the lead orchestrator that will fan out many workers
 // (docs/V2-RESEARCH-AGENT.md §6). To the run core both are just Researchers.
 package fleet

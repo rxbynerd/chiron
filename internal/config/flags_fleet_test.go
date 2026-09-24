@@ -91,6 +91,36 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 				t.Errorf("Memory = %q", f.Memory)
 			}
 		}},
+		{"knowledge-provider", []string{"--fleet-knowledge-provider", KnowledgeBillet}, func(t *testing.T, f FleetConfig) {
+			if f.KnowledgeProvider != KnowledgeBillet {
+				t.Errorf("KnowledgeProvider = %q", f.KnowledgeProvider)
+			}
+		}},
+		{"knowledge-endpoint", []string{"--fleet-knowledge-endpoint", "https://billet.internal/"}, func(t *testing.T, f FleetConfig) {
+			if f.KnowledgeEndpoint != "https://billet.internal/" {
+				t.Errorf("KnowledgeEndpoint = %q", f.KnowledgeEndpoint)
+			}
+		}},
+		{"knowledge-key-ref", []string{"--fleet-knowledge-key-ref", "secret://KB_KEY"}, func(t *testing.T, f FleetConfig) {
+			if f.KnowledgeKeyRef != "secret://KB_KEY" {
+				t.Errorf("KnowledgeKeyRef = %q", f.KnowledgeKeyRef)
+			}
+		}},
+		{"knowledge-space", []string{"--fleet-knowledge-space", "notes"}, func(t *testing.T, f FleetConfig) {
+			if f.KnowledgeSpace != "notes" {
+				t.Errorf("KnowledgeSpace = %q", f.KnowledgeSpace)
+			}
+		}},
+		{"knowledge-limit", []string{"--fleet-knowledge-limit", "11"}, func(t *testing.T, f FleetConfig) {
+			if f.KnowledgeLimit != 11 {
+				t.Errorf("KnowledgeLimit = %d", f.KnowledgeLimit)
+			}
+		}},
+		{"knowledge-remember", []string{"--fleet-knowledge-remember"}, func(t *testing.T, f FleetConfig) {
+			if !f.KnowledgeRemember {
+				t.Errorf("KnowledgeRemember = %v", f.KnowledgeRemember)
+			}
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Default()

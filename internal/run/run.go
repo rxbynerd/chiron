@@ -265,6 +265,7 @@ func recordMetrics(ctx context.Context, tracer trace.Tracer, result *types.RunRe
 	tracer.Metric(ctx, trace.MetricTaskDurationSeconds, result.Duration.Seconds())
 	tracer.Metric(ctx, trace.MetricPollCount, float64(result.Usage.PollCount))
 	tracer.Metric(ctx, trace.MetricSearchCount, float64(result.Usage.SearchCount))
+	tracer.Metric(ctx, trace.MetricRecallCount, float64(result.Usage.RecallCount))
 	tracer.Metric(ctx, trace.MetricInputTokens, float64(result.Usage.InputTokens))
 	tracer.Metric(ctx, trace.MetricOutputTokens, float64(result.Usage.OutputTokens))
 	tracer.Metric(ctx, trace.MetricEstimatedCostGBP, result.Usage.EstimatedCostGBP)

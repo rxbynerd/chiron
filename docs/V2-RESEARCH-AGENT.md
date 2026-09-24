@@ -60,10 +60,13 @@ When this document says "worker" or "fleet", it means Chiron in-process code.
   loop.
 - **Research-only by construction.** Workers have exactly two read-only network
   tools: search and fetch. They do not expose shell, file-write, edit, executor,
-  workspace mutation, or permission-approval surfaces.
+  workspace mutation, or permission-approval surfaces. _Amended: a configured
+  knowledge store adds a read-only recall action and an opt-in save-back to
+  the suite's memory store, never a workspace write (`docs/KNOWLEDGE.md`)._
 - **External web only.** Internal source tools are out of v2: no repo-scoped MCP,
   no Gemini `file_search`, no workspace search. Those route in later with
-  Paddock/internal-source work.
+  Paddock/internal-source work. _Amended: Billet and Alexandria route in as
+  the knowledge store ahead of Paddock (`docs/KNOWLEDGE.md`)._
 - **No vendor AI SDKs.** The standard-model adapter, MCP client, Gemini stopgap,
   and any eval judge are hand-rolled `net/http`.
 - **No full OpenAI Responses adapter in Chiron.** Build only the minimum

@@ -9,10 +9,11 @@ import (
 )
 
 // The worker's action vocabulary is the only surface through which the model
-// can influence the world, and it is deliberately tiny and closed: exactly
-// three actions exist, each read-only or terminal. parseAction rejects any
-// kind it does not recognise and the loop's dispatch is a closed switch, so a
-// side-effecting action requested by the model can only be refused.
+// can influence the world, and it is deliberately tiny and closed: three
+// actions exist, plus recall when a knowledge store is configured, each
+// read-only or terminal. parseAction rejects any kind it does not recognise
+// and the loop's dispatch is a closed switch, so a side-effecting action
+// requested by the model can only be refused.
 
 // actionKind is the discriminator on a model action.
 type actionKind string
@@ -20,6 +21,7 @@ type actionKind string
 const (
 	actionSearch actionKind = "search"
 	actionFetch  actionKind = "fetch"
+	actionRecall actionKind = "recall"
 	actionFinal  actionKind = "final"
 )
 
@@ -44,7 +46,8 @@ type action struct {
 	Citations []citationInput `json:"citations"`
 }
 
-// actionSchema is the JSON Schema sent as provider-native structured output.
+// actionSchema is the JSON Schema sent as provider-native structured output
+// when recall is disabled.
 // It follows the strict-mode rules OpenAI-compatible providers enforce: every
 // object sets additionalProperties:false and lists every property in
 // required, with fields that do not apply to an action typed nullable. The
@@ -89,11 +92,30 @@ var actionSchema = json.RawMessage(`{
   "required": ["action", "query", "url", "answer", "citations"]
 }`)
 
+// actionSchemaRecall is actionSchema with recall added to the action enum and
+// the query field described for both search and recall.
+var actionSchemaRecall = json.RawMessage(strings.NewReplacer(
+	`"enum": ["search", "fetch", "final"]`,
+	`"enum": ["search", "fetch", "recall", "final"]`,
+	`"description": "For action=search: the web search query. Null otherwise."`,
+	`"description": "For action=search: the web search query. For action=recall: the knowledge store query. Null otherwise."`,
+).Replace(string(actionSchema)))
+
+// actionSchemaFor returns the action schema for a loop with or without the
+// recall action. Without recall it is actionSchema unchanged.
+func actionSchemaFor(recall bool) json.RawMessage {
+	if recall {
+		return actionSchemaRecall
+	}
+	return actionSchema
+}
+
 // parseAction decodes and validates one model reply. An unrecognised action
 // kind, a known kind missing its required field, an unknown field, or
 // trailing content after the JSON object is an error; the loop treats a parse
-// error as a hard failure with no side effect.
-func parseAction(raw string) (action, error) {
+// error as a hard failure with no side effect. recall is accepted only when
+// the loop was built with a knowledge store.
+func parseAction(raw string, recall bool) (action, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return action{}, errors.New("fleet: model returned an empty action")
@@ -117,12 +139,22 @@ func parseAction(raw string) (action, error) {
 		if strings.TrimSpace(a.URL) == "" {
 			return action{}, errors.New("fleet: fetch action is missing a url")
 		}
+	case actionRecall:
+		if !recall {
+			return action{}, fmt.Errorf("fleet: model requested unknown action %q: only search, fetch and final exist", a.Kind)
+		}
+		if strings.TrimSpace(a.Query) == "" {
+			return action{}, errors.New("fleet: recall action is missing a query")
+		}
 	case actionFinal:
 		// An empty answer is permitted: the model may conclude the sources
 		// are insufficient, and the formatter renders a placeholder body.
 	case "":
 		return action{}, fmt.Errorf("fleet: model action is missing the required %q discriminator", "action")
 	default:
+		if recall {
+			return action{}, fmt.Errorf("fleet: model requested unknown action %q: only search, fetch, recall and final exist", a.Kind)
+		}
 		return action{}, fmt.Errorf("fleet: model requested unknown action %q: only search, fetch and final exist", a.Kind)
 	}
 	return a, nil

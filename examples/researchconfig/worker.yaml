@@ -28,3 +28,12 @@ fleet:
   price_input_gbp_per_mtok: 1.5
   price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5
+  # Organisational knowledge (docs/KNOWLEDGE.md). Uncomment to let the
+  # worker recall from a knowledge store; the endpoint follows the same
+  # scheme rule, and its key (if any) travels to it.
+  # knowledge_provider: billet        # or alexandria
+  # knowledge_endpoint: http://127.0.0.1:8140/
+  # knowledge_key_ref: secret://KNOWLEDGE_KEY   # required for alexandria
+  # knowledge_space: team-notes       # alexandria only: space slug
+  # knowledge_limit: 5                # hits per recall, 1..20
+  # knowledge_remember: true          # billet only: save completed findings

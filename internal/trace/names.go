@@ -28,6 +28,7 @@ const (
 	MetricTaskDurationSeconds = "task_duration_seconds"
 	MetricPollCount           = "poll_count"
 	MetricSearchCount         = "search_count"
+	MetricRecallCount         = "recall_count"
 	MetricInputTokens         = "input_tokens"
 	MetricOutputTokens        = "output_tokens"
 	MetricEstimatedCostGBP    = "estimated_cost_gbp"

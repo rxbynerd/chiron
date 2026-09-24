@@ -1,4 +1,4 @@
-package search
+package mcpclient
 
 import (
 	"bufio"
@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/secret"
 )
@@ -27,7 +28,7 @@ const (
 	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
-// session is the state initialize establishes for the rest of one Search.
+// session is the state initialize establishes for the rest of one CallTool.
 type session struct {
 	id              string // empty for a stateless server
 	protocolVersion string
@@ -91,12 +92,12 @@ func (e *rpcError) Error() string {
 func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (rpcResponse, string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return rpcResponse{}, "", fmt.Errorf("search: encoding %s request: %s", req.Method, c.scrub(err.Error()))
+		return rpcResponse{}, "", fmt.Errorf("mcp: encoding %s request: %s", req.Method, c.scrub(err.Error()))
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return rpcResponse{}, "", fmt.Errorf("search: building %s request: %s", req.Method, c.scrub(err.Error()))
+		return rpcResponse{}, "", fmt.Errorf("mcp: building %s request: %s", req.Method, c.scrub(err.Error()))
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	// A Streamable-HTTP client must accept both reply framings so the server
@@ -108,7 +109,7 @@ func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (r
 	if err != nil {
 		// The transport error can carry the request URL; the key is never in
 		// the URL, but scrub regardless so no diagnostic can leak it.
-		return rpcResponse{}, "", fmt.Errorf("search: POST %s: %s", req.Method, c.scrub(err.Error()))
+		return rpcResponse{}, "", fmt.Errorf("mcp: POST %s: %s", req.Method, c.scrub(err.Error()))
 	}
 	defer resp.Body.Close()
 
@@ -132,7 +133,7 @@ func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (r
 		return rpcResponse{}, newSession, err
 	}
 	if !rpc.answers(*req.ID) {
-		return rpcResponse{}, newSession, fmt.Errorf("search: %s reply does not answer request id %d", req.Method, *req.ID)
+		return rpcResponse{}, newSession, fmt.Errorf("mcp: %s reply does not answer request id %d", req.Method, *req.ID)
 	}
 	return rpc, newSession, nil
 }
@@ -152,7 +153,7 @@ func (c *Client) setSessionHeaders(req *http.Request, sess session) {
 
 // endSession sends the DELETE that asks the server to discard the session. It
 // is best effort: a server may refuse client-initiated termination with 405,
-// and no outcome of the DELETE affects the search result.
+// and no outcome of the DELETE affects the tool result.
 func (c *Client) endSession(ctx context.Context, sess session) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.endpoint, nil)
 	if err != nil {
@@ -182,11 +183,11 @@ func (c *Client) readResponse(resp *http.Response) (rpcResponse, error) {
 	default:
 		data, err := readBounded(resp.Body, c.maxBodyBytes)
 		if err != nil {
-			return rpcResponse{}, fmt.Errorf("search: reading response: %s", c.scrub(err.Error()))
+			return rpcResponse{}, fmt.Errorf("mcp: reading response: %s", c.scrub(err.Error()))
 		}
 		var rpc rpcResponse
 		if err := json.Unmarshal(data, &rpc); err != nil {
-			return rpcResponse{}, fmt.Errorf("search: decoding response: %s", c.scrub(err.Error()))
+			return rpcResponse{}, fmt.Errorf("mcp: decoding response: %s", c.scrub(err.Error()))
 		}
 		return rpc, nil
 	}
@@ -219,7 +220,7 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 		}
 		var rpc rpcResponse
 		if err := json.Unmarshal(data, &rpc); err != nil {
-			return rpcResponse{}, false, fmt.Errorf("search: decoding SSE response: %s", c.scrub(err.Error()))
+			return rpcResponse{}, false, fmt.Errorf("mcp: decoding SSE response: %s", c.scrub(err.Error()))
 		}
 		// Server-initiated requests and notifications are skipped; this
 		// client answers neither and waits for the reply frame.
@@ -232,7 +233,7 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 	for scanner.Scan() {
 		read += int64(len(scanner.Bytes())) + 1
 		if read > c.maxBodyBytes {
-			return rpcResponse{}, fmt.Errorf("search: SSE stream exceeds %d-byte bound", c.maxBodyBytes)
+			return rpcResponse{}, fmt.Errorf("mcp: SSE stream exceeds %d-byte bound", c.maxBodyBytes)
 		}
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		switch {
@@ -257,7 +258,7 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 				data = append(data, value...)
 				haveData = true
 				if int64(len(data)) > c.maxBodyBytes {
-					return rpcResponse{}, fmt.Errorf("search: SSE event data exceeds %d-byte bound", c.maxBodyBytes)
+					return rpcResponse{}, fmt.Errorf("mcp: SSE event data exceeds %d-byte bound", c.maxBodyBytes)
 				}
 			}
 			// event:/id:/retry: and unknown fields are ignored — the JSON-RPC
@@ -266,9 +267,9 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		if err == bufio.ErrTooLong {
-			return rpcResponse{}, fmt.Errorf("search: SSE event exceeds %d-byte bound", c.maxBodyBytes)
+			return rpcResponse{}, fmt.Errorf("mcp: SSE event exceeds %d-byte bound", c.maxBodyBytes)
 		}
-		return rpcResponse{}, fmt.Errorf("search: reading SSE stream: %s", c.scrub(err.Error()))
+		return rpcResponse{}, fmt.Errorf("mcp: reading SSE stream: %s", c.scrub(err.Error()))
 	}
 	// A trailing frame not terminated by a blank line is still dispatched, so
 	// a server that ends the stream without a final newline is tolerated.
@@ -277,14 +278,15 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 	} else if done {
 		return rpc, nil
 	}
-	return rpcResponse{}, fmt.Errorf("search: SSE stream carried no JSON-RPC response")
+	return rpcResponse{}, fmt.Errorf("mcp: SSE stream carried no JSON-RPC response")
 }
 
 // errorFromResponse builds an error from a non-2xx response, bounding the
-// error-body read and scrubbing it — a server error payload could echo the
-// submitted key back. The key is never in the body Chiron sends (it is
-// header-only), but the server's echo is outside Chiron's control, so the
-// body is scrubbed unconditionally.
+// error-body read, then scrubbing and excerpting it — a server error payload
+// could echo the submitted key back. The key is never in the body Chiron
+// sends (it is header-only), but the server's echo is outside Chiron's
+// control, so the body is scrubbed unconditionally. A body over
+// maxErrorBodyBytes is dropped rather than excerpted.
 func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 	data, err := readBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
@@ -292,9 +294,25 @@ func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 	}
 	detail := strings.TrimSpace(string(data))
 	if detail == "" {
-		return fmt.Errorf("search: %s failed: HTTP %d", method, resp.StatusCode)
+		return fmt.Errorf("mcp: %s failed: HTTP %d", method, resp.StatusCode)
 	}
-	return fmt.Errorf("search: %s failed: HTTP %d: %s", method, resp.StatusCode, c.scrub(detail))
+	return fmt.Errorf("mcp: %s failed: HTTP %d: %s", method, resp.StatusCode, c.errorText(detail))
+}
+
+// errorText scrubs server-supplied text, then cuts it to maxErrorTextBytes on
+// a rune boundary with a marker. Scrubbing first means a key straddling the
+// cut is still redacted by exact match.
+func (c *Client) errorText(s string) string {
+	s = c.scrub(s)
+	if len(s) <= maxErrorTextBytes {
+		return s
+	}
+	const marker = " [truncated]"
+	cut := maxErrorTextBytes - len(marker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }
 
 // scrub redacts credentials from a diagnostic string. It replaces the
@@ -304,14 +322,14 @@ func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 // guards against an empty apiKey redacting every empty substring.
 func (c *Client) scrub(s string) string {
 	if c.apiKey != "" {
-		s = strings.ReplaceAll(s, c.apiKey, "[REDACTED:search-api-key]")
+		s = strings.ReplaceAll(s, c.apiKey, "[REDACTED:mcp-api-key]")
 	}
 	return secret.Scrub(s)
 }
 
 // readBounded reads at most max bytes, failing — rather than silently
 // truncating — if the body is larger, so a misbehaving server cannot exhaust
-// memory or smuggle a clipped document through as complete. This mirrors
+// memory or smuggle a clipped document through as complete. It mirrors
 // internal/interactions.readBounded and model.readBounded.
 func readBounded(r io.Reader, max int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, max+1))

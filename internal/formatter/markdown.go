@@ -29,7 +29,8 @@ var _ Formatter = (*Markdown)(nil)
 
 // frontMatter is the YAML document at the head of the report. Field
 // names are part of Chiron's output contract; keep them stable. The
-// cost signals are the search count, token totals, and estimated cost;
+// cost signals are the search and recall counts, token totals, and
+// estimated cost;
 // the tool set is the one the adapter resolved onto the create request
 // (PROPOSAL §4.4), recorded on the domain Interaction since the API
 // does not echo it back.
@@ -42,6 +43,7 @@ type frontMatter struct {
 	Started          string       `yaml:"started,omitempty"`
 	Completed        string       `yaml:"completed,omitempty"`
 	Searches         int          `yaml:"searches,omitempty"`
+	Recalls          int          `yaml:"recalls,omitempty"`
 	Tokens           *tokens      `yaml:"tokens,omitempty"`
 	EstimatedCostGBP float64      `yaml:"estimated_cost_gbp,omitempty"`
 	Tools            []string     `yaml:"tools,omitempty,flow"`
@@ -70,8 +72,17 @@ type source struct {
 // markdown renders the source as a numbered-list entry body. Title and
 // URI are API-provided and untrusted: `]` in a title and `)` in a URI
 // would break out of the link syntax, so both are neutralised before
-// formatting. Scheme filtering happens earlier, in collectSources.
+// formatting. A knowledge store locator cannot resolve in a viewer, so it
+// renders as its escaped title and the locator in inline code, never as a
+// link. Scheme filtering happens earlier, in collectSources.
 func (s source) markdown() string {
+	if isKnowledgeURI(s.URI) {
+		uri := strings.ReplaceAll(strings.Join(strings.Fields(s.URI), "%20"), "`", "%60")
+		if s.Title == "" {
+			return "`" + uri + "`"
+		}
+		return escapeInline(s.Title) + " `" + uri + "`"
+	}
 	title := strings.ReplaceAll(s.Title, "]", `\]`)
 	if title == "" {
 		title = s.URI
@@ -175,6 +186,7 @@ func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 		Started:          stamp(in.CreatedAt),
 		Completed:        stamp(in.CompletedAt),
 		Searches:         in.Usage.SearchCount,
+		Recalls:          in.Usage.RecallCount,
 		Tokens:           tokensOf(in.Usage),
 		EstimatedCostGBP: in.Usage.EstimatedCostGBP,
 		Tools:            in.Tools,
@@ -182,20 +194,48 @@ func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 	}
 }
 
+// knowledgeSchemes are the non-web citation schemes a report keeps: a Billet
+// memory locator and an Alexandria ref. Neither resolves in a viewer, so
+// both render unlinked.
+var knowledgeSchemes = []string{"billet://", "kb://"}
+
+// isKnowledgeURI reports whether uri carries one of knowledgeSchemes.
+func isKnowledgeURI(uri string) bool {
+	for _, scheme := range knowledgeSchemes {
+		if strings.HasPrefix(uri, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
 // collectSources maps citations into front-matter shape, skipping any
 // without a URI (nothing to verify against) and any with a non-web
-// scheme: citation URIs are API-provided, and a javascript:, data: or
-// file: URI is not a verifiable source — some renderers would pass it
-// through to live HTML.
+// scheme other than the knowledge schemes: citation URIs are API-provided, and a
+// javascript:, data: or file: URI is not a verifiable source — some
+// renderers would pass it through to live HTML.
 func collectSources(citations []types.Citation) []source {
 	var out []source
 	for _, c := range citations {
-		if !strings.HasPrefix(c.URI, "https://") && !strings.HasPrefix(c.URI, "http://") {
+		if !strings.HasPrefix(c.URI, "https://") && !strings.HasPrefix(c.URI, "http://") &&
+			!isKnowledgeURI(c.URI) {
 			continue
 		}
 		out = append(out, source{URI: c.URI, Title: c.Title})
 	}
 	return out
+}
+
+// inlineMarkdown matches the characters that would give plain text
+// Markdown meaning: emphasis, code, links, images and raw HTML.
+var inlineMarkdown = strings.NewReplacer(
+	`\`, `\\`, "`", "\\`", "*", `\*`, "_", `\_`,
+	"[", `\[`, "]", `\]`, "<", `\<`, ">", `\>`, "!", `\!`,
+)
+
+// escapeInline renders untrusted text as literal Markdown on one line.
+func escapeInline(s string) string {
+	return inlineMarkdown.Replace(strings.Join(strings.Fields(s), " "))
 }
 
 // tokensOf maps the usage token counts into front-matter shape, or nil

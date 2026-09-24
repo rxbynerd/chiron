@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["search", "fetch", "final"],
+      "description": "The single action to take this turn."
+    },
+    "query": {
+      "type": ["string", "null"],
+      "description": "For action=search: the web search query. Null otherwise."
+    },
+    "url": {
+      "type": ["string", "null"],
+      "description": "For action=fetch: a URL seen in a prior search result to retrieve. Null otherwise."
+    },
+    "answer": {
+      "type": ["string", "null"],
+      "description": "For action=final: the finding, in the required output format. Null otherwise."
+    },
+    "citations": {
+      "type": ["array", "null"],
+      "description": "For action=final: the sources relied on. Null otherwise.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {"type": "string"},
+          "title": {"type": ["string", "null"]}
+        },
+        "required": ["url", "title"]
+      }
+    }
+  },
+  "required": ["action", "query", "url", "answer", "citations"]
+}

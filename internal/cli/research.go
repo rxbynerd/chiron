@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,6 +18,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/interactions"
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/planner"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
@@ -126,8 +130,8 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // flags) are rejected by config validation for this agent rather than
 // ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
-	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
-		res, err := buildWorker(ctx, cfg, deps.Tracer)
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
+		res, err := buildWorker(ctx, cfg, deps.Tracer, stderr)
 		if err != nil {
 			return err
 		}
@@ -149,12 +153,13 @@ const fetchRequestTimeout = 30 * time.Second
 const fetchMaxContentBytes = 1 << 20
 
 // buildWorker constructs the in-process worker researcher from the resolved
-// config. It resolves the model and search key references here, at the
-// composition root, and fails before any request if either endpoint or key
-// is missing or unresolvable, so a misconfigured worker never emits a resume
-// handle for a run that cannot proceed. WorkerTimeout bounds the whole run
-// and each model/search call; fetch has its own tighter per-call bound.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer) (*fleet.Worker, error) {
+// config. It resolves the model, search and knowledge key references here, at
+// the composition root, and fails before any request if a required endpoint
+// or key is missing or unresolvable, so a misconfigured worker never emits a
+// resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
+// run and each model, search and knowledge call; fetch has its own tighter
+// per-call bound.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer) (*fleet.Worker, error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
 		return nil, errors.New("research --agent worker: fleet.model_endpoint is required")
@@ -167,6 +172,9 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	}
 	if fc.SearchEndpoint == "" {
 		return nil, errors.New("research --agent worker: fleet.search_endpoint is required")
+	}
+	if err := requireKnowledge(fc); err != nil {
+		return nil, err
 	}
 
 	modelKey, err := secret.Default().Resolve(ctx, fc.ModelKeyRef)
@@ -211,6 +219,13 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	if err != nil {
 		return nil, err
 	}
+	recaller, rememberer, err := buildKnowledge(ctx, fc, callTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if !fc.KnowledgeRemember {
+		rememberer = nil
+	}
 	fetchClient, err := fetch.New(fetch.Options{
 		RequestTimeout:  fetchTimeout,
 		MaxContentBytes: fetchMaxContentBytes,
@@ -221,10 +236,14 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	}
 
 	return fleet.NewWorker(fleet.WorkerDeps{
-		Model:  modelClient,
-		Search: searchClient,
-		Fetch:  fetchClient,
-		Tracer: tracer,
+		Model:              modelClient,
+		Search:             searchClient,
+		Fetch:              fetchClient,
+		Knowledge:          recaller,
+		Remember:           rememberer,
+		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
+		Tracer:             tracer,
+		Logger:             slog.New(secret.NewScrubHandler(slog.NewTextHandler(stderr, nil))),
 		Caps: fleet.Caps{
 			MaxTurns:         fc.MaxTurns,
 			MaxTokens:        fc.MaxTokens,
@@ -233,6 +252,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 			OutputGBPPerMTok: fc.PriceOutputGBPPerMTok,
 			Timeout:          time.Duration(fc.WorkerTimeout),
 			MaxPageBytes:     fc.MaxPageBytes,
+			RecallLimit:      fc.KnowledgeLimit,
 		},
 	})
 }
@@ -332,7 +352,7 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, previousID strin
 // directly and resolve their own key references, so a worker run does not
 // require the Gemini key.
 func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, apiKey string, deps run.Deps) error) error {
-	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps) error {
+	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, _ io.Writer) error {
 		apiKey, err := secret.Default().Resolve(ctx, cfg.APIKeyRef)
 		if err != nil {
 			return err
@@ -348,7 +368,11 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 // (the Gemini key in withRunSeams, the fleet key refs in the worker
 // binding), so each agent requires only the secrets it actually uses. The
 // Researcher field of the passed Deps is unset; the callback binds it.
-func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps) error) error {
+// withRunLifecycle wraps the command's stderr in one locked writer and hands
+// it to the transport and to f, so the event stream and any logger a
+// researcher writes to share a single lock rather than racing on the same
+// underlying writer.
+func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps, stderr io.Writer) error) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
 
@@ -366,7 +390,8 @@ func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx 
 		}()
 	}
 
-	events := transport.NewStdio(cmd.ErrOrStderr())
+	stderr := &lockedWriter{w: cmd.ErrOrStderr()}
+	events := transport.NewStdio(stderr)
 	defer events.Close()
 
 	return f(ctx, run.Deps{
@@ -374,7 +399,20 @@ func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx 
 		Sink:      buildSink(cmd, cfg),
 		Transport: events,
 		Tracer:    tracer,
-	})
+	}, stderr)
+}
+
+// lockedWriter serialises writes from goroutines that hold different locks
+// over one destination.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // checkResearcherWired reports whether the selected agent has a researcher

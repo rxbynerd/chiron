@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"time"
 
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -38,12 +41,13 @@ type Finding struct {
 	// Text is the worker's synthesised answer, the report-body candidate.
 	Text string
 	// Citations are the deduplicated sources the worker fetched or cited. Only
-	// URLs the worker actually saw in a search result or fetched are admitted;
-	// a cited URL the worker never encountered is dropped.
+	// URLs the worker actually saw in a search result or fetched, and locators
+	// of knowledge store hits it recalled, are admitted; anything else the
+	// model cites is dropped.
 	Citations []types.Citation
-	// Usage accumulates the token and search counters across every turn, plus
-	// the estimated cost when Caps carries a price; otherwise EstimatedCostGBP
-	// stays 0 and the token counts are the spend signal.
+	// Usage accumulates the token, search and recall counters across every
+	// turn, plus the estimated cost when Caps carries a price; otherwise
+	// EstimatedCostGBP stays 0 and the token counts are the spend signal.
 	Usage types.Usage
 	// Status is the terminal outcome: Completed when the model delivered a
 	// final answer within the caps; Incomplete when a cap, the context, or a
@@ -82,6 +86,12 @@ type Caps struct {
 	// to text, before it enters the transcript. Zero selects
 	// DefaultMaxPageBytes.
 	MaxPageBytes int
+	// RecallLimit is the number of hits one recall asks the knowledge store
+	// for. Zero selects DefaultRecallLimit.
+	RecallLimit int
+	// MaxRecallBytes bounds one rendered recall result in the transcript.
+	// Zero selects DefaultMaxPageBytes.
+	MaxRecallBytes int
 }
 
 // DefaultMaxPageBytes is the page-text bound used when Caps.MaxPageBytes is
@@ -89,16 +99,20 @@ type Caps struct {
 // bound is small relative to a model context window.
 const DefaultMaxPageBytes = 64 << 10
 
+// DefaultRecallLimit is the hits-per-recall used when Caps.RecallLimit is
+// zero.
+const DefaultRecallLimit = 5
+
 // turnCompletionTokens caps a single turn's completion. An action is a short
 // JSON object except for the final answer, which fits comfortably; providers
 // reject a completion cap above the model's maximum, so the remaining token
 // budget is never passed through verbatim.
 const turnCompletionTokens = 8192
 
-// maxConsecutiveToolFailures is how many search or fetch failures in a row
-// the loop feeds back to the model before treating the tools as unavailable
-// and ending the run Failed. Each feedback costs one model turn, so this is a
-// spend bound as much as a robustness one.
+// maxConsecutiveToolFailures is how many search, fetch or recall failures in
+// a row the loop feeds back to the model before treating the tools as
+// unavailable and ending the run Failed. Each feedback costs one model turn,
+// so this is a spend bound as much as a robustness one.
 const maxConsecutiveToolFailures = 3
 
 // maxDetailBytes bounds Finding.Detail; a provider error body can be large
@@ -106,15 +120,27 @@ const maxConsecutiveToolFailures = 3
 const maxDetailBytes = 2048
 
 // WorkerDeps are the shared collaborators a worker loop uses: the three
-// clients, a tracer for best-effort observability, and the caps. Model and
-// Search are required; Fetch is required for the loop to honour a fetch
-// action; Tracer may be nil.
+// clients, the optional knowledge store halves, a tracer for best-effort
+// observability, and the caps. Model and Search are required; Fetch is
+// required for the loop to honour a fetch action; the rest may be nil.
 type WorkerDeps struct {
 	Model  *model.Client
 	Search *search.Client
 	Fetch  *fetch.Client
-	Tracer trace.Tracer
-	Caps   Caps
+	// Knowledge, when non-nil, adds the recall action. nil omits recall from
+	// the loop's schema, prompt and tool list.
+	Knowledge memory.Recaller
+	// Remember, when non-nil, saves a bounded summary of a Completed finding
+	// after the loop returns (Worker only). It is independent of Knowledge.
+	Remember memory.Rememberer
+	// Logger receives the save-back outcome. nil discards it; the composition
+	// root binds a scrubbing handler on the command's stderr.
+	Logger *slog.Logger
+	// KnowledgeNamespace is passed to Recall and Remember: Alexandria's space;
+	// informational for Billet.
+	KnowledgeNamespace memory.Namespace
+	Tracer             trace.Tracer
+	Caps               Caps
 }
 
 // fetchedPage is the loop's view of a fetched document: the subset of
@@ -132,10 +158,19 @@ type fetchedPage struct {
 // non-success, a scrubbed detail. Citations gathered before a stop are
 // preserved.
 //
-// The loop dispatches only the three known actions (worker_action.go). An
-// unknown or side-effecting action is refused at parse time and ends the run
-// Failed with no side effect.
+// The loop dispatches only the known actions (worker_action.go). An unknown or
+// side-effecting action is refused at parse time and ends the run Failed with
+// no side effect. RunWorker never calls deps.Remember; saving a finding is the
+// Worker's concern.
 func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
+	return runWorker(ctx, deps, brief, nil)
+}
+
+// afterLoop runs once the loop has produced its Finding, while the worker
+// span is still open; span is nil when no tracer is configured.
+type afterLoop func(ctx context.Context, f Finding, span trace.Span)
+
+func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoop) Finding {
 	if deps.Caps.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deps.Caps.Timeout)
@@ -150,6 +185,9 @@ func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
 
 	w := &workerRun{deps: deps, brief: brief}
 	finding := w.loop(ctx)
+	if after != nil {
+		after(ctx, finding, span)
+	}
 
 	if span != nil {
 		span.SetAttr("status", string(finding.Status))
@@ -161,6 +199,7 @@ func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
 		// Per-worker spend lives on the span; the run core records the
 		// run-level metrics once from the returned Usage.
 		span.SetAttr("search_count", finding.Usage.SearchCount)
+		span.SetAttr("recall_count", finding.Usage.RecallCount)
 		span.SetAttr("input_tokens", finding.Usage.InputTokens)
 		span.SetAttr("output_tokens", finding.Usage.OutputTokens)
 		span.SetAttr("estimated_cost_gbp", finding.Usage.EstimatedCostGBP)
@@ -190,8 +229,12 @@ type workerRun struct {
 	// defence-in-depth complement to the fetch client's own SSRF guard, and
 	// keeps the report's sources to ones the worker actually encountered.
 	seenURLs map[string]bool
-	// titles remembers the search-result title for a URL so a fetched page
-	// can be cited with it.
+	// citableRefs holds the locators of recalled knowledge store hits. They
+	// are citable but never added to seenURLs, so the model cannot spend a
+	// fetch on a page behind the store's own authentication.
+	citableRefs map[string]bool
+	// titles remembers the search-result title for a URL, or a recalled
+	// hit's name for its locator, so a citation can carry it.
 	titles map[string]string
 
 	turns            int
@@ -203,8 +246,9 @@ type workerRun struct {
 // top of each turn so a run that has already spent its budget stops before
 // paying for another model turn.
 func (w *workerRun) loop(ctx context.Context) Finding {
-	w.transcript = initialTranscript(w.brief)
+	w.transcript = initialTranscript(w.brief, w.recallEnabled())
 	w.seenURLs = map[string]bool{}
+	w.citableRefs = map[string]bool{}
 	w.titles = map[string]string{}
 
 	for {
@@ -237,7 +281,7 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 	resp, err := w.deps.Model.Generate(ctx, model.Request{
 		Messages:   w.transcript,
 		MaxTokens:  w.turnCompletionCap(),
-		JSONSchema: actionSchema,
+		JSONSchema: actionSchemaFor(w.recallEnabled()),
 		SchemaName: actionSchemaName,
 	})
 	if err != nil {
@@ -255,7 +299,7 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 		return true, w.incomplete(fmt.Sprintf("the model's reply was cut off at the %d-token completion cap", w.turnCompletionCap()))
 	}
 
-	act, err := parseAction(resp.Content)
+	act, err := parseAction(resp.Content, w.recallEnabled())
 	if err != nil {
 		// Refusing here, with no side effect, is the closed-vocabulary
 		// guarantee.
@@ -267,6 +311,8 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 		return w.doSearch(ctx, act)
 	case actionFetch:
 		return w.doFetch(ctx, act)
+	case actionRecall:
+		return w.doRecall(ctx, act)
 	case actionFinal:
 		return true, w.finalise(act)
 	default:
@@ -337,9 +383,38 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	return false, Finding{}
 }
 
-// toolFailure handles a failed search or fetch: a context end is Incomplete;
-// otherwise the failure is fed back to the model so it can choose another
-// source, until maxConsecutiveToolFailures in a row ends the run Failed.
+// doRecall queries the knowledge store, appends the hits to the transcript,
+// and records every hit locator as citable (never fetchable). A recall
+// failure shares the search and fetch failure bound, so a dead store cannot
+// extend a run.
+func (w *workerRun) doRecall(ctx context.Context, act action) (bool, Finding) {
+	hits, err := w.deps.Knowledge.Recall(ctx, w.deps.KnowledgeNamespace, memory.Query{
+		Text:  act.Query,
+		Limit: w.recallLimit(),
+	})
+	if err != nil {
+		return w.toolFailure(ctx, "recall failed: "+w.scrub(err.Error()))
+	}
+	w.toolFailures = 0
+	w.usage.RecallCount++
+	for _, h := range hits {
+		loc := h.Reference.Locator
+		if loc == "" {
+			continue
+		}
+		w.citableRefs[loc] = true
+		if _, ok := w.titles[loc]; !ok && h.Memory.Meta.Name != "" {
+			w.titles[loc] = h.Memory.Meta.Name
+		}
+	}
+	w.transcript = append(w.transcript, recallResultsMessage(act.Query, hits, w.maxRecallBytes()))
+	return false, Finding{}
+}
+
+// toolFailure handles a failed search, fetch or recall: a context end is
+// Incomplete; otherwise the failure is fed back to the model so it can choose
+// another source, until maxConsecutiveToolFailures in a row ends the run
+// Failed.
 func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Finding) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return true, w.incomplete("worker context ended during a tool call: " + w.scrub(ctxErr.Error()))
@@ -348,20 +423,28 @@ func (w *workerRun) toolFailure(ctx context.Context, detail string) (bool, Findi
 	if w.toolFailures >= maxConsecutiveToolFailures {
 		return true, w.failed(fmt.Sprintf("%d consecutive tool failures; last: %s", w.toolFailures, detail))
 	}
-	w.transcript = append(w.transcript, errorFeedbackMessage(detail))
+	w.transcript = append(w.transcript, toolFailureMessage(detail))
 	return false, Finding{}
 }
 
 // finalise builds the successful Finding from a final action: the sanitised
 // answer text and the model's citations, restricted to URLs the worker
-// actually saw, merged with the pages it fetched and deduplicated.
+// actually saw and locators it recalled, merged with the pages it fetched and
+// deduplicated. A recalled locator carries the store's name for it.
 func (w *workerRun) finalise(act action) Finding {
 	for _, c := range act.Citations {
-		if !w.seenURLs[c.URL] {
+		switch {
+		case w.seenURLs[c.URL]:
+			w.addCitation(c.URL, c.Title)
+		case w.citableRefs[c.URL]:
+			title := w.titles[c.URL]
+			if title == "" {
+				title = c.Title
+			}
+			w.addCitation(c.URL, title)
+		default:
 			w.droppedCitations++
-			continue
 		}
-		w.addCitation(c.URL, c.Title)
 	}
 	return Finding{
 		Text:      sanitiseAnswer(act.Answer),
@@ -394,12 +477,14 @@ func (w *workerRun) failed(detail string) Finding {
 }
 
 // addCitation appends a citation, deduplicated by URI. A citation with an
-// empty URI is dropped. The first title seen for a URI wins, except that an
-// empty title is replaced by a later non-empty one.
+// empty URI is dropped. The title passes through citationTitle; the first
+// title seen for a URI wins, except that an empty title is replaced by a
+// later non-empty one.
 func (w *workerRun) addCitation(uri, title string) {
 	if uri == "" {
 		return
 	}
+	title = citationTitle(title)
 	for i, c := range w.citations {
 		if c.URI == uri {
 			if c.Title == "" && title != "" {
@@ -409,6 +494,20 @@ func (w *workerRun) addCitation(uri, title string) {
 		}
 	}
 	w.citations = append(w.citations, types.Citation{URI: uri, Title: title})
+}
+
+// maxCitationTitleRunes bounds a citation title, which the report, the
+// Interaction and a saved finding all carry.
+const maxCitationTitleRunes = 200
+
+// angleSpan matches anything between a '<' and the next '>'.
+var angleSpan = regexp.MustCompile(`<[^<>]*>`)
+
+// citationTitle makes a store-, search- or model-supplied title safe to
+// carry: markup-like spans removed, flattened to one line, and bounded to
+// maxCitationTitleRunes.
+func citationTitle(s string) string {
+	return boundRunes(oneLine(angleSpan.ReplaceAllString(s, "")), maxCitationTitleRunes)
 }
 
 // accumulateModelUsage folds one model turn's usage into the running totals
@@ -437,6 +536,24 @@ func (w *workerRun) turnCompletionCap() int {
 	return capTokens
 }
 
+func (w *workerRun) recallEnabled() bool {
+	return w.deps.Knowledge != nil
+}
+
+func (w *workerRun) recallLimit() int {
+	if w.deps.Caps.RecallLimit > 0 {
+		return w.deps.Caps.RecallLimit
+	}
+	return DefaultRecallLimit
+}
+
+func (w *workerRun) maxRecallBytes() int {
+	if w.deps.Caps.MaxRecallBytes > 0 {
+		return w.deps.Caps.MaxRecallBytes
+	}
+	return DefaultMaxPageBytes
+}
+
 func (w *workerRun) maxPageBytes() int {
 	if w.deps.Caps.MaxPageBytes > 0 {
 		return w.deps.Caps.MaxPageBytes
@@ -460,18 +577,15 @@ func (w *workerRun) scrub(s string) string {
 }
 
 // boundDetail truncates a detail string to maxDetailBytes at a rune boundary.
-func boundDetail(s string) string {
-	if len(s) <= maxDetailBytes {
-		return s
-	}
-	cut := maxDetailBytes
-	for cut > 0 && !isRuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + " [truncated]"
-}
-
-func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
+func boundDetail(s string) string { return boundBytes(s, maxDetailBytes) }
 
 // errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
+
+// logger returns the injected logger, or one that discards every record.
+func (d WorkerDeps) logger() *slog.Logger {
+	if d.Logger != nil {
+		return d.Logger
+	}
+	return slog.New(slog.DiscardHandler)
+}
