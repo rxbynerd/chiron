@@ -715,6 +715,10 @@ the deliberate trade for cross-chunk reuse of a single scripted transport,
 and the package is a test-support-heavy adapter. Callers own the fake's
 lifecycle (build at the call site, `defer Close`).
 
+**Superseded by the 2026-09-25 entry below**: the fake now lives in
+`internal/researcher/fleet/model/modeltest`, not `fake.go`, so
+`net/http/httptest` no longer reaches the `chiron` binary's normal build.
+
 ## 2026-07-01 — Search MCP client and its assumed tool-result shape
 
 Wave 3 needs the first of the worker's two read-only network tools
@@ -777,6 +781,10 @@ worker/lead chunks reuse one fake search MCP for CI (docs/V2-RESEARCH-AGENT
 call counts, and has options for an assigned session id, an SSE reply framing,
 and a verbatim tool result (for unexpected-shape / oversize cases). Callers
 own its lifecycle.
+
+**Superseded by the 2026-09-25 entry below**: the fake now lives in
+`internal/researcher/fleet/search/searchtest`, not `fake.go`, so
+`net/http/httptest` no longer reaches the `chiron` binary's normal build.
 
 ## 2026-07-01 — web_fetch client: SSRF posture and oversize truncation
 
@@ -1278,3 +1286,58 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-25 — Scripted fakes live in test-support packages
+
+Issue #17. `model.FakeServer`, `search.FakeServer`, `mcpclient.FakeServer`,
+`billet.FakeServer` and `alexandria.FakeServer` each lived in their client
+package's own `fake.go` — a non-test build file, per the 2026-07-01
+standard-model and search entries' "shared fake reused across chunks"
+rationale. `go list -deps ./cmd/chiron` showed the cost of that choice
+plainly: `net/http/httptest` was a dependency of the release binary,
+reachable through all five `fake.go` files, not only through test code. A
+Go binary that ships `httptest` is shipping a testing helper with real
+listener/handler machinery for no runtime benefit, and it is exactly the
+kind of import a supply-chain review flags without context.
+
+Each fake moves to a sibling `<pkg>test` package (`modeltest`, `searchtest`,
+`mcpclienttest`, `billettest`, `alexandriatest`) with an identical exported
+API — call sites change only their import path and package qualifier, not
+their calls. `go list -deps ./cmd/chiron | grep -c httptest` is 0 after the
+move. The cross-chunk-reuse need the 2026-07-01 entries were solving for is
+unaffected: a `<pkg>test` package is exactly as shareable across downstream
+packages as the old `fake.go` was, it just does not compile into `cmd/chiron`
+because nothing under `cmd/` imports it.
+
+**Wire-shape duplication over exporting production internals.** A fake needs
+a handful of its client's unexported wire types (`model`'s `chatRequest`/
+`chatResponse`, `mcpclient`'s session/protocol-version header names,
+`billet`'s `search_memory`/`save_memory` tool names and record shape,
+`alexandria`'s `/v1/search` path) to speak the same protocol. Rather than
+exporting those for the fake's sake, each `<pkg>test` package defines its own
+private mirror of the wire shape it needs — the same trade the packages
+already made for `structuredContent`/text-block JSON on the wire, just
+applied one level down. `alexandria`'s title/snippet truncation bounds
+(`maxTitleRunes`, `maxSnippetBytes`) are pure magic numbers a test asserts
+against, not protocol shape, so the one test needing them inlines the
+current values rather than exporting them.
+
+**Internal test files cannot import a fake that imports back into the
+package under test.** A `_test.go` file declared `package foo` (not `package
+foo_test`) sits inside `foo`'s compilation unit; if `footest` imports `foo`,
+importing `footest` from `foo`'s own internal test file is an import cycle
+(`go test` fails it explicitly, it is not merely discouraged). Go's own
+`net/http/client_test.go`, which imports `net/http/httptest`, is `package
+http_test` for this reason. `search` and `alexandria` had no test needing
+unexported access, so their test files simply became `package search_test`/
+`package alexandria_test` wholesale. `mcpclient` and `model` each had a mix:
+tests needing genuine unexported access (not just wire shape) stayed in the
+original file under `package mcpclient`/`package model`, and the fake-driven
+tests moved to a new `package mcpclient_test`/`package model_test` file.
+`billet` had the same mix but only three such tests (`toolError`'s bound, the
+`mcp` field `TestFakeUnknownToolIsRPCError` calls through, and
+`firstLine`'s own unit test) — rather than keep a second internal-only file
+just for them, a minimal `export_test.go` (`billet.ToolError`,
+`billet.SaveTool`, `billet.MaxToolErrBytes`, `billet.MCPClient`,
+`billet.FirstLine`) lets the whole suite live in one external
+`package billet_test` file.

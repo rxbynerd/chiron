@@ -12,7 +12,9 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/sink"
 	"github.com/rxbynerd/chiron/internal/trace"
@@ -63,7 +65,7 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 	page := httptest.NewServer(plainTextPage("10BASE-T1L is a long-reach single-pair Ethernet PHY standardised in IEEE 802.3cg."))
 	defer page.Close()
 
-	searchSrv := search.NewFakeServer([]search.Result{
+	searchSrv := searchtest.NewFakeServer([]search.Result{
 		{Title: "IEEE 802.3cg overview", URL: page.URL, Snippet: "single-pair Ethernet"},
 		// A degraded result with no URL — the worker must tolerate it (it is
 		// surfaced but not fetchable).
@@ -75,10 +77,10 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 		"10BASE-T1L is a long-reach single-pair Ethernet physical layer " +
 		"standardised in IEEE 802.3cg, suited to industrial and building " +
 		"automation over a single twisted pair.\n"
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"10BASE-T1L PHY standard"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 120, OutputTokens: 15, TotalTokens: 135}},
-		model.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 200, OutputTokens: 10, TotalTokens: 210}},
-		model.FakeReply{
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"10BASE-T1L PHY standard"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 120, OutputTokens: 15, TotalTokens: 135}},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 200, OutputTokens: 10, TotalTokens: 210}},
+		modeltest.FakeReply{
 			Content:      `{"action":"final","answer":` + jsonString(answer) + `,"citations":[{"url":"` + page.URL + `","title":"IEEE 802.3cg overview"}]}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 300, OutputTokens: 90, TotalTokens: 390},

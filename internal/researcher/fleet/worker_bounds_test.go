@@ -11,7 +11,9 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -19,17 +21,17 @@ import (
 // TestRunWorkerTokenCapStops: accumulated tokens at or over MaxTokens stop
 // the loop Incomplete before the next paid turn.
 func TestRunWorkerTokenCapStops(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	var replies []model.FakeReply
+	var replies []modeltest.FakeReply
 	for i := 0; i < 5; i++ {
-		replies = append(replies, model.FakeReply{
+		replies = append(replies, modeltest.FakeReply{
 			Content:      `{"action":"search","query":"again"}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 40, OutputTokens: 20, TotalTokens: 60},
 		})
 	}
-	modelSrv := model.NewFakeServer(replies...)
+	modelSrv := modeltest.NewFakeServer(replies...)
 	defer modelSrv.Close()
 
 	c := caps()
@@ -60,17 +62,17 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 // TestRunWorkerCostCeilingStops: with a price configured the estimated cost
 // accumulates and the GBP ceiling stops the loop Incomplete.
 func TestRunWorkerCostCeilingStops(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	var replies []model.FakeReply
+	var replies []modeltest.FakeReply
 	for i := 0; i < 5; i++ {
-		replies = append(replies, model.FakeReply{
+		replies = append(replies, modeltest.FakeReply{
 			Content:      `{"action":"search","query":"again"}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 1_000_000, OutputTokens: 0, TotalTokens: 1_000_000},
 		})
 	}
-	modelSrv := model.NewFakeServer(replies...)
+	modelSrv := modeltest.NewFakeServer(replies...)
 	defer modelSrv.Close()
 
 	c := caps()
@@ -112,7 +114,7 @@ func TestRunWorkerTimeoutMidTurnIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.New: %v", err)
 	}
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 
 	c := caps()
@@ -136,10 +138,10 @@ func TestRunWorkerTimeoutMidTurnIsIncomplete(t *testing.T) {
 // TestRunWorkerLengthFinishIsIncomplete: a reply cut off at the completion cap
 // is a bounded stop, not an invalid action.
 func TestRunWorkerLengthFinishIsIncomplete(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"final","answer":"a very long ans`, FinishReason: "length"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"final","answer":"a very long ans`, FinishReason: "length"},
 	)
 	defer modelSrv.Close()
 
@@ -172,7 +174,7 @@ func TestWorkerAwaitCancelStopsRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("model.New: %v", err)
 	}
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
 		Model:  mc,
@@ -218,11 +220,11 @@ func TestWorkerAwaitCancelStopsRun(t *testing.T) {
 // reaches a span attribute.
 func TestRunWorkerTraceCarriesSpendAndNoCredential(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10}},
-		model.FakeReply{Status: http.StatusUnauthorized, StatusBody: `{"error":{"message":"invalid api key ` + key + `"}}`},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10}},
+		modeltest.FakeReply{Status: http.StatusUnauthorized, StatusBody: `{"error":{"message":"invalid api key ` + key + `"}}`},
 	)
 	defer modelSrv.Close()
 	mc, err := model.New(model.Options{Endpoint: modelSrv.URL(), Model: "m", APIKey: key})

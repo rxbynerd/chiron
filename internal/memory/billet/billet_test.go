@@ -1,4 +1,4 @@
-package billet
+package billet_test
 
 import (
 	"context"
@@ -10,17 +10,19 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
 	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/memory/billet"
+	"github.com/rxbynerd/chiron/internal/memory/billet/billettest"
 )
 
 const testKey = "sk-billet-0123456789abcdefABCDEF"
 
-func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client {
+func newClient(t *testing.T, endpoint string, mutate ...func(*billet.Options)) *billet.Client {
 	t.Helper()
-	opts := Options{Endpoint: endpoint}
+	opts := billet.Options{Endpoint: endpoint}
 	for _, m := range mutate {
 		m(&opts)
 	}
-	c, err := New(opts)
+	c, err := billet.New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -29,7 +31,7 @@ func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client 
 
 func TestRecallMapping(t *testing.T) {
 	longTitle := strings.Repeat("é", 130)
-	fake := NewFakeServer([]Record{
+	fake := billettest.NewFakeServer([]billettest.Record{
 		{MemoryID: "mem-1", Content: "\n  Paris is the capital of France.  \nSecond line.", Score: 0.75, CreatedAt: "2026-09-01T10:00:00Z"},
 		{MemoryID: "mem-2", Content: longTitle + "\nbody", Score: 0.5},
 	})
@@ -101,10 +103,10 @@ func TestRecallLimitClamp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil)
+			fake := billettest.NewFakeServer(nil)
 			defer fake.Close()
 
-			c := newClient(t, fake.URL(), func(o *Options) { o.DefaultLimit = tt.defaultLimit })
+			c := newClient(t, fake.URL(), func(o *billet.Options) { o.DefaultLimit = tt.defaultLimit })
 			if _, err := c.Recall(context.Background(), "", memory.Query{Text: "q", Limit: tt.queryLimit}); err != nil {
 				t.Fatalf("Recall: %v", err)
 			}
@@ -121,7 +123,7 @@ func TestRecallKeepsAtMostLimitHits(t *testing.T) {
 		`{"memory_id":"a","content":"1","score":0.9},` +
 		`{"memory_id":"b","content":"2","score":0.8},` +
 		`{"memory_id":"c","content":"3","score":0.7}]}}`
-	fake := NewFakeServer(nil, WithRawResult(raw))
+	fake := billettest.NewFakeServer(nil, billettest.WithRawResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -209,7 +211,7 @@ func TestRecallReplyShapes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil, WithRawResult(tt.raw))
+			fake := billettest.NewFakeServer(nil, billettest.WithRawResult(tt.raw))
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
@@ -254,10 +256,10 @@ func TestRecallBoundsContent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer([]Record{{MemoryID: "big", Content: content}})
+			fake := billettest.NewFakeServer([]billettest.Record{{MemoryID: "big", Content: content}})
 			defer fake.Close()
 
-			c := newClient(t, fake.URL(), func(o *Options) { o.MaxHitBytes = tt.maxHitBytes })
+			c := newClient(t, fake.URL(), func(o *billet.Options) { o.MaxHitBytes = tt.maxHitBytes })
 			got, err := c.Recall(context.Background(), "", memory.Query{Text: "q"})
 			if err != nil {
 				t.Fatalf("Recall: %v", err)
@@ -274,7 +276,7 @@ func TestRecallBoundsContent(t *testing.T) {
 }
 
 func TestRecallToolError(t *testing.T) {
-	fake := NewFakeServer(nil, WithToolError("budget exceeded"))
+	fake := billettest.NewFakeServer(nil, billettest.WithToolError("budget exceeded"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -285,7 +287,7 @@ func TestRecallToolError(t *testing.T) {
 }
 
 func TestRecallEmptyQueryRejected(t *testing.T) {
-	fake := NewFakeServer(nil)
+	fake := billettest.NewFakeServer(nil)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -309,7 +311,7 @@ func TestRememberSendsContentAndKind(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil)
+			fake := billettest.NewFakeServer(nil)
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
@@ -344,13 +346,13 @@ func TestRememberRefusedBeforeRequest(t *testing.T) {
 		mem     memory.Memory
 		wantErr string
 	}{
-		{"oversized content", memory.Memory{Text: strings.Repeat("x", MaxContentBytes+1)}, "over Billet's 262144-byte limit"},
+		{"oversized content", memory.Memory{Text: strings.Repeat("x", billet.MaxContentBytes+1)}, "over Billet's 262144-byte limit"},
 		{"blank content", memory.Memory{Text: " \n"}, "must not be empty"},
 		{"unknown kind", memory.Memory{Text: "x", Meta: memory.ArtifactMeta{Labels: map[string]string{"kind": "opinion"}}}, `kind "opinion"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil)
+			fake := billettest.NewFakeServer(nil)
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
@@ -366,11 +368,11 @@ func TestRememberRefusedBeforeRequest(t *testing.T) {
 }
 
 func TestRememberAtContentLimitSent(t *testing.T) {
-	fake := NewFakeServer(nil)
+	fake := billettest.NewFakeServer(nil)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Remember(context.Background(), "", memory.Memory{Text: strings.Repeat("x", MaxContentBytes)}); err != nil {
+	if _, err := c.Remember(context.Background(), "", memory.Memory{Text: strings.Repeat("x", billet.MaxContentBytes)}); err != nil {
 		t.Fatalf("Remember at exactly the limit: %v", err)
 	}
 	if n := len(fake.SavedContents()); n != 1 {
@@ -394,7 +396,7 @@ func TestRememberReplyShapes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil, WithRawResult(tt.raw))
+			fake := billettest.NewFakeServer(nil, billettest.WithRawResult(tt.raw))
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
@@ -408,7 +410,7 @@ func TestRememberReplyShapes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Remember: %v", err)
 			}
-			if ref.Digest != tt.wantID || ref.Locator != LocatorPrefix+tt.wantID {
+			if ref.Digest != tt.wantID || ref.Locator != billet.LocatorPrefix+tt.wantID {
 				t.Errorf("reference = %+v, want id %q", ref, tt.wantID)
 			}
 		})
@@ -416,7 +418,7 @@ func TestRememberReplyShapes(t *testing.T) {
 }
 
 func TestRememberToolError(t *testing.T) {
-	fake := NewFakeServer(nil, WithToolError("backend unavailable"))
+	fake := billettest.NewFakeServer(nil, billettest.WithToolError("backend unavailable"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -430,9 +432,9 @@ func TestRememberToolError(t *testing.T) {
 // rune boundary, whether or not the transport already bounded it.
 func TestToolErrorBounded(t *testing.T) {
 	huge := "backend unavailable " + strings.Repeat("é", 1<<20)
-	direct := toolError(saveTool, mcpclient.ToolResult{Content: []mcpclient.ContentBlock{{Type: "text", Text: huge}}, IsError: true})
+	direct := billet.ToolError(billet.SaveTool, mcpclient.ToolResult{Content: []mcpclient.ContentBlock{{Type: "text", Text: huge}}, IsError: true})
 
-	fake := NewFakeServer(nil, WithToolError(huge))
+	fake := billettest.NewFakeServer(nil, billettest.WithToolError(huge))
 	defer fake.Close()
 	_, viaFake := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "q"})
 
@@ -441,18 +443,18 @@ func TestToolErrorBounded(t *testing.T) {
 			t.Fatalf("%s: want a tool error", name)
 		}
 		msg := err.Error()
-		if len(msg) > maxToolErrBytes+64 || !utf8.ValidString(msg) || !strings.HasSuffix(msg, " [truncated]") || !strings.Contains(msg, "backend unavailable") {
-			t.Errorf("%s: error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus prefix, ending in the marker", name, len(msg), utf8.ValidString(msg), maxToolErrBytes)
+		if len(msg) > billet.MaxToolErrBytes+64 || !utf8.ValidString(msg) || !strings.HasSuffix(msg, " [truncated]") || !strings.Contains(msg, "backend unavailable") {
+			t.Errorf("%s: error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus prefix, ending in the marker", name, len(msg), utf8.ValidString(msg), billet.MaxToolErrBytes)
 		}
 	}
 }
 
 func TestKeyHeaderOnlyAndNeverInErrors(t *testing.T) {
 	t.Run("tool error echoing the key", func(t *testing.T) {
-		fake := NewFakeServer(nil, WithToolError("proxy refused key "+testKey))
+		fake := billettest.NewFakeServer(nil, billettest.WithToolError("proxy refused key "+testKey))
 		defer fake.Close()
 
-		c := newClient(t, fake.URL(), func(o *Options) { o.APIKey = testKey })
+		c := newClient(t, fake.URL(), func(o *billet.Options) { o.APIKey = testKey })
 		_, recallErr := c.Recall(context.Background(), "", memory.Query{Text: "q"})
 		_, rememberErr := c.Remember(context.Background(), "", memory.Memory{Text: "x"})
 		for _, err := range []error{recallErr, rememberErr} {
@@ -477,7 +479,7 @@ func TestKeyHeaderOnlyAndNeverInErrors(t *testing.T) {
 		}))
 		defer server.Close()
 
-		c := newClient(t, server.URL, func(o *Options) { o.APIKey = testKey })
+		c := newClient(t, server.URL, func(o *billet.Options) { o.APIKey = testKey })
 		_, err := c.Recall(context.Background(), "", memory.Query{Text: "q"})
 		if err == nil {
 			t.Fatal("Recall should fail on a 403")
@@ -491,7 +493,7 @@ func TestKeyHeaderOnlyAndNeverInErrors(t *testing.T) {
 	})
 
 	t.Run("keyless sends no Authorization", func(t *testing.T) {
-		fake := NewFakeServer(nil)
+		fake := billettest.NewFakeServer(nil)
 		defer fake.Close()
 
 		c := newClient(t, fake.URL())
@@ -518,7 +520,7 @@ func TestNewValidatesEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Options{Endpoint: tt.endpoint})
+			_, err := billet.New(billet.Options{Endpoint: tt.endpoint})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("New error = %v, want one containing %q", err, tt.wantErr)
 			}
@@ -533,11 +535,11 @@ func TestNewValidatesEndpoint(t *testing.T) {
 }
 
 func TestFakeUnknownToolIsRPCError(t *testing.T) {
-	fake := NewFakeServer(nil)
+	fake := billettest.NewFakeServer(nil)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	_, err := c.mcp.CallTool(context.Background(), "forget_memory", nil)
+	_, err := billet.MCPClient(c).CallTool(context.Background(), "forget_memory", nil)
 	if err == nil || !strings.Contains(err.Error(), `unknown tool "forget_memory"`) {
 		t.Errorf("error = %v, want an unknown-tool rejection", err)
 	}
@@ -557,8 +559,8 @@ func TestFirstLine(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := firstLine(tt.in); got != tt.want {
-				t.Errorf("firstLine(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := billet.FirstLine(tt.in); got != tt.want {
+				t.Errorf("FirstLine(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

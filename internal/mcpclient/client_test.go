@@ -3,7 +3,6 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,7 +14,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 const testKey = "sk-mcp-0123456789abcdefABCDEF"
@@ -40,11 +38,12 @@ func call(c *Client) (ToolResult, error) {
 	return c.CallTool(context.Background(), "lookup", map[string]any{"query": "q"})
 }
 
-// textResult is a handler answering every call with one text block.
-func textResult(text string) FakeHandler {
-	return func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: text}}}, nil
+// deref dereferences an rpcRequest.ID, defaulting to 0.
+func deref(id *int) int {
+	if id == nil {
+		return 0
 	}
+	return *id
 }
 
 // answerHandshake reads one request in full and answers it when it belongs to
@@ -87,57 +86,6 @@ func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	}
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
-	}
-}
-
-func TestCallToolHappyPath(t *testing.T) {
-	var gotTool string
-	var gotArgs map[string]any
-	fake := NewFakeServer(func(tool string, args map[string]any) (ToolResult, error) {
-		gotTool, gotArgs = tool, args
-		return ToolResult{
-			Content:           []ContentBlock{{Type: "text", Text: "hello"}},
-			StructuredContent: json.RawMessage(`{"answer":42}`),
-		}, nil
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := c.CallTool(context.Background(), "lookup", map[string]any{"query": "sky", "limit": 3})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if got.IsError || FirstText(got.Content) != "hello" || string(got.StructuredContent) != `{"answer":42}` {
-		t.Errorf("result = %+v, want the scripted text and structuredContent", got)
-	}
-	if gotTool != "lookup" || gotArgs["query"] != "sky" || gotArgs["limit"] != float64(3) {
-		t.Errorf("handler saw tool %q args %+v, want lookup with query and limit", gotTool, gotArgs)
-	}
-
-	reqs := fake.Requests()
-	if len(reqs) != 3 {
-		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call)", len(reqs))
-	}
-	for i, m := range []string{"initialize", "notifications/initialized", "tools/call"} {
-		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].Method != m {
-			t.Errorf("request[%d] = %s %q, want POST %q", i, reqs[i].HTTPMethod, reqs[i].Method, m)
-		}
-		if reqs[i].Authorization != "Bearer "+testKey {
-			t.Errorf("request[%d].Authorization = %q, want the bearer key header", i, reqs[i].Authorization)
-		}
-	}
-}
-
-func TestCallToolNilArgumentsSendsObject(t *testing.T) {
-	fake := NewFakeServer(nil)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.CallTool(context.Background(), "ping", nil); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if args := fake.Requests()[2].Arguments; args == nil {
-		t.Error("tools/call arguments = null, want an empty object")
 	}
 }
 
@@ -207,59 +155,6 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEchoedAndEnded(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"), WithSessionID("sess-abc-123"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool with a session server: %v", err)
-	}
-	reqs := fake.Requests()
-	if len(reqs) != 4 {
-		t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
-	}
-	if reqs[0].SessionID != "" {
-		t.Errorf("initialize carried a session header %q, want none", reqs[0].SessionID)
-	}
-	for i := 1; i < len(reqs); i++ {
-		if reqs[i].SessionID != "sess-abc-123" {
-			t.Errorf("request[%d] session = %q, want the assigned session echoed", i, reqs[i].SessionID)
-		}
-	}
-	end := reqs[3]
-	if end.HTTPMethod != http.MethodDelete {
-		t.Fatalf("last request = %s %q, want the session DELETE", end.HTTPMethod, end.Method)
-	}
-	if end.Authorization != "Bearer "+testKey {
-		t.Errorf("DELETE Authorization = %q, want the bearer key header", end.Authorization)
-	}
-	if end.ProtocolVersion != ProtocolVersion {
-		t.Errorf("DELETE MCP-Protocol-Version = %q, want %q", end.ProtocolVersion, ProtocolVersion)
-	}
-}
-
-func TestCallToolSessionEndedAfterToolError(t *testing.T) {
-	fake := NewFakeServer(nil,
-		WithSessionID("sess-err"),
-		WithRawResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
-	)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !got.IsError || FirstText(got.Content) != "upstream quota exceeded" {
-		t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
-	}
-	reqs := fake.Requests()
-	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {
-		t.Errorf("last request = %s with session %q, want a DELETE of sess-err", last.HTTPMethod, last.SessionID)
-	}
-}
-
 func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,25 +183,6 @@ func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
 	}
 	if n := deletes.Load(); n != 1 {
 		t.Errorf("DELETE count = %d, want 1", n)
-	}
-}
-
-func TestCallToolProtocolVersionHeader(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"), WithProtocolVersion("2025-03-26"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	reqs := fake.Requests()
-	if reqs[0].ProtocolVersion != "" {
-		t.Errorf("initialize carried MCP-Protocol-Version %q, want none", reqs[0].ProtocolVersion)
-	}
-	for i := 1; i < len(reqs); i++ {
-		if reqs[i].ProtocolVersion != "2025-03-26" {
-			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
-		}
 	}
 }
 
@@ -374,45 +250,6 @@ func TestCallToolRPCError(t *testing.T) {
 	}
 }
 
-func TestFakeHandlerErrorIsRPCError(t *testing.T) {
-	fake := NewFakeServer(func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{}, errors.New("unknown tool")
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := call(c)
-	if err == nil || !strings.Contains(err.Error(), "tools/call rejected: rpc error -32000: unknown tool") {
-		t.Errorf("error = %v, want the handler error as a JSON-RPC rejection", err)
-	}
-}
-
-func TestCallToolIsErrorTextScrubbed(t *testing.T) {
-	// A tool error echoing the key is returned with the key redacted, so a
-	// caller can put the text in an error safely.
-	fake := NewFakeServer(textErrorHandler("backend rejected key " + testKey))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !got.IsError {
-		t.Fatal("IsError = false, want the tool error flagged")
-	}
-	text := FirstText(got.Content)
-	if strings.Contains(text, testKey) || !strings.Contains(text, "backend rejected key") {
-		t.Errorf("tool error text = %q, want it kept with the key redacted", text)
-	}
-}
-
-func textErrorHandler(text string) FakeHandler {
-	return func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: text}}, IsError: true}, nil
-	}
-}
-
 func TestCallToolMismatchedResponseID(t *testing.T) {
 	const result = `"result":{"content":[]}`
 	tests := []struct {
@@ -449,20 +286,6 @@ func TestCallToolMismatchedResponseID(t *testing.T) {
 				t.Errorf("error = %v, want an id-mismatch error", err)
 			}
 		})
-	}
-}
-
-func TestCallToolOverSSE(t *testing.T) {
-	fake := NewFakeServer(textResult("streamed"), WithSSE())
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool over SSE: %v", err)
-	}
-	if FirstText(got.Content) != "streamed" {
-		t.Fatalf("result = %+v, want the streamed text", got)
 	}
 }
 
@@ -551,47 +374,6 @@ func TestCallToolSSEStreamBounded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mcp: SSE stream exceeds 512-byte bound") {
 		t.Errorf("error = %v, want the aggregate stream bound", err)
-	}
-}
-
-func TestCallToolNotRetried(t *testing.T) {
-	// A tools/call reply that cannot be decoded must not be retried.
-	fake := NewFakeServer(nil, WithRawResult("this is not json"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err == nil {
-		t.Fatal("CallTool should fail on an undecodable reply")
-	}
-	if n := fake.ToolCallCount(); n != 1 {
-		t.Errorf("tools/call count = %d, want exactly 1; the call must not be retried", n)
-	}
-}
-
-func TestCallToolOversizedBodyBounded(t *testing.T) {
-	big := strings.Repeat("x", 4096)
-	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
-	tests := []struct {
-		name string
-		opts []FakeOption
-	}{
-		{"json", []FakeOption{WithRawResult(raw)}},
-		{"sse", []FakeOption{WithRawResult(raw), WithSSE()}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil, tt.opts...)
-			defer fake.Close()
-
-			c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = 512 })
-			_, err := call(c)
-			if err == nil {
-				t.Fatal("CallTool should fail when the response exceeds MaxBodyBytes")
-			}
-			if !strings.Contains(err.Error(), "512-byte bound") {
-				t.Errorf("error = %v, want a body-bound error", err)
-			}
-		})
 	}
 }
 
@@ -791,19 +573,6 @@ func TestCallToolErrorNeverLeaksKey(t *testing.T) {
 	}
 }
 
-func TestCallToolEmptyNameRejected(t *testing.T) {
-	fake := NewFakeServer(nil)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.CallTool(context.Background(), "", nil); err == nil {
-		t.Fatal("CallTool with an empty tool name should fail")
-	}
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0; validation must precede any request", fake.CallCount())
-	}
-}
-
 func TestCallToolCallerContextDeadlineWins(t *testing.T) {
 	// The caller's tighter deadline must beat the generous RequestTimeout. The
 	// handler drains the body because net/http only cancels r.Context() on
@@ -838,21 +607,6 @@ func TestCallToolCallerContextDeadlineWins(t *testing.T) {
 	}
 }
 
-func TestCallToolKeylessServer(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL(), func(o *Options) { o.APIKey = "" })
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	for i, req := range fake.Requests() {
-		if req.Authorization != "" {
-			t.Errorf("request[%d] carried Authorization %q on a keyless client", i, req.Authorization)
-		}
-	}
-}
-
 func TestFirstText(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -869,62 +623,5 @@ func TestFirstText(t *testing.T) {
 				t.Errorf("FirstText = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestCallToolErrorTextBounded(t *testing.T) {
-	// Every server-supplied error text is scrubbed and cut to 4 KiB, so an
-	// adapter's error never carries megabytes into a caller's transcript.
-	huge := "backend failed for key " + testKey + "\n" + strings.Repeat("é", 200<<10)
-	tests := []struct {
-		name       string
-		status     int
-		body       string
-		wantErr    string
-		wantDetail bool
-	}{
-		{"tools/call rejection", http.StatusOK, fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":%q}}`, huge), "tools/call rejected", true},
-		{"error body", http.StatusBadGateway, huge, "tools/call failed: HTTP 502: backend failed", true},
-		{"non-JSON error body over the read bound", http.StatusBadGateway, strings.Repeat("<html>", maxErrorBodyBytes/5), "tools/call failed: HTTP 502", false},
-		{"empty error body", http.StatusBadGateway, "", "tools/call failed: HTTP 502", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if _, answered := answerHandshake(t, w, r); answered {
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tt.status)
-				_, _ = io.WriteString(w, tt.body)
-			}))
-			defer server.Close()
-
-			_, err := call(newClient(t, server.URL))
-			if err == nil {
-				t.Fatal("CallTool should fail")
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, tt.wantErr) || strings.Contains(msg, testKey) {
-				t.Errorf("error = %.200q, want %q with the key redacted", msg, tt.wantErr)
-			}
-			if len(msg) > maxErrorTextBytes+64 || !utf8.ValidString(msg) {
-				t.Errorf("error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus its prefix", len(msg), utf8.ValidString(msg), maxErrorTextBytes)
-			}
-			if got := strings.HasSuffix(msg, " [truncated]"); got != tt.wantDetail {
-				t.Errorf("error truncation marker = %v, want %v: %.200q", got, tt.wantDetail, msg)
-			}
-		})
-	}
-
-	fake := NewFakeServer(textErrorHandler(huge))
-	defer fake.Close()
-	got, err := call(newClient(t, fake.URL()))
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	text := FirstText(got.Content)
-	if !got.IsError || len(text) > maxErrorTextBytes || !strings.HasSuffix(text, " [truncated]") || strings.Contains(text, testKey) {
-		t.Errorf("IsError text is %d bytes, want a scrubbed excerpt of at most %d ending in the marker", len(text), maxErrorTextBytes)
 	}
 }

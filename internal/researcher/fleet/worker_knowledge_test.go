@@ -17,7 +17,9 @@ import (
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -60,8 +62,8 @@ func billetHit(id, name, text string) memory.Recalled {
 	}
 }
 
-func recallReply(query string) model.FakeReply {
-	return model.FakeReply{Content: `{"action":"recall","query":` + jsonString(query) + `}`, FinishReason: "stop"}
+func recallReply(query string) modeltest.FakeReply {
+	return modeltest.FakeReply{Content: `{"action":"recall","query":` + jsonString(query) + `}`, FinishReason: "stop"}
 }
 
 // TestRecallDisabledSchemaAndPromptUnchanged: the recall-disabled loop sends
@@ -84,9 +86,9 @@ func TestRecallDisabledSchemaAndPromptUnchanged(t *testing.T) {
 		t.Errorf("recall-disabled prompt drifted:\n%s", got)
 	}
 
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(finalReply("done"))
+	modelSrv := modeltest.NewFakeServer(finalReply("done"))
 	defer modelSrv.Close()
 	RunWorker(context.Background(), WorkerDeps{
 		Model:  newModelClient(t, modelSrv),
@@ -164,11 +166,11 @@ func TestRunWorkerRecallCitableNotFetchable(t *testing.T) {
 	hostile.Memory.Meta.Labels = map[string]string{"degraded": "embedding_unavailable"}
 	store := &staticRecall{hits: []memory.Recalled{hostile, billetHit("m2", "", "second")}}
 
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
+	modelSrv := modeltest.NewFakeServer(
 		recallReply("PHY vendor decision"),
-		model.FakeReply{Content: `{"action":"fetch","url":"billet://memory/m1"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"billet://memory/m1"}`, FinishReason: "stop"},
 		finalReply("# Vendors\n\nWe chose vendor A.", "billet://memory/m1", "billet://memory/invented"),
 	)
 	defer modelSrv.Close()
@@ -223,9 +225,9 @@ func TestRunWorkerRecallCitableNotFetchable(t *testing.T) {
 // TestRunWorkerRecallRefusedWithoutKnowledge: with no knowledge store a recall
 // action is an unknown action, failing the run closed after one turn.
 func TestRunWorkerRecallRefusedWithoutKnowledge(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(recallReply("anything"))
+	modelSrv := modeltest.NewFakeServer(recallReply("anything"))
 	defer modelSrv.Close()
 
 	finding := RunWorker(context.Background(), WorkerDeps{
@@ -251,12 +253,12 @@ func TestRunWorkerRecallFailuresShareStrikeCounter(t *testing.T) {
 	failing := recallFunc(func(context.Context, memory.Namespace, memory.Query) ([]memory.Recalled, error) {
 		return nil, errors.New("billet: backend unavailable for key " + key)
 	})
-	searchSrv := search.NewFakeServer(nil, search.WithRawToolResult(
+	searchSrv := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(
 		`{"content":[{"type":"text","text":"rate limited"}],"isError":true}`))
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
+	modelSrv := modeltest.NewFakeServer(
 		recallReply("a"),
-		model.FakeReply{Content: `{"action":"search","query":"b"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"search","query":"b"}`, FinishReason: "stop"},
 		recallReply("c"),
 		finalReply("never reached"),
 	)
@@ -378,7 +380,7 @@ type savedMemory struct {
 // runRememberingWorker runs one Worker to completion over the scripted model
 // and search fakes with remember as the store, returning the Interaction and
 // the JSONL trace. The caller owns both fakes.
-func runRememberingWorker(t *testing.T, modelSrv *model.FakeServer, searchSrv *search.FakeServer, remember memory.Rememberer, logger *slog.Logger) (*types.Interaction, string) {
+func runRememberingWorker(t *testing.T, modelSrv *modeltest.FakeServer, searchSrv *searchtest.FakeServer, remember memory.Rememberer, logger *slog.Logger) (*types.Interaction, string) {
 	t.Helper()
 	var out bytes.Buffer
 	w, err := NewWorker(WorkerDeps{
@@ -428,10 +430,10 @@ func TestWorkerRemembersCompletedFinding(t *testing.T) {
 		saved = append(saved, savedMemory{ns: ns, mem: m, deadline: time.Until(dl), hasDeadline: ok, ctxErr: ctx.Err()})
 		return memory.Reference{Namespace: ns, Digest: "m9", Locator: "billet://memory/m9"}, nil
 	})
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "PHY", URL: "https://example.org/phy"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "PHY", URL: "https://example.org/phy"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"phy"}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"phy"}`, FinishReason: "stop"},
 		finalReply("# Vendors\n\nVendor A.", "https://example.org/phy"),
 	)
 	defer modelSrv.Close()
@@ -488,9 +490,9 @@ func TestWorkerRememberFailureIsIsolated(t *testing.T) {
 	remember := rememberFunc(func(context.Context, memory.Namespace, memory.Memory) (memory.Reference, error) {
 		return memory.Reference{}, errors.New("billet: save_memory refused for key " + key)
 	})
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(finalReply("answer"))
+	modelSrv := modeltest.NewFakeServer(finalReply("answer"))
 	defer modelSrv.Close()
 
 	in, spans := runRememberingWorker(t, modelSrv, searchSrv, remember, logger)
@@ -517,9 +519,9 @@ func TestWorkerRememberFailureIsIsolated(t *testing.T) {
 func TestWorkerRemembersOnlyCompletedFindings(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
-		reply model.FakeReply
+		reply modeltest.FakeReply
 	}{
-		{"failed", model.FakeReply{Content: `{"action":"shell"}`, FinishReason: "stop"}},
+		{"failed", modeltest.FakeReply{Content: `{"action":"shell"}`, FinishReason: "stop"}},
 		{"empty answer", finalReply("  ")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -528,9 +530,9 @@ func TestWorkerRemembersOnlyCompletedFindings(t *testing.T) {
 				calls++
 				return memory.Reference{}, nil
 			})
-			searchSrv := search.NewFakeServer(nil)
+			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
-			modelSrv := model.NewFakeServer(tt.reply)
+			modelSrv := modeltest.NewFakeServer(tt.reply)
 			defer modelSrv.Close()
 			runRememberingWorker(t, modelSrv, searchSrv, remember, nil)
 			if calls != 0 {
@@ -553,9 +555,9 @@ func TestWorkerAwaitKeepsFindingDuringSlowSave(t *testing.T) {
 		saveErr <- ctx.Err()
 		return memory.Reference{Locator: "billet://memory/m1"}, nil
 	})
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(finalReply("the answer"))
+	modelSrv := modeltest.NewFakeServer(finalReply("the answer"))
 	defer modelSrv.Close()
 
 	w, err := NewWorker(WorkerDeps{
