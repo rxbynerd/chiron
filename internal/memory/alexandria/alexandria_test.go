@@ -1,4 +1,4 @@
-package alexandria
+package alexandria_test
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/memory/alexandria"
+	"github.com/rxbynerd/chiron/internal/memory/alexandria/alexandriatest"
 )
 
 const (
@@ -22,13 +24,13 @@ const (
 
 // newClient builds a Client pointed at endpoint, failing the test on a
 // construction error.
-func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client {
+func newClient(t *testing.T, endpoint string, mutate ...func(*alexandria.Options)) *alexandria.Client {
 	t.Helper()
-	opts := Options{Endpoint: endpoint, APIKey: testKey}
+	opts := alexandria.Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
-	c, err := New(opts)
+	c, err := alexandria.New(opts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -38,10 +40,10 @@ func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client 
 func strPtr(s string) *string { return &s }
 
 // hits returns n numbered chunk results.
-func hits(n int) []SearchResult {
-	out := make([]SearchResult, n)
+func hits(n int) []alexandria.SearchResult {
+	out := make([]alexandria.SearchResult, n)
 	for i := range out {
-		out[i] = SearchResult{
+		out[i] = alexandria.SearchResult{
 			Ref:  "kb://source/00000000-0000-0000-0000-000000000000#L" + strconv.Itoa(i+1) + "-L" + strconv.Itoa(i+2),
 			Unit: "chunk",
 			ID:   "00000000-0000-0000-0000-000000000000",
@@ -53,34 +55,34 @@ func hits(n int) []SearchResult {
 func TestNewValidation(t *testing.T) {
 	tests := []struct {
 		name    string
-		opts    Options
+		opts    alexandria.Options
 		wantErr string
 		absent  string
 	}{
-		{name: "https endpoint", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey}},
-		{name: "https endpoint with path", opts: Options{Endpoint: "https://alexandria.example.com/api/", APIKey: testKey}},
-		{name: "http loopback", opts: Options{Endpoint: "http://127.0.0.1:8787", APIKey: testKey}},
-		{name: "http localhost", opts: Options{Endpoint: "http://localhost:8787", APIKey: testKey}},
-		{name: "empty key", opts: Options{Endpoint: "https://alexandria.example.com"}, wantErr: "API key must not be empty"},
-		{name: "empty endpoint", opts: Options{APIKey: testKey}, wantErr: "endpoint must not be empty"},
-		{name: "relative endpoint", opts: Options{Endpoint: "alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
-		{name: "http non-loopback", opts: Options{Endpoint: "http://alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
-		{name: "ftp scheme", opts: Options{Endpoint: "ftp://alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
-		{name: "userinfo", opts: Options{Endpoint: "https://user:hunter2@alexandria.example.com", APIKey: testKey}, wantErr: "userinfo", absent: "hunter2"},
-		{name: "malformed with at sign withheld", opts: Options{Endpoint: "https//hunter2@alexandria", APIKey: testKey}, wantErr: "withheld", absent: "hunter2"},
-		{name: "query", opts: Options{Endpoint: "https://alexandria.example.com/?space=a", APIKey: testKey}, wantErr: "query or fragment"},
-		{name: "empty query", opts: Options{Endpoint: "https://alexandria.example.com/?", APIKey: testKey}, wantErr: "query or fragment"},
-		{name: "fragment", opts: Options{Endpoint: "https://alexandria.example.com/#x", APIKey: testKey}, wantErr: "query or fragment"},
-		{name: "access id without secret", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, AccessClientID: testAccessID}, wantErr: "set together"},
-		{name: "access secret without id", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, AccessClientSecret: testAccessSecret}, wantErr: "set together"},
-		{name: "default limit too high", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, DefaultLimit: 21}, wantErr: "default limit"},
-		{name: "default limit negative", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, DefaultLimit: -1}, wantErr: "default limit"},
-		{name: "max tokens too low", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, MaxTokens: 99}, wantErr: "max tokens"},
-		{name: "max tokens too high", opts: Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, MaxTokens: 20001}, wantErr: "max tokens"},
+		{name: "https endpoint", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey}},
+		{name: "https endpoint with path", opts: alexandria.Options{Endpoint: "https://alexandria.example.com/api/", APIKey: testKey}},
+		{name: "http loopback", opts: alexandria.Options{Endpoint: "http://127.0.0.1:8787", APIKey: testKey}},
+		{name: "http localhost", opts: alexandria.Options{Endpoint: "http://localhost:8787", APIKey: testKey}},
+		{name: "empty key", opts: alexandria.Options{Endpoint: "https://alexandria.example.com"}, wantErr: "API key must not be empty"},
+		{name: "empty endpoint", opts: alexandria.Options{APIKey: testKey}, wantErr: "endpoint must not be empty"},
+		{name: "relative endpoint", opts: alexandria.Options{Endpoint: "alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
+		{name: "http non-loopback", opts: alexandria.Options{Endpoint: "http://alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
+		{name: "ftp scheme", opts: alexandria.Options{Endpoint: "ftp://alexandria.example.com", APIKey: testKey}, wantErr: "absolute https://"},
+		{name: "userinfo", opts: alexandria.Options{Endpoint: "https://user:hunter2@alexandria.example.com", APIKey: testKey}, wantErr: "userinfo", absent: "hunter2"},
+		{name: "malformed with at sign withheld", opts: alexandria.Options{Endpoint: "https//hunter2@alexandria", APIKey: testKey}, wantErr: "withheld", absent: "hunter2"},
+		{name: "query", opts: alexandria.Options{Endpoint: "https://alexandria.example.com/?space=a", APIKey: testKey}, wantErr: "query or fragment"},
+		{name: "empty query", opts: alexandria.Options{Endpoint: "https://alexandria.example.com/?", APIKey: testKey}, wantErr: "query or fragment"},
+		{name: "fragment", opts: alexandria.Options{Endpoint: "https://alexandria.example.com/#x", APIKey: testKey}, wantErr: "query or fragment"},
+		{name: "access id without secret", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, AccessClientID: testAccessID}, wantErr: "set together"},
+		{name: "access secret without id", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, AccessClientSecret: testAccessSecret}, wantErr: "set together"},
+		{name: "default limit too high", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, DefaultLimit: 21}, wantErr: "default limit"},
+		{name: "default limit negative", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, DefaultLimit: -1}, wantErr: "default limit"},
+		{name: "max tokens too low", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, MaxTokens: 99}, wantErr: "max tokens"},
+		{name: "max tokens too high", opts: alexandria.Options{Endpoint: "https://alexandria.example.com", APIKey: testKey, MaxTokens: 20001}, wantErr: "max tokens"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(tt.opts)
+			_, err := alexandria.New(tt.opts)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("New: unexpected error %v", err)
@@ -105,16 +107,16 @@ func TestNewValidation(t *testing.T) {
 
 func TestNewDoesNotMutateCallerClient(t *testing.T) {
 	caller := &http.Client{}
-	newClient(t, "https://alexandria.example.com", func(o *Options) { o.HTTPClient = caller })
+	newClient(t, "https://alexandria.example.com", func(o *alexandria.Options) { o.HTTPClient = caller })
 	if caller.CheckRedirect != nil {
 		t.Error("New set CheckRedirect on the caller's client")
 	}
 }
 
 func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
-	fake := NewFakeServer(SearchResponse{
+	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{
 		AppliedMode: "hybrid",
-		Results: []SearchResult{
+		Results: []alexandria.SearchResult{
 			{
 				Ref: "kb://fragment/11111111-1111-1111-1111-111111111111", Unit: "fragment",
 				ID: "11111111-1111-1111-1111-111111111111", Space: "team-notes", Title: "Deploy runbook",
@@ -249,7 +251,7 @@ func TestRecallRefGrammar(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			const valid = "kb://source/22222222-2222-2222-2222-222222222222#L1-L2"
-			fake := NewFakeServer(SearchResponse{Results: []SearchResult{
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{
 				{Ref: tt.ref, Unit: "chunk", ID: id, Title: "candidate", Snippet: "candidate"},
 				{Ref: valid, Unit: "chunk", Title: "valid"},
 			}})
@@ -272,10 +274,16 @@ func TestRecallRefGrammar(t *testing.T) {
 	}
 }
 
-// TestRecallBoundsTitleAndSnippet: a hit's title is cut to maxTitleRunes and
-// its snippet to maxSnippetBytes, both on rune boundaries.
+// TestRecallBoundsTitleAndSnippet: a hit's title is cut to 200 runes and its
+// snippet to 4 KiB, both on rune boundaries (see maxTitleRunes and
+// maxSnippetBytes in internal/memory/alexandria/recall.go).
 func TestRecallBoundsTitleAndSnippet(t *testing.T) {
-	fake := NewFakeServer(SearchResponse{Results: []SearchResult{{
+	const (
+		maxTitleRunes   = 200
+		maxSnippetBytes = 4 << 10
+		truncatedMarker = " [truncated]"
+	)
+	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{{
 		Ref:     "kb://source/22222222-2222-2222-2222-222222222222",
 		Unit:    "chunk",
 		Title:   strings.Repeat("ü", 10<<10),
@@ -297,7 +305,7 @@ func TestRecallBoundsTitleAndSnippet(t *testing.T) {
 }
 
 func TestRecallNamespaceFallsBackWhenResultHasNoSpace(t *testing.T) {
-	fake := NewFakeServer(SearchResponse{Results: hits(1)})
+	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(1)})
 	defer fake.Close()
 	c := newClient(t, fake.URL())
 
@@ -327,7 +335,7 @@ func TestRecallNamespaceFallsBackWhenResultHasNoSpace(t *testing.T) {
 }
 
 func TestRecallLimit(t *testing.T) {
-	fake := NewFakeServer(SearchResponse{Results: hits(25)})
+	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(25)})
 	defer fake.Close()
 
 	tests := []struct {
@@ -346,7 +354,7 @@ func TestRecallLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := newClient(t, fake.URL(), func(o *Options) { o.DefaultLimit = tt.defaultLimit })
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) { o.DefaultLimit = tt.defaultLimit })
 			got, err := c.Recall(context.Background(), "", memory.Query{Text: "x", Limit: tt.limit})
 			if err != nil {
 				t.Fatalf("Recall: %v", err)
@@ -359,7 +367,7 @@ func TestRecallLimit(t *testing.T) {
 }
 
 func TestRecallFewerResultsThanLimit(t *testing.T) {
-	fake := NewFakeServer(SearchResponse{Results: hits(2)})
+	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(2)})
 	defer fake.Close()
 	c := newClient(t, fake.URL())
 
@@ -394,7 +402,7 @@ func TestRecallSpaceValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{})
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
@@ -438,9 +446,9 @@ func TestRecallHeaders(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{})
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
-			c := newClient(t, fake.URL(), func(o *Options) {
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
 				o.AccessClientID, o.AccessClientSecret, o.MaxTokens = tt.accessID, tt.accessSec, tt.maxTokens
 			})
 
@@ -487,9 +495,9 @@ func TestRecallRefusesRedirect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{}, WithRedirect(tt.location()))
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRedirect(tt.location()))
 			defer fake.Close()
-			c := newClient(t, fake.URL(), func(o *Options) {
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
 				o.AccessClientID, o.AccessClientSecret = testAccessID, testAccessSecret
 			})
 
@@ -514,7 +522,7 @@ func TestRecallErrorStatuses(t *testing.T) {
 	echo := `{"error":"invalid token ` + testKey + `"}`
 	tests := []struct {
 		name    string
-		opts    []FakeOption
+		opts    []alexandriatest.FakeOption
 		want    []string
 		absent  []string
 		maxLen  int
@@ -522,55 +530,55 @@ func TestRecallErrorStatuses(t *testing.T) {
 	}{
 		{
 			name: "429 with Retry-After",
-			opts: []FakeOption{WithStatus(http.StatusTooManyRequests, `{"error":"slow down"}`), WithHeader("Retry-After", "30")},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusTooManyRequests, `{"error":"slow down"}`), alexandriatest.WithHeader("Retry-After", "30")},
 			want: []string{"HTTP 429", "Retry-After: 30"},
 		},
 		{
 			name: "429 without Retry-After",
-			opts: []FakeOption{WithStatus(http.StatusTooManyRequests, "")},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusTooManyRequests, "")},
 			want: []string{"HTTP 429"}, absent: []string{"Retry-After"},
 		},
 		{
 			name: "429 Retry-After control characters stripped",
-			opts: []FakeOption{WithStatus(http.StatusTooManyRequests, ""), WithHeader("Retry-After", "30\tseconds")},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusTooManyRequests, ""), alexandriatest.WithHeader("Retry-After", "30\tseconds")},
 			want: []string{"Retry-After: 30seconds"},
 		},
 		{
 			name: "401 never echoes the token",
-			opts: []FakeOption{WithStatus(http.StatusUnauthorized, echo)},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusUnauthorized, echo)},
 			want: []string{"HTTP 401"}, absent: []string{testKey, "invalid token", "REDACTED"},
 		},
 		{
 			name: "403 never echoes the token",
-			opts: []FakeOption{WithStatus(http.StatusForbidden, echo)},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusForbidden, echo)},
 			want: []string{"HTTP 403"}, absent: []string{testKey, "invalid token"},
 		},
 		{
 			name: "500 carries a scrubbed excerpt",
-			opts: []FakeOption{WithStatus(http.StatusInternalServerError, echo)},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusInternalServerError, echo)},
 			want: []string{"HTTP 500", "invalid token", "[REDACTED:alexandria-api-key]"}, absent: []string{testKey},
 		},
 		{
 			name: "500 Access secret scrubbed",
-			opts: []FakeOption{WithStatus(http.StatusInternalServerError, "bad secret "+testAccessSecret)},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusInternalServerError, "bad secret "+testAccessSecret)},
 			want: []string{"[REDACTED:alexandria-access-secret]"}, absent: []string{testAccessSecret},
 		},
 		{
 			name: "502 excerpt bounded",
-			opts: []FakeOption{WithStatus(http.StatusBadGateway, strings.Repeat("upstream down ", 10000))},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusBadGateway, strings.Repeat("upstream down ", 10000))},
 			want: []string{"HTTP 502", "upstream down", "..."}, maxLen: 700,
 		},
 		{
 			name: "500 without body",
-			opts: []FakeOption{WithStatus(http.StatusInternalServerError, "")},
+			opts: []alexandriatest.FakeOption{alexandriatest.WithStatus(http.StatusInternalServerError, "")},
 			want: []string{"HTTP 500"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{}, tt.opts...)
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, tt.opts...)
 			defer fake.Close()
-			c := newClient(t, fake.URL(), func(o *Options) {
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
 				o.AccessClientID, o.AccessClientSecret = testAccessID, testAccessSecret
 			})
 
@@ -615,9 +623,9 @@ func TestRecallBodyBound(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{}, WithOversizedBody(tt.size))
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithOversizedBody(tt.size))
 			defer fake.Close()
-			c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = tt.bound })
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) { o.MaxBodyBytes = tt.bound })
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
 			if tt.wantErr {
@@ -645,7 +653,7 @@ func TestRecallDegradedLabel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{Results: hits(3), Degraded: tt.degraded})
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(3), Degraded: tt.degraded})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
@@ -687,7 +695,7 @@ func TestRecallStrictDecode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{}, WithRawBody(tt.body))
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRawBody(tt.body))
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
@@ -718,7 +726,7 @@ func TestRecallRejectsEmptyQuery(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(SearchResponse{})
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
