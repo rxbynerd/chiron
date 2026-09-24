@@ -1278,3 +1278,103 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-25 — Fetched-page main-content extraction
+
+`pageText` (`internal/researcher/fleet/worker_page.go` and
+`worker_page_extract.go`) now reduces an HTML page to its main content
+before the page bound, so navigation, cookie banners, sidebars and footers
+no longer spend `fleet.max_page_bytes` ahead of the article body. This
+settles the "HTML extraction quality beyond the tag scanner" item the
+2026-09-23 cycle-3 entry deferred.
+
+**Stdlib only, on the existing scanner.** No `golang.org/x/net/html` and no
+readability port. Choosing a subtree and dropping furniture does not need a
+full HTML5 tree builder, the tolerant scanner already copes with the
+malformed markup the fetch path sees, and a parser dependency whose input
+is hostile would need its own review. The scanner builds a flat element
+slice (integer parent indices) and a token stream whose text tokens are
+byte ranges of the page. Void elements never open a scope; a close tag pops
+to its nearest open match and an unmatched one is ignored; elements still
+open at the end are closed. A subset of the HTML implied end tags stops
+unclosed `<p>`, `<li>`, `<dt>`/`<dd>` and table cells from nesting, and an
+unclosed `<head>` ends at the first tag or visible text that does not
+belong in it. As in the HTML tokenizer, a `<` not followed by a letter,
+`/`, `!` or `?` is text, and a quote opens a value only after `=`, so a
+stray apostrophe cannot swallow the rest of a page. Only `id`, `class` and
+`role` are read. `script`, `style`, `noscript`, `template`, `svg`, `iframe`
+and `object` are skipped unparsed, and `head` is never rendered.
+
+**Selection order.**
+
+1. The `<main>` or `role=main` element with the most non-link text,
+   wherever it sits.
+2. Else the `<article>` with the most non-link text, outside page
+   furniture.
+3. Else the best-scoring block and its qualifying siblings.
+4. Else the body, or the whole input for a bare fragment.
+5. Safety net: if the chosen content renders no letters or digits but the
+   whole document with only the never-visible elements dropped does, that
+   is returned instead (an ASP.NET WebForms page wrapping its body in
+   `<form>`, for instance).
+
+A landmark in step 1 or 2 holding less than a quarter of the page's
+content non-link text is implausible (a teaser card, a mis-marked `<main>`)
+and falls through to the next step.
+
+**Scoring.** `p` and `pre`, and `div` or `td` without block children, are
+paragraphs when they hold at least 25 bytes of non-space text. As in
+readability, a paragraph scores 1 + its commas + one point per 100 bytes
+(at most 3). Its nearest candidate ancestor (`div`, `section`, `article`,
+`main`, `body`, `table`, `td`, `blockquote`) takes the full score and the
+next candidate up takes half; the walk covers at most eight levels and stops
+at a dropped element. Crediting candidate ancestors rather than the literal
+parent and grandparent keeps credit off `tr`, `tbody`, `span` and similar
+wrappers. A candidate's final score is (credit + tag weight [`div` 5,
+`td` and `blockquote` 3] + 25 for a content word in its id or class) ×
+(1 − link density); the highest wins, the earliest on a tie. A sibling
+joins the winner when it scores at least max(10, a fifth of the winner's
+score), or is a `p` with at least 80 bytes of non-link text and link
+density under 0.25; a heading joins when it introduces a joined sibling.
+
+**Boilerplate inside the chosen content.** `nav`, `footer`, `aside` and
+`form` are dropped, and so is a `header` unless it sits inside `main`,
+`article` or `role=main`, where an article's headline and byline live. The
+first role token `navigation`, `banner`, `contentinfo`, `complementary`,
+`search`, `menu`, `menubar`, `dialog` or `alertdialog` drops an element.
+So does an id or class token that starts with `nav`, `menu`, `sidebar`,
+`footer`, `cookie`, `banner`, `consent`, `share`, `comment`, `advert`,
+`promo`, `breadcrumb` or `related`. Tokens are the runs of ASCII letters and
+digits and, for a camelCase run, also its parts: `navbar`, `site-footer`,
+`siteFooter`, `SideBar` and `CybotCookiebotDialog` match, `unavailable` and
+`canvas` do not, and `navy` and `commentary` are listed exceptions.
+Guards: attribute heuristics never drop `html`, `body`, `main`, `article` or
+`role=main`, never apply inside `pre` or `code` (highlighters use classes
+such as `hljs-comment`), and an id or class carrying a content word
+(`article`, `content`, `main`, `body`, `post`, `entry`, `story`, `text`,
+matched as a whole token) vetoes a class or id match. The veto keeps
+readability's known false negative: `main-nav` or `related-content`
+survive by class and are caught only by their tag or role. Furniture
+cannot contain the chosen root, and its text does not count towards its
+ancestors. `form` is dropped from rendering but does not disqualify its
+descendants, so content a framework wraps in a form can still be chosen.
+
+**Linear time, bounded memory.** One forward pass, no recursion. Close tags
+match through per-name open counts, so an unmatched close tag costs O(1)
+and pops are amortised O(1). The raw-text close-tag search is an
+allocation-free, case-insensitive forward scan; the search it replaces
+lowercased the rest of the page once per skipped element, quadratic on a
+page of many scripts. Depth is capped at 512 and elements at 100 000: a tag
+beyond a cap is not pushed, but its text and line break are kept and its
+close tag does not pop a pushed ancestor. The element and token slices are
+sized once from a markup count and never grow, at most two 8-byte tokens
+per tag and one 64-byte element per start tag up to the cap, so a 1 MiB
+body stays under about 20 MB while it is parsed. Adversarial tests and
+benchmarks cover each case.
+
+**Bound and fence unchanged.** After extraction `pageText` still applies
+`strings.ToValidUTF8`, whitespace collapsing and the `fleet.max_page_bytes`
+cut on a rune boundary; non-HTML media types are untouched. The extracted
+text still reaches the transcript through `fetchedPageMessage`, which
+defangs it: entity decoding can produce `<<<` from `&lt;&lt;&lt;`, and a
+test pins that the delimiter is defanged there.

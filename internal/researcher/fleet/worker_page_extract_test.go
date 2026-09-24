@@ -34,6 +34,7 @@ func TestAttrWords(t *testing.T) {
 		{"topNavBar", true, false},
 		{"SideBar", true, false},
 		{"BreadCrumbs", true, false},
+		{"CybotCookiebotDialog", true, false},
 		{"breadcrumbs", true, false},
 		{"related-articles", true, false},
 		{"unavailable", false, false},
@@ -50,6 +51,7 @@ func TestAttrWords(t *testing.T) {
 		{"mainContent", false, true},
 		{"maincontent", false, false},
 		{"main-nav", true, true},
+		{"related-content", true, true},
 		{"post comments", true, true},
 	} {
 		t.Run(tt.value, func(t *testing.T) {
@@ -420,6 +422,15 @@ func adversarialPages() []struct {
 			check: func(t *testing.T, _ *pageParser, text string) {
 				if text != "before" {
 					t.Errorf("got %q, want only the text before the script", text[:min(len(text), 40)])
+				}
+			},
+		},
+		{
+			name: "tag openers without an end",
+			src:  "before" + strings.Repeat("<a", 1<<19),
+			check: func(t *testing.T, _ *pageParser, text string) {
+				if text != "before" {
+					t.Errorf("got %q, want only the text before the tag", text[:min(len(text), 40)])
 				}
 			},
 		},
