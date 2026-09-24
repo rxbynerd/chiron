@@ -1278,3 +1278,29 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-12 — Build version and a report provenance comment
+
+Chiron had no version identity at all: no `--version` flag, no
+`VERSION` file, no git tags. This blocked a small, useful feature —
+stamping each research packet with the chiron version that produced
+it, so a later script can detect a stale packet and refresh it.
+
+`internal/version` holds a single `Version` var, defaulting to
+`"dev"` and set at build time via `-X` ldflags from
+`git describe --tags --always --dirty` (Justfile, integration.yml).
+`internal/cli` wires it onto cobra's built-in `root.Version`, and
+`internal/formatter` writes it as the packet's first line:
+`<!-- chiron-version: <value> -->`, ahead of the YAML front matter.
+
+Alternatives considered: a checked-in `VERSION` file (rejected — an
+extra manual bump step, and drifts from the actual commit between
+bumps) and `debug.ReadBuildInfo` module version (rejected — reports
+`(devel)` for the untagged, from-source builds this repo currently
+only produces, giving every packet the same useless value).
+
+The comment is a separate line, not a front-matter field: front
+matter is `Interaction`-derived data (PROPOSAL §4.4) and is
+YAML-encoded as a block, while the version describes the tool that
+rendered the document, not the run itself, and needs to survive as
+plain text a refresh script can grep for without a YAML parser.

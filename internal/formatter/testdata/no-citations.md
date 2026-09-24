@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Summarise the history of the Brennan torpedo
 agent: deep-research-preview-04-2026

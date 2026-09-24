@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Compare the safety records of European rail operators
 agent: deep-research-preview-04-2026

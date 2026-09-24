@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Audit citation hygiene
 agent: deep-research-preview-04-2026

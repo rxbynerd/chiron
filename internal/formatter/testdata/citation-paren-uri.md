@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Survey URLs containing parentheses
 agent: deep-research-preview-04-2026

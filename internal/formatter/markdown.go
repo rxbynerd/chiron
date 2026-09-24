@@ -10,16 +10,18 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/rxbynerd/chiron/internal/types"
+	"github.com/rxbynerd/chiron/internal/version"
 )
 
 // Markdown is the v1 Formatter. It renders one Interaction as a single
-// portable document (PROPOSAL.md §4.4): YAML front matter carrying the
-// run's identity and cost signals, the final text output as the body,
-// chart images as relative links backed by returned assets, and a
-// numbered sources section at the foot. It performs no IO: chart
-// images are returned as Report.Assets and referenced from the
-// document by relative links, leaving placement to the ReportSink
-// (see docs/DECISIONS.md).
+// portable document (PROPOSAL.md §4.4): a leading HTML comment recording
+// the chiron build version, YAML front matter carrying the run's
+// identity and cost signals, the final text output as the body, chart
+// images as relative links backed by returned assets, and a numbered
+// sources section at the foot. It performs no IO: chart images are
+// returned as Report.Assets and referenced from the document by
+// relative links, leaving placement to the ReportSink (see
+// docs/DECISIONS.md).
 type Markdown struct{}
 
 // NewMarkdown returns the markdown Formatter.
@@ -139,6 +141,7 @@ func (m *Markdown) Format(_ context.Context, in *types.Interaction) (*types.Repo
 	sources := collectSources(in.Citations)
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "<!-- chiron-version: %s -->\n", version.Version)
 	b.WriteString("---\n")
 	enc := yaml.NewEncoder(&b)
 	enc.SetIndent(2)
