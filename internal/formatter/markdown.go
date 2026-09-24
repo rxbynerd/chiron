@@ -70,11 +70,15 @@ type source struct {
 }
 
 // markdown renders the source as a numbered-list entry body. Title and
-// URI are API-provided and untrusted: `]` in a title and `)` in a URI
-// would break out of the link syntax, so both are neutralised before
-// formatting. A knowledge store locator cannot resolve in a viewer, so it
-// renders as its escaped title and the locator in inline code, never as a
-// link. Scheme filtering happens earlier, in collectSources.
+// URI are API-provided and untrusted, so link text always goes through
+// escapeInline — the same treatment as knowledge-source titles — even
+// when the URI stands in for an empty title. A web destination also has
+// ")", ASCII whitespace, and "<"/">" percent-encoded: left raw, any of
+// them can make CommonMark reject the inline-link form and fall back to
+// literal text, at which point raw HTML in the URI would render live. A
+// knowledge store locator cannot resolve in a viewer, so it renders as
+// its escaped title and the locator in inline code, never as a link.
+// Scheme filtering happens earlier, in collectSources.
 func (s source) markdown() string {
 	if isKnowledgeURI(s.URI) {
 		uri := strings.ReplaceAll(strings.Join(strings.Fields(s.URI), "%20"), "`", "%60")
@@ -83,13 +87,27 @@ func (s source) markdown() string {
 		}
 		return escapeInline(s.Title) + " `" + uri + "`"
 	}
-	title := strings.ReplaceAll(s.Title, "]", `\]`)
+	title := s.Title
 	if title == "" {
 		title = s.URI
 	}
-	uri := strings.ReplaceAll(s.URI, ")", "%29")
-	return fmt.Sprintf("[%s](%s)", title, uri)
+	return fmt.Sprintf("[%s](%s)", escapeInline(title), webLinkDestination.Replace(s.URI))
 }
+
+// webLinkDestination percent-encodes the characters that would break
+// CommonMark's inline-link destination grammar or force a fallback to
+// literal text: ")" ends the destination early, and ASCII whitespace or
+// "<"/">" makes the destination invalid, at which point any HTML the URI
+// carries would no longer be inside a link and would render live.
+var webLinkDestination = strings.NewReplacer(
+	")", "%29",
+	" ", "%20",
+	"\t", "%09",
+	"\n", "%0A",
+	"\r", "%0D",
+	"<", "%3C",
+	">", "%3E",
+)
 
 // Format renders the interaction. The body is the last text output —
 // the final report; earlier text outputs are interim and thought

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,61 @@ func TestMarkdownFormat(t *testing.T) {
 				CompletedAt: finished,
 			},
 		},
+		{
+			// A web citation title carrying raw HTML, plus emphasis and
+			// code markers, must render as inert text: escapeInline
+			// covers the same characters here as it does for
+			// knowledge-source titles.
+			name: "citation-html-title",
+			in: &types.Interaction{
+				ID:      "v1_html",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit citation titles for raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# HTML titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/report", Title: "Breaking <img src=https://attacker.example/x> *news* _now_ `verified`"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A web citation URI carrying a space and raw HTML must stay
+			// a valid CommonMark link destination: the space and angle
+			// brackets are percent-encoded so the link cannot fall back
+			// to literal text.
+			name: "citation-uri-space-html",
+			in: &types.Interaction{
+				ID:      "v1_urispace",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit citation URIs for raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# URI hygiene\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.com/a <img src=x>", Title: "Suspicious URI"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// An empty title falls back to the URI as link text; that
+			// fallback text is escaped exactly like an explicit title.
+			name: "citation-empty-title-escaped-uri",
+			in: &types.Interaction{
+				ID:      "v1_emptytitle",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit fallback link text",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Fallback text\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/foo_bar*baz"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -261,6 +317,52 @@ func TestMarkdownFormat(t *testing.T) {
 				t.Errorf("assets:\n got %+v\nwant %+v", got.Assets, tc.wantAssets)
 			}
 		})
+	}
+}
+
+// TestMarkdownFormatNoLiveHTMLInBody proves that a citation title
+// carrying an <img> tag cannot reach the rendered body as live HTML: the
+// front matter is YAML (delimited by the leading "---" fences, which a
+// front-matter-aware viewer excludes from rendering, and a bare
+// CommonMark renderer treats as ordinary paragraph text rather than an
+// HTML block since it does not start flush with "<"), so only the body
+// below it needs every "<" to be escaped.
+func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
+	in := &types.Interaction{
+		ID:      "v1_livehtml",
+		Agent:   "deep-research-preview-04-2026",
+		Query:   "Audit citation titles for raw HTML",
+		Status:  types.StatusCompleted,
+		Outputs: []types.Output{{Type: types.OutputText, Text: "# HTML titles\n\nFindings."}},
+		Citations: []types.Citation{
+			{URI: "https://example.org/report", Title: "Breaking <img src=https://attacker.example/x> news"},
+		},
+		CreatedAt:   started,
+		CompletedAt: finished,
+	}
+
+	got, err := NewMarkdown().Format(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+
+	const frontMatterEnd = "---\n\n"
+	i := strings.Index(string(got.Markdown), frontMatterEnd)
+	if i < 0 {
+		t.Fatalf("no front-matter close delimiter found in:\n%s", got.Markdown)
+	}
+	body := string(got.Markdown)[i+len(frontMatterEnd):]
+
+	if !strings.Contains(body, `\<img src=https://attacker.example/x\>`) {
+		t.Errorf("body does not contain the expected escaped tag:\n%s", body)
+	}
+	for i, r := range body {
+		if r != '<' {
+			continue
+		}
+		if i == 0 || body[i-1] != '\\' {
+			t.Errorf("unescaped %q at byte %d in body:\n%s", "<", i, body)
+		}
 	}
 }
 
