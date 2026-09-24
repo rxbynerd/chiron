@@ -160,6 +160,7 @@ func resolveConfig(cmd *cobra.Command, args []string) (config.ResearchConfig, er
 		cfg.Query = args[0]
 	}
 
+	cfg.SeedModelPrices()
 	if err := cfg.Validate(); err != nil {
 		return config.ResearchConfig{}, fmt.Errorf("invalid research config: %w", err)
 	}
