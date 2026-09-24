@@ -1,4 +1,4 @@
-package search
+package search_test
 
 import (
 	"context"
@@ -9,31 +9,33 @@ import (
 	"testing"
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 )
 
 const testKey = "sk-search-0123456789abcdefABCDEF"
 
-// newClient builds a Client pointed at an endpoint, failing the test on a
-// construction error.
-func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client {
+// newClient builds a search.Client pointed at an endpoint, failing the test
+// on a construction error.
+func newClient(t *testing.T, endpoint string, mutate ...func(*search.Options)) *search.Client {
 	t.Helper()
-	opts := Options{Endpoint: endpoint, APIKey: testKey}
+	opts := search.Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
-	c, err := New(opts)
+	c, err := search.New(opts)
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("search.New: %v", err)
 	}
 	return c
 }
 
 func TestSearchHappyPath(t *testing.T) {
-	want := []Result{
+	want := []search.Result{
 		{Title: "Rayleigh scattering", URL: "https://example.com/rayleigh", Snippet: "why the sky is blue"},
 		{Title: "Atmospheric optics", URL: "https://example.com/optics", Snippet: "scattering of sunlight"},
 	}
-	fake := NewFakeServer(want)
+	fake := searchtest.NewFakeServer(want)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -77,10 +79,10 @@ func TestSearchHappyPath(t *testing.T) {
 }
 
 func TestSearchCustomToolAndArgKey(t *testing.T) {
-	fake := NewFakeServer([]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
+	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
 
-	c := newClient(t, fake.URL(), func(o *Options) {
+	c := newClient(t, fake.URL(), func(o *search.Options) {
 		o.ToolName = "web_search"
 		o.QueryArgKey = "q"
 	})
@@ -99,9 +101,9 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 func TestSearchSessionEchoedAndEnded(t *testing.T) {
 	// A stateful server assigns a session on initialize and requires it on
 	// tools/call; the client echoes it, then ends it with a DELETE.
-	fake := NewFakeServer(
-		[]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
-		WithSessionID("sess-abc-123"),
+	fake := searchtest.NewFakeServer(
+		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
+		searchtest.WithSessionID("sess-abc-123"),
 	)
 	defer fake.Close()
 
@@ -137,9 +139,9 @@ func TestSearchSessionEchoedAndEnded(t *testing.T) {
 
 func TestSearchSessionEndedAfterToolError(t *testing.T) {
 	// The session is ended even when the search itself fails.
-	fake := NewFakeServer(nil,
-		WithSessionID("sess-err"),
-		WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
+	fake := searchtest.NewFakeServer(nil,
+		searchtest.WithSessionID("sess-err"),
+		searchtest.WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
 	)
 	defer fake.Close()
 
@@ -155,9 +157,9 @@ func TestSearchSessionEndedAfterToolError(t *testing.T) {
 
 func TestSearchProtocolVersionHeader(t *testing.T) {
 	// Every request after initialize carries the revision the server chose.
-	fake := NewFakeServer(
-		[]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
-		WithProtocolVersion("2025-03-26"),
+	fake := searchtest.NewFakeServer(
+		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
+		searchtest.WithProtocolVersion("2025-03-26"),
 	)
 	defer fake.Close()
 
@@ -179,8 +181,8 @@ func TestSearchProtocolVersionHeader(t *testing.T) {
 func TestSearchOverSSE(t *testing.T) {
 	// The tools/call reply may be a text/event-stream frame carrying the
 	// JSON-RPC response; the client reads it under the same bound.
-	want := []Result{{Title: "SSE result", URL: "https://e.com/sse", Snippet: "streamed"}}
-	fake := NewFakeServer(want, WithSSE())
+	want := []search.Result{{Title: "SSE result", URL: "https://e.com/sse", Snippet: "streamed"}}
+	fake := searchtest.NewFakeServer(want, searchtest.WithSSE())
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -197,7 +199,7 @@ func TestSearchStructuredContent(t *testing.T) {
 	// The results document may arrive as structuredContent rather than inside
 	// a text block; the client prefers it.
 	raw := `{"content":[],"structuredContent":{"results":[{"title":"S","url":"https://e.com/s","snippet":"struct"}]},"isError":false}`
-	fake := NewFakeServer(nil, WithRawToolResult(raw))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -214,7 +216,7 @@ func TestSearchGracefulDegradationOnUnexpectedShape(t *testing.T) {
 	// A tool result that carries prose but not the expected results document
 	// degrades to a single snippet rather than erroring.
 	raw := `{"content":[{"type":"text","text":"I could not find structured results but here is a summary."}],"isError":false}`
-	fake := NewFakeServer(nil, WithRawToolResult(raw))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -237,7 +239,7 @@ func TestSearchEmptyResultsIsSuccess(t *testing.T) {
 	// A results document with an empty array is a valid zero-hit success, not
 	// a degradation to a text snippet.
 	raw := `{"content":[{"type":"text","text":"{\"results\":[]}"}],"isError":false}`
-	fake := NewFakeServer(nil, WithRawToolResult(raw))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -253,7 +255,7 @@ func TestSearchEmptyResultsIsSuccess(t *testing.T) {
 func TestSearchToolError(t *testing.T) {
 	// isError:true is a tool-level failure the client surfaces as an error.
 	raw := `{"content":[{"type":"text","text":"upstream search quota exceeded"}],"isError":true}`
-	fake := NewFakeServer(nil, WithRawToolResult(raw))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -269,7 +271,7 @@ func TestSearchToolError(t *testing.T) {
 func TestSearchToolCallNotRetried(t *testing.T) {
 	// tools/call may invoke a billable upstream search; it is single-attempt.
 	// A tools/call reply that cannot be decoded must not be retried.
-	fake := NewFakeServer(nil, WithRawToolResult("this is not json"))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult("this is not json"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -283,10 +285,10 @@ func TestSearchOversizedBodyBounded(t *testing.T) {
 	// A tools/call result over the bound is an error, not a truncation.
 	big := strings.Repeat("x", 4096)
 	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
-	fake := NewFakeServer(nil, WithRawToolResult(raw))
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
-	c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = 512 })
+	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
 	_, err := c.Search(context.Background(), "q")
 	if err == nil {
 		t.Fatal("Search should fail when the response exceeds MaxBodyBytes")
@@ -300,10 +302,10 @@ func TestSearchOversizedSSEBounded(t *testing.T) {
 	// The SSE read path is bounded too: a large streamed frame is rejected.
 	big := strings.Repeat("y", 4096)
 	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
-	fake := NewFakeServer(nil, WithRawToolResult(raw), WithSSE())
+	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw), searchtest.WithSSE())
 	defer fake.Close()
 
-	c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = 512 })
+	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
 	_, err := c.Search(context.Background(), "q")
 	if err == nil {
 		t.Fatal("Search over SSE should fail when the stream exceeds MaxBodyBytes")
@@ -331,12 +333,12 @@ func TestSearchEndpointValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Options{Endpoint: tt.endpoint, APIKey: testKey})
+			_, err := search.New(search.Options{Endpoint: tt.endpoint, APIKey: testKey})
 			if tt.wantErr && err == nil {
-				t.Errorf("New(%q) succeeded, want an error", tt.endpoint)
+				t.Errorf("search.New(%q) succeeded, want an error", tt.endpoint)
 			}
 			if !tt.wantErr && err != nil {
-				t.Errorf("New(%q) = %v, want success", tt.endpoint, err)
+				t.Errorf("search.New(%q) = %v, want success", tt.endpoint, err)
 			}
 			if err != nil && !strings.HasPrefix(err.Error(), "search: ") {
 				t.Errorf("error = %v, want the search: prefix", err)
@@ -368,7 +370,7 @@ func TestSearchErrorNeverLeaksKey(t *testing.T) {
 }
 
 func TestSearchEmptyQueryRejected(t *testing.T) {
-	fake := NewFakeServer(nil)
+	fake := searchtest.NewFakeServer(nil)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
@@ -382,10 +384,10 @@ func TestSearchEmptyQueryRejected(t *testing.T) {
 
 func TestSearchKeylessServer(t *testing.T) {
 	// A server needing no key: no Authorization header is sent.
-	fake := NewFakeServer([]Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
+	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
 
-	c := newClient(t, fake.URL(), func(o *Options) { o.APIKey = "" })
+	c := newClient(t, fake.URL(), func(o *search.Options) { o.APIKey = "" })
 	if _, err := c.Search(context.Background(), "q"); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
