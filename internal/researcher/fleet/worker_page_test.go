@@ -23,12 +23,29 @@ func TestHTMLToText(t *testing.T) {
 		{"self-closing br", "a<br/>b", "a\nb"},
 		{"unterminated tag", "a<div", "a"},
 		{"unterminated script", "a<script>never closed", "a"},
+		{"literal less-than", "3 < 5 and 1<2 <= 4", "3 < 5 and 1<2 <= 4"},
+		{"apostrophe outside a value", "<p class=it's>kept</p>after", "\nkeptafter"},
+		{"quoted value after spaced equals", `<a title = 'a>b'>link</a>`, "link"},
+		{"close tag needs a boundary", "a<script>x</scripts>y</script >b", "a\nb"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := htmlToText(tt.in); got != tt.want {
 				t.Errorf("htmlToText(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestHTMLToTextManyScripts: skipping tens of thousands of raw-text elements
+// completes, which requires the close-tag search to stay linear.
+func TestHTMLToTextManyScripts(t *testing.T) {
+	src := strings.Repeat("<SCRIPT>var x = '</div>';</SCRIPT>", 50000) + "<p>end</p>"
+	got := htmlToText(src)
+	if strings.Contains(got, "var x") {
+		t.Errorf("script content leaked into the text")
+	}
+	if !strings.HasSuffix(got, "end") {
+		t.Errorf("text after the scripts is missing: %q", got[max(0, len(got)-40):])
 	}
 }
 

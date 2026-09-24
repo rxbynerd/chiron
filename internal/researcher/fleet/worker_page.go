@@ -90,7 +90,7 @@ func htmlToText(src string) string {
 	i := 0
 	for i < len(src) {
 		c := src[i]
-		if c != '<' {
+		if c != '<' || !opensMarkup(src, i) {
 			b.WriteByte(c)
 			i++
 			continue
@@ -115,11 +115,11 @@ func htmlToText(src string) string {
 		if !closing && skippedElements[name] {
 			// Skip to the matching close tag; nested same-name elements do
 			// not occur for these element types.
-			close := strings.Index(strings.ToLower(src[i:]), "</"+name)
+			close := indexCloseTag(src, i, name)
 			if close < 0 {
 				break
 			}
-			i += close
+			i = close
 			if end := findTagEnd(src, i); end >= 0 {
 				i = end + 1
 			} else {
@@ -141,10 +141,24 @@ func htmlToText(src string) string {
 	return html.UnescapeString(b.String())
 }
 
+// opensMarkup reports whether the '<' at src[i] starts a tag, comment or
+// declaration. As in the HTML tokenizer, a '<' followed by anything other
+// than a letter, '/', '!' or '?' is literal text.
+func opensMarkup(src string, i int) bool {
+	if i+1 >= len(src) {
+		return false
+	}
+	c := src[i+1]
+	return isASCIILetter(c) || c == '/' || c == '!' || c == '?'
+}
+
 // findTagEnd returns the index of the '>' closing the tag that opens at
-// start, honouring quoted attribute values, or -1 if the tag never closes.
+// start, or -1 if the tag never closes. A quote opens a quoted value only
+// directly after '=' (whitespace aside), so a stray apostrophe in an
+// attribute name or unquoted value does not swallow the rest of the page.
 func findTagEnd(src string, start int) int {
 	var quote byte
+	afterEquals := false
 	for j := start + 1; j < len(src); j++ {
 		c := src[j]
 		switch {
@@ -152,13 +166,70 @@ func findTagEnd(src string, start int) int {
 			if c == quote {
 				quote = 0
 			}
-		case c == '"' || c == '\'':
-			quote = c
 		case c == '>':
 			return j
+		case c == '=':
+			afterEquals = true
+		case afterEquals && (c == '"' || c == '\''):
+			quote = c
+			afterEquals = false
+		case isHTMLSpace(c):
+		default:
+			afterEquals = false
 		}
 	}
 	return -1
+}
+
+// indexCloseTag returns the index of the first "</name" at or after from,
+// matched ASCII case-insensitively and followed by whitespace, '/', '>' or
+// the end of input, or -1 if there is none. It never allocates and its
+// cursor only advances, so skipping many raw-text elements stays linear.
+func indexCloseTag(src string, from int, name string) int {
+	for i := from; i < len(src); {
+		j := strings.Index(src[i:], "</")
+		if j < 0 {
+			return -1
+		}
+		start := i + j
+		k := start + 2
+		end := k + len(name)
+		if end <= len(src) && asciiEqualFold(src[k:end], name) &&
+			(end == len(src) || isHTMLSpace(src[end]) || src[end] == '/' || src[end] == '>') {
+			return start
+		}
+		i = k
+	}
+	return -1
+}
+
+func isASCIILetter(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+func isHTMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
+// asciiEqualFold reports whether a and b are equal under ASCII case folding,
+// the folding HTML uses for tag and attribute names.
+func asciiEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if asciiLower(a[i]) != asciiLower(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + 'a' - 'A'
+	}
+	return c
 }
 
 // tagName extracts the lower-cased element name from the inside of a tag and
