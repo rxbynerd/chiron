@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Configuring retries - Widget SDK documentation</title>
+<style>.sidebar { width: 16rem; }</style>
+</head>
+<body>
+<header class="topbar">
+  <a href="/">Widget SDK</a>
+  <form role="search" action="/search"><input name="q" placeholder="Search the docs"></form>
+</header>
+<div class="page-with-sidebar">
+  <div class="sidebar">
+    <nav>
+      <ul>
+        <li><a href="/start">Getting started</a></li>
+        <li><a href="/config">Configuration</a></li>
+        <li><a href="/retries">Configuring retries</a></li>
+        <li><a href="/errors">Error handling</a></li>
+      </ul>
+    </nav>
+  </div>
+  <main id="docs-content">
+    <nav class="breadcrumbs" aria-label="Breadcrumb"><a href="/">Docs</a> / <a href="/config">Configuration</a> / Retries</nav>
+    <h1>Configuring retries</h1>
+    <p>The client retries idempotent requests that fail with a connection error or a 503 response. Retries use exponential backoff with full jitter.</p>
+    <h2>Options</h2>
+    <dl>
+      <dt><code>max_attempts</code></dt>
+      <dd>The total number of attempts, including the first. Defaults to 3.</dd>
+      <dt><code>base_delay</code></dt>
+      <dd>The initial backoff delay. Defaults to 200&nbsp;ms.</dd>
+    </dl>
+    <h2>Example</h2>
+    <pre><code class="language-go"><span class="hljs-comment">// Retry up to five times.</span>
+client := widget.New(widget.WithRetries(<span class="hljs-number">5</span>))</code></pre>
+    <div class="admonition note">
+      <p>Non-idempotent requests, such as POST, are never retried automatically.</p>
+    </div>
+    <div class="page-footer-nav">
+      <a href="/config">Previous: Configuration</a>
+      <a href="/errors">Next: Error handling</a>
+    </div>
+  </main>
+</div>
+<footer>
+  <p>Copyright 2026 Widget Ltd. Documentation licensed under CC BY 4.0.</p>
+</footer>
+</body>
+</html>
