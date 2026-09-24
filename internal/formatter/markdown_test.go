@@ -290,6 +290,61 @@ func TestMarkdownFormat(t *testing.T) {
 				CompletedAt: finished,
 			},
 		},
+		{
+			// An empty title's URI fallback feeds the same string
+			// through escapeInline for the link text and
+			// webLinkDestination for the destination: both transforms
+			// must fire correctly on one shared, untrusted string.
+			name: "citation-empty-title-html-uri",
+			in: &types.Interaction{
+				ID:      "v1_emptyhtml",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit fallback link text against raw HTML",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Fallback text\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/<script> report"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A literal backslash immediately before a raw tag escapes
+			// itself first, then the tag: the title still round-trips
+			// to fully inert text rather than unmasking the tag.
+			name: "citation-backslash-html-title",
+			in: &types.Interaction{
+				ID:      "v1_backslash",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit backslash-adjacent HTML in citation titles",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Backslash titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/backslash", Title: `\<img src=x>`},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
+			// A title with an embedded newline and repeated spaces
+			// still collapses to single spaces, matching escapeInline's
+			// existing whitespace handling at this call site.
+			name: "citation-title-whitespace",
+			in: &types.Interaction{
+				ID:      "v1_whitespace",
+				Agent:   "deep-research-preview-04-2026",
+				Query:   "Audit whitespace collapse in citation titles",
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Whitespace titles\n\nFindings."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/whitespace", Title: "Multiple   spaces\nand a newline"},
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -321,12 +376,9 @@ func TestMarkdownFormat(t *testing.T) {
 }
 
 // TestMarkdownFormatNoLiveHTMLInBody proves that a citation title
-// carrying an <img> tag cannot reach the rendered body as live HTML: the
-// front matter is YAML (delimited by the leading "---" fences, which a
-// front-matter-aware viewer excludes from rendering, and a bare
-// CommonMark renderer treats as ordinary paragraph text rather than an
-// HTML block since it does not start flush with "<"), so only the body
-// below it needs every "<" to be escaped.
+// carrying an <img> tag cannot reach the rendered body as live HTML.
+// The YAML front matter carries the raw title as data for
+// front-matter-aware viewers; this test does not scan it.
 func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
 	in := &types.Interaction{
 		ID:      "v1_livehtml",
@@ -360,8 +412,12 @@ func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
 		if r != '<' {
 			continue
 		}
-		if i == 0 || body[i-1] != '\\' {
-			t.Errorf("unescaped %q at byte %d in body:\n%s", "<", i, body)
+		backslashes := 0
+		for j := i - 1; j >= 0 && body[j] == '\\'; j-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			t.Errorf("unescaped %q at byte %d in body (preceded by %d backslashes):\n%s", "<", i, backslashes, body)
 		}
 	}
 }
@@ -369,6 +425,33 @@ func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
 func TestMarkdownFormatNilInteraction(t *testing.T) {
 	if _, err := NewMarkdown().Format(context.Background(), nil); err == nil {
 		t.Error("Format(nil) must error, not render an empty document")
+	}
+}
+
+// TestWebLinkDestination asserts every ASCII control byte and DEL is
+// percent-encoded as uppercase %XX, and that an already percent-encoded
+// sequence is left untouched rather than having its "%" re-encoded.
+func TestWebLinkDestination(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"nul", "\x00", "%00"},
+		{"bel", "\x07", "%07"},
+		{"tab", "\t", "%09"},
+		{"lf", "\n", "%0A"},
+		{"cr", "\r", "%0D"},
+		{"esc", "\x1B", "%1B"},
+		{"del", "\x7F", "%7F"},
+		{"no-double-encode", "https://example.org/a%20b?x=1%29", "https://example.org/a%20b?x=1%29"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := webLinkDestination.Replace(tt.in); got != tt.want {
+				t.Errorf("webLinkDestination.Replace(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
