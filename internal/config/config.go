@@ -483,7 +483,7 @@ func validEndpoint(field, raw string) error {
 		return nil
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
+	if err != nil || u.Hostname() == "" || !allowedEndpointScheme(u) {
 		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {

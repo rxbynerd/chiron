@@ -241,13 +241,18 @@ func TestNewOTelRejectsInvalidEndpoint(t *testing.T) {
 		{"relative", "collector.internal/otel"},
 		{"userinfo without host", "https://user:hunter2-pw@/otel"},
 		{"unsupported scheme", "ftp://collector.internal/otel"},
+		{"userinfo", "https://user:pw@collector.example/otel"},
+		{"query", "https://collector.example/otel?x=1"},
+		{"empty query", "https://collector.example/otel?"},
+		{"fragment", "https://collector.example/otel#f"},
+		{"empty hostname", "https://:443/otel"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, _, err := NewOTel(context.Background(), tt.endpoint)
 			if err == nil {
 				t.Fatal("NewOTel accepted the endpoint")
 			}
-			if strings.Contains(err.Error(), tt.endpoint) || strings.Contains(err.Error(), "hunter2") {
+			if strings.Contains(err.Error(), tt.endpoint) || strings.Contains(err.Error(), "pw") {
 				t.Errorf("error echoes the endpoint: %v", err)
 			}
 		})

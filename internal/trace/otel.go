@@ -116,8 +116,11 @@ func noRedirectClient() *http.Client {
 // never echoes the URL, which may carry userinfo.
 func tracesURL(base string) (string, error) {
 	u, err := url.Parse(base)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+	if err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return "", errors.New("trace: the OTLP endpoint must be an absolute http(s) URL")
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", errors.New("trace: the OTLP endpoint must not carry userinfo, a query string or a fragment")
 	}
 	return u.JoinPath("v1", "traces").String(), nil
 }
