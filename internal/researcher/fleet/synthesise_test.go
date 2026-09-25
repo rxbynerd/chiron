@@ -307,7 +307,7 @@ func TestSynthesisPromptFencesUntrustedText(t *testing.T) {
 	if strings.Contains(prompt, key) {
 		t.Errorf("the gap's credential reached the prompt:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "Gaps: 1 briefs produced no finding") || !strings.Contains(prompt, "- brief-3 (objective: Objective 3 ") {
+	if !strings.Contains(prompt, "Gaps: these briefs produced no finding") || !strings.Contains(prompt, "- brief-3 (objective: Objective 3 ") {
 		t.Errorf("the prompt does not list the gap with its objective:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "<b>") {

@@ -55,9 +55,9 @@ func synthesisUserMessage(query, findings string, gaps []findingGap) string {
 	var b strings.Builder
 	b.WriteString("Write the report for this research question from the findings below.\n\n")
 	b.WriteString(questionOpen + "\n" + boundBytes(defang(strings.TrimSpace(query)), maxLeadQueryBytes) + "\n" + questionClose + "\n\n")
-	b.WriteString(findings)
+	b.WriteString(strings.TrimRight(findings, "\n") + "\n")
 	if len(gaps) > 0 {
-		fmt.Fprintf(&b, "\nGaps: %d briefs produced no finding, so the report's coverage is partial.\n%s\n", len(gaps), toolResultOpen)
+		b.WriteString("\nGaps: these briefs produced no finding, so the report's coverage is partial.\n" + toolResultOpen + "\n")
 		for _, g := range gaps {
 			fmt.Fprintf(&b, "- %s (objective: %s): %s\n", g.BriefID, promptObjective(g.Objective), g.Reason)
 		}
