@@ -51,6 +51,26 @@ func TestValidateAcceptsWorkerAndFleet(t *testing.T) {
 			cfg.Agent = AgentFleet
 			return cfg
 		}()},
+		{"search tool at the 64-byte bound", func() ResearchConfig {
+			cfg := validWorker()
+			cfg.Fleet.SearchTool = strings.Repeat("a", 64)
+			return cfg
+		}()},
+		{"search query arg at the 64-byte bound", func() ResearchConfig {
+			cfg := validWorker()
+			cfg.Fleet.SearchQueryArg = strings.Repeat("q", 64)
+			return cfg
+		}()},
+		{"search tool combined charset", func() ResearchConfig {
+			cfg := validWorker()
+			cfg.Fleet.SearchTool = "a.b-c_d"
+			return cfg
+		}()},
+		{"search query arg combined charset", func() ResearchConfig {
+			cfg := validWorker()
+			cfg.Fleet.SearchQueryArg = "a.b-c_d"
+			return cfg
+		}()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.cfg.Validate(); err != nil {
@@ -137,6 +157,8 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"search tool empty", func(c *ResearchConfig) { c.Fleet.SearchTool = "" }},
 		{"search tool too long", func(c *ResearchConfig) { c.Fleet.SearchTool = strings.Repeat("a", 65) }},
 		{"search tool bad characters", func(c *ResearchConfig) { c.Fleet.SearchTool = "tool name" }},
+		{"search tool unicode", func(c *ResearchConfig) { c.Fleet.SearchTool = "café" }},
+		{"search tool slash", func(c *ResearchConfig) { c.Fleet.SearchTool = "a/b" }},
 		{"search query arg empty", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = "" }},
 		{"search query arg too long", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = strings.Repeat("q", 65) }},
 		{"search query arg whitespace", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = "query arg" }},
@@ -312,5 +334,19 @@ func TestDefaultFleetSearchIdentifiers(t *testing.T) {
 	f := Default().Fleet
 	if f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
 		t.Errorf("default search identifiers = %q/%q, want %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
+	}
+}
+
+// TestFleetSearchIdentifiersDefaultOnPartialBlock: a fleet block that sets
+// other fields and omits search_tool/search_query_arg must still resolve to
+// their documented defaults, not a zero value that would fail validation.
+func TestFleetSearchIdentifiersDefaultOnPartialBlock(t *testing.T) {
+	const in = "agent: worker\nfleet:\n  search_endpoint: https://search.example\n"
+	cfg, err := Decode(strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if f := cfg.Fleet; f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
+		t.Errorf("partial fleet block search identifiers = %q/%q, want the defaults %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
 	}
 }
