@@ -60,6 +60,10 @@ type leadDeps struct {
 	// Routes validates each brief's target and dispatches it. nil selects
 	// liveRoutes.
 	Routes router
+	// ReportTemplate, when non-nil, is rendered with the query as the
+	// synthesis's output-format block; nil selects the built-in format.
+	// Pass WorkerDeps.ReportTemplate: fleet workers never receive it.
+	ReportTemplate *ReportTemplate
 }
 
 // lead is the fleet's orchestrator for one run.

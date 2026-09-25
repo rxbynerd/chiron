@@ -1,0 +1,260 @@
+package fleet
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/secret"
+	"github.com/rxbynerd/chiron/internal/trace"
+	"github.com/rxbynerd/chiron/internal/types"
+)
+
+// synthesiseMaxTokens caps the synthesis completion. A report of several
+// sections fits well within it, and it stays under the output ceiling of
+// models that reject a larger cap.
+const synthesiseMaxTokens = 16384
+
+// maxSynthesisFindingBytes bounds each finding's text in the synthesis and
+// citation prompts, measured after defang, so five findings stay near 60 KiB.
+const maxSynthesisFindingBytes = 12 << 10
+
+// maxFindingSourcesBytes bounds each finding's rendered source list in a lead
+// prompt.
+const maxFindingSourcesBytes = 4 << 10
+
+// maxGapDetailBytes bounds one brief's reason for yielding no finding, or a
+// partial one, in a lead prompt and in the run's detail.
+const maxGapDetailBytes = 512
+
+// maxStitchedHeadingRunes bounds a heading in the stitched fallback body.
+const maxStitchedHeadingRunes = 200
+
+// findingReadTimeout bounds reading one finding back. The read is detached
+// from the run's cancellation, because a finding is paid for whether or not
+// the run is still wanted, and the fallback body needs it.
+const findingReadTimeout = 10 * time.Second
+
+// collectedFinding is a finding the lead read back for synthesis: it has
+// text, did not fail, and its stored identity matches the brief that
+// produced it.
+type collectedFinding struct {
+	BriefID   string
+	Objective string
+	Finding   Finding
+}
+
+// findingGap is a planned brief that yielded no finding with text.
+type findingGap struct {
+	BriefID   string
+	Objective string
+	// Reason is one line, scrubbed, defanged and bounded to
+	// maxGapDetailBytes.
+	Reason string
+}
+
+// findingSet is a pool's results read back by reference, in brief order.
+type findingSet struct {
+	Findings []collectedFinding
+	Gaps     []findingGap
+}
+
+// synthesisResult is the synthesise step's outcome. Status is Completed;
+// Incomplete for a body cut off at the completion cap; or Failed when there
+// is no synthesised body, in which case Body is the stitched fallback, or
+// empty when no finding was collected. Truncated counts the finding texts
+// cut to maxSynthesisFindingBytes.
+type synthesisResult struct {
+	Set       findingSet
+	Body      string
+	Status    types.Status
+	Detail    string
+	Usage     types.Usage
+	Truncated int
+}
+
+// synthesise reads every brief's finding back by reference and makes one
+// plain-text model call, under a synthesise span, that writes the report
+// body from them. The call is never retried. When it fails, or its reply is
+// empty or filtered, the body is the collected findings stitched together,
+// so no paid finding is lost; with no finding collected, no call is made.
+func (l *lead) synthesise(ctx context.Context, query string, plan leadPlan, pooled poolResult) synthesisResult {
+	ctx, span := l.deps.Tracer.StartSpan(ctx, trace.SpanSynthesise)
+	res := l.synthesiseInSpan(ctx, query, plan, pooled)
+
+	span.SetAttr("findings_included", len(res.Set.Findings))
+	span.SetAttr("findings_truncated", res.Truncated)
+	span.SetAttr("findings_gapped", len(res.Set.Gaps))
+	span.SetAttr("input_tokens", res.Usage.InputTokens)
+	span.SetAttr("output_tokens", res.Usage.OutputTokens)
+	span.SetAttr("status", string(res.Status))
+	if res.Detail != "" {
+		span.SetAttr("detail", res.Detail)
+	}
+	var spanErr error
+	if res.Status == types.StatusFailed {
+		spanErr = errors.New(res.Detail)
+	}
+	span.End(spanErr)
+	return res
+}
+
+func (l *lead) synthesiseInSpan(ctx context.Context, query string, plan leadPlan, pooled poolResult) synthesisResult {
+	res := synthesisResult{Set: l.collectFindings(ctx, plan, pooled)}
+	if len(res.Set.Findings) == 0 {
+		res.Status = types.StatusFailed
+		res.Detail = "no worker produced a finding with text"
+		return res
+	}
+	fallback := func(reason string) synthesisResult {
+		res.Body = stitchFindings(res.Set.Findings)
+		res.Status = types.StatusFailed
+		res.Detail = boundDetail(secret.Scrub(reason)) + "; the report is the worker findings, stitched unedited"
+		return res
+	}
+
+	format := defaultReportFormat
+	if l.deps.ReportTemplate != nil {
+		rendered, err := l.deps.ReportTemplate.Render(query)
+		if err != nil {
+			return fallback(err.Error())
+		}
+		format = rendered
+	}
+	findings, truncated := renderFindings(res.Set.Findings)
+	res.Truncated = truncated
+
+	// One attempt only: the model client never retries a POST and the lead
+	// adds no retry either.
+	resp, err := l.deps.Model.Generate(ctx, model.Request{
+		Messages: []model.Message{
+			{Role: model.RoleSystem, Content: synthesisSystemPrompt(format)},
+			{Role: model.RoleUser, Content: synthesisUserMessage(query, findings, res.Set.Gaps)},
+		},
+		MaxTokens: synthesiseMaxTokens,
+	})
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fallback("the run ended during the synthesis call: " + ctxErr.Error())
+		}
+		return fallback("the synthesis call failed: " + err.Error())
+	}
+	res.Usage = types.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+
+	body := strings.TrimSpace(sanitiseAnswer(resp.Content))
+	switch {
+	case resp.FinishReason == "content_filter":
+		return fallback("the synthesis reply was refused by the model's content filter")
+	case body == "":
+		return fallback("the synthesis reply was empty")
+	}
+	res.Body = body
+	res.Status = types.StatusCompleted
+	if resp.FinishReason == "length" {
+		res.Status = types.StatusIncomplete
+		res.Detail = fmt.Sprintf("the synthesis was cut off at the %d-token completion cap", synthesiseMaxTokens)
+	}
+	return res
+}
+
+// collectFindings reads every brief's finding back by reference, never from
+// an in-process copy. A brief whose finding reads back from the run's
+// session, names the worker and brief the pool reported for it, did not fail
+// and has text is collected; every other brief is a gap with its reason.
+func (l *lead) collectFindings(ctx context.Context, plan leadPlan, pooled poolResult) findingSet {
+	objectives := make(map[string]string, len(plan.Briefs))
+	for _, pb := range plan.Briefs {
+		objectives[pb.ID] = pb.Brief.Objective
+	}
+	var set findingSet
+	for _, r := range pooled.Briefs {
+		f, reason := l.readBack(ctx, r)
+		if reason != "" {
+			set.Gaps = append(set.Gaps, findingGap{BriefID: r.BriefID, Objective: objectives[r.BriefID], Reason: gapReason(reason)})
+			continue
+		}
+		set.Findings = append(set.Findings, collectedFinding{BriefID: r.BriefID, Objective: objectives[r.BriefID], Finding: f})
+	}
+	return set
+}
+
+// readBack returns r's stored finding, or the reason it yields none.
+func (l *lead) readBack(ctx context.Context, r briefResult) (Finding, string) {
+	switch {
+	case r.Disposition != dispositionRan:
+		return Finding{}, orDefault(r.Detail, "no worker ran the brief")
+	case r.Ref == (memory.Reference{}):
+		return Finding{}, orDefault(r.Detail, "the finding was not stored")
+	case r.Ref.Namespace != l.deps.Namespace:
+		return Finding{}, "the finding's reference is outside the run's session"
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), findingReadTimeout)
+	defer cancel()
+	sf, err := readFinding(ctx, l.deps.Store, r.Ref)
+	if err != nil {
+		return Finding{}, "the finding could not be read back: " + err.Error()
+	}
+	if sf.WorkerID != r.WorkerID || sf.BriefID != r.BriefID {
+		return Finding{}, "the stored finding names another worker or brief"
+	}
+	f := sf.Finding
+	switch {
+	case f.Status == types.StatusFailed:
+		return Finding{}, withDetail("the worker failed", f.Detail)
+	case strings.TrimSpace(f.Text) == "":
+		return Finding{}, withDetail(fmt.Sprintf("the worker ended %s with no text", echoStatus(f.Status)), f.Detail)
+	}
+	return f, ""
+}
+
+// gapReason makes a reason safe for a lead prompt and the run's detail: one
+// line, scrubbed, defanged, then bounded, in that order, so the bound cannot
+// split a credential into fragments too short for the scrubber.
+func gapReason(s string) string {
+	return boundBytes(defang(secret.Scrub(oneLine(s))), maxGapDetailBytes)
+}
+
+// echoStatus renders a stored status, which a store could fill with any
+// terminal-looking text, for a prompt or detail.
+func echoStatus(s types.Status) string {
+	return boundRunes(oneLine(secret.Scrub(string(s))), maxFindingEchoRunes)
+}
+
+// withDetail appends detail to reason when there is one.
+func withDetail(reason, detail string) string {
+	if strings.TrimSpace(detail) == "" {
+		return reason
+	}
+	return reason + ": " + detail
+}
+
+// orDefault returns s, or def when s is blank.
+func orDefault(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
+}
+
+// stitchedNote opens the stitched fallback body.
+const stitchedNote = "_Synthesis did not complete, so each research worker's finding follows unedited._"
+
+// stitchFindings is the deterministic body used when synthesis fails: a
+// note, then each collected finding in brief order under a heading naming
+// its objective, the whole sanitised as a synthesised body is.
+func stitchFindings(findings []collectedFinding) string {
+	var b strings.Builder
+	b.WriteString(stitchedNote)
+	for _, cf := range findings {
+		heading := boundRunes(oneLine(cf.Objective), maxStitchedHeadingRunes)
+		if heading == "" {
+			heading = cf.BriefID
+		}
+		fmt.Fprintf(&b, "\n\n## %s\n\n%s", heading, strings.TrimSpace(cf.Finding.Text))
+	}
+	return strings.TrimSpace(sanitiseAnswer(b.String()))
+}
