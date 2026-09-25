@@ -511,10 +511,10 @@ func (p *pageParser) pop() {
 	}
 }
 
-// credit scores a closed paragraph as readability does, 1 + its commas + one
-// point per 100 bytes (at most 3), and adds that to its nearest candidate
-// ancestor and half of it to the next. The walk stops at a dropped element,
-// whose text its ancestors never render.
+// credit scores a closed paragraph as readability does, 1 + its commas (at
+// most 10) + one point per 100 bytes (at most 3), and adds that to its
+// nearest candidate ancestor and half of it to the next. The walk stops at a
+// dropped element, whose text its ancestors never render.
 func (p *pageParser) credit(idx int32) {
 	e := &p.elems[idx]
 	if e.flags&(flagDrop|flagInFurniture) != 0 || e.text < minParagraphBytes {
@@ -524,7 +524,7 @@ func (p *pageParser) credit(idx int32) {
 	if e.info.traits&traitParagraph == 0 && !leaf {
 		return
 	}
-	score := 1 + float64(e.commas) + math.Min(float64(e.text/100), 3)
+	score := 1 + math.Min(float64(e.commas), 10) + math.Min(float64(e.text/100), 3)
 	share := 1.0
 	a := e.parent
 	for steps := 0; a > 0 && steps < creditWalkLimit; steps++ {
