@@ -19,6 +19,11 @@ fleet:
   model_key_ref: secret://MODEL_KEY
   search_endpoint: https://search.example.com/mcp
   search_key_ref: secret://SEARCH_KEY
+  # search_tool and search_query_arg default to the reference backend's
+  # search/query; set them only for a vendor search server that names its
+  # tool or query argument differently.
+  # search_tool: web_search
+  # search_query_arg: q
   max_turns: 8
   max_tokens: 400000
   worker_timeout: 5m

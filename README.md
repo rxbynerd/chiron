@@ -159,6 +159,8 @@ chiron research --agent worker \
 | `--fleet-model-key-ref` | — | `secret://` reference to the model key. Required. |
 | `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required. |
 | `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
+| `--fleet-search-tool` | `search` | MCP tool the search client invokes; change it for a search server that names its tool differently. |
+| `--fleet-search-query-arg` | `query` | Argument key the search query is passed under; change it to match the configured tool. |
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
