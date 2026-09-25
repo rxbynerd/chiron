@@ -101,9 +101,9 @@ func newCountingStore(t *testing.T, opts memory.InMemoryOptions) (*countingStore
 // dispatches.
 func countingRoutes(dispatched *int) router {
 	return router{
-		TargetExternalWeb: func(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
+		TargetExternalWeb: func(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) Finding {
 			*dispatched++
-			return RunWorker(ctx, deps, brief)
+			return dispatchWorker(ctx, deps, brief, progressGate)
 		},
 	}
 }
@@ -131,7 +131,7 @@ func planThenDispatch(ctx context.Context, l *lead, deps WorkerDeps, query strin
 		if err != nil {
 			return plan, usage, findings, err
 		}
-		findings = append(findings, dispatch(ctx, deps, pb.Brief))
+		findings = append(findings, dispatch(ctx, deps, pb.Brief, nil))
 	}
 	return plan, usage, findings, nil
 }

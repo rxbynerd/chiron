@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -25,8 +26,8 @@ func TestLiveRoutesHasOnlyExternalWeb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("route(%s): %v", TargetExternalWeb, err)
 	}
-	if reflect.ValueOf(dispatch).Pointer() != reflect.ValueOf(RunWorker).Pointer() {
-		t.Error("the external_web row is not RunWorker")
+	if reflect.ValueOf(dispatch).Pointer() != reflect.ValueOf(dispatchWorker).Pointer() {
+		t.Error("the external_web row is not dispatchWorker")
 	}
 }
 
@@ -47,7 +48,7 @@ func TestRouteExternalWebRunsWorker(t *testing.T) {
 		Search: newSearchClient(t, searchSrv),
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
-	}, Brief{Objective: "routed objective"})
+	}, Brief{Objective: "routed objective"}, nil)
 
 	if finding.Status != types.StatusCompleted || finding.Text != "routed answer" {
 		t.Fatalf("finding = %+v, want a completed routed answer", finding)
@@ -58,6 +59,48 @@ func TestRouteExternalWebRunsWorker(t *testing.T) {
 	reqs := modelSrv.Requests()
 	if len(reqs) == 0 || !strings.Contains(reqs[0].Messages[0].Content, "routed objective") {
 		t.Error("the worker's system prompt lacks the routed brief's objective")
+	}
+}
+
+// TestDispatchWorkerHonoursProgressGate: the external_web row hands its gate
+// to the worker loop, so a released gate or no gate delivers the report, and
+// a held gate drops it at the progress deadline without changing the
+// Finding.
+func TestDispatchWorkerHonoursProgressGate(t *testing.T) {
+	released := make(chan struct{})
+	close(released)
+	for _, tt := range []struct {
+		name  string
+		gate  <-chan struct{}
+		calls int
+	}{
+		{"released gate", released, 1},
+		{"held gate", make(chan struct{}), 0},
+		{"no gate", nil, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			modelSrv := modeltest.NewFakeServer(finalReply("gated answer"))
+			defer modelSrv.Close()
+
+			var log progressLog
+			finding := dispatchWorker(context.Background(), WorkerDeps{
+				Model:                   newModelClient(t, modelSrv),
+				Search:                  newSearchClient(t, searchSrv),
+				Fetch:                   newFetchClient(t),
+				Caps:                    caps(),
+				Progress:                log.hook,
+				progressTimeoutOverride: 20 * time.Millisecond,
+			}, Brief{Objective: "gated objective"}, tt.gate)
+
+			if finding.Status != types.StatusCompleted || finding.Text != "gated answer" {
+				t.Fatalf("finding = %+v, want the completed answer", finding)
+			}
+			if got := len(log.snapshot()); got != tt.calls {
+				t.Errorf("progress deliveries = %d, want %d", got, tt.calls)
+			}
+		})
 	}
 }
 
@@ -133,7 +176,7 @@ func TestRouterAcceptsAnAddedRow(t *testing.T) {
 	const internal Target = "internal_source"
 	var called Brief
 	routes := liveRoutes()
-	routes[internal] = func(_ context.Context, _ WorkerDeps, b Brief) Finding {
+	routes[internal] = func(_ context.Context, _ WorkerDeps, b Brief, _ <-chan struct{}) Finding {
 		called = b
 		return Finding{Status: types.StatusCompleted}
 	}
@@ -142,7 +185,7 @@ func TestRouterAcceptsAnAddedRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("route(%s): %v", internal, err)
 	}
-	dispatch(context.Background(), WorkerDeps{}, Brief{Objective: "internal"})
+	dispatch(context.Background(), WorkerDeps{}, Brief{Objective: "internal"}, nil)
 	if called.Objective != "internal" {
 		t.Errorf("the added row did not receive the brief: %+v", called)
 	}
