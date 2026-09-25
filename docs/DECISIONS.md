@@ -1779,7 +1779,10 @@ direct callers.
 **Findings by reference.** As each worker returns, its own goroutine writes
 the finding to the session before it frees its slot, rather than the pool
 batching the writes at the end. A crashed run is therefore recoverable worker
-by worker (§4). The artifact is JSON named `fleet-finding-<brief id>.json`
+by worker (§4), provided the session lives in a durable store; the
+`InMemory` store this wave binds does not survive the process, so today that
+recoverability is only real once a durable `ContextStore` backs it. The
+artifact is JSON named `fleet-finding-<brief id>.json`
 with media type `application/json`. Like the plan, it carries a `kind`
 (`"fleet_finding"`) and a `version` (`1`), the worker id, the brief id and
 the whole `Finding` (text, citations, usage, status, detail and turns). The
