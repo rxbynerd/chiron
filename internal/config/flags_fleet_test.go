@@ -160,7 +160,7 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 func TestApplyFlagsFleetUnsetLeavesBase(t *testing.T) {
 	base := Default()
 	base.Agent = AgentFleet
-	base.Fleet.ModelEndpoint = "https://from.the.pipe"
+	base.Fleet.ModelName = "from-the-pipe"
 	base.Fleet.MaxTurns = 3
 
 	fs := newFlagSet(t)
@@ -170,7 +170,7 @@ func TestApplyFlagsFleetUnsetLeavesBase(t *testing.T) {
 	if err := ApplyFlags(&base, fs); err != nil {
 		t.Fatalf("ApplyFlags: %v", err)
 	}
-	if base.Fleet.ModelEndpoint != "https://from.the.pipe" || base.Fleet.MaxTurns != 3 {
+	if base.Fleet.ModelName != "from-the-pipe" || base.Fleet.MaxTurns != 3 {
 		t.Errorf("unset fleet flags clobbered the base: %+v", base.Fleet)
 	}
 }

@@ -101,7 +101,7 @@ const DefaultAPIKeyRef = "secret://GEMINI_API_KEY"
 const MaxTimeout = 60 * time.Minute
 
 // ResearchConfig declares one research run. Zero values mean "unset";
-// Default supplies the documented defaults, and Decode overlays a base
+// Default supplies the documented defaults, and DecodeBase overlays a base
 // config on top of them, so an absent key never clobbers a default.
 type ResearchConfig struct {
 	// Query is the research question.
@@ -165,7 +165,9 @@ type ResearchConfig struct {
 //
 // Endpoint and key fields are optional at the config layer and required by
 // the composition root when the agent runs; the caps carry documented
-// defaults so a bare `--agent worker` run is already bounded.
+// defaults so a bare `--agent worker` run is already bounded. The endpoints
+// come only from their flags or environment variables (FleetEndpoints); a
+// base config naming one is refused by DecodeBase.
 type FleetConfig struct {
 	// ModelEndpoint is the standard-model base URL. Absolute https://,
 	// with http:// permitted for loopback test servers only. Distinct
@@ -275,12 +277,13 @@ func defaultFleet() FleetConfig {
 	}
 }
 
-// Decode reads a base ResearchConfig (JSON or YAML — JSON is a YAML
+// decode reads a base ResearchConfig (JSON or YAML — JSON is a YAML
 // subset, so one strict decoder covers both) overlaid on the defaults.
 // Empty input yields the defaults, so an empty stdin pipe is harmless.
 // Unknown keys are an error: configs are small and a silent typo would
-// silently change a paid run.
-func Decode(r io.Reader) (ResearchConfig, error) {
+// silently change a paid run. A base config is read with DecodeBase, which
+// also refuses fleet endpoints.
+func decode(r io.Reader) (ResearchConfig, error) {
 	cfg := Default()
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)

@@ -87,6 +87,19 @@ chiron research-config --agent deep-research-max \
   | chiron research --query "Competitive landscape of 10BASE-T1L PHY vendors" --out report.md
 ```
 
+The worker's endpoints never travel through a pipeline: a base config
+that names one is refused, and so `research-config` refuses the endpoint
+flags. Compose everything else, then give the endpoints to the final
+`chiron research` stage, by flag or by environment variable:
+
+```sh
+chiron research-config --agent worker \
+    --fleet-model-name gpt-5.5 --fleet-model-key-ref secret://MODEL_KEY \
+  | CHIRON_FLEET_MODEL_ENDPOINT=https://api.openai.com/v1 \
+    CHIRON_FLEET_SEARCH_ENDPOINT=https://search.example.com/mcp \
+    chiron research --query "Competitive landscape of 10BASE-T1L PHY vendors"
+```
+
 ### Resume
 
 Deep Research tasks run for minutes (most under 20, hard max 60) and are
@@ -154,10 +167,10 @@ chiron research --agent worker \
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--fleet-model-endpoint` | — | Standard-model base URL; absolute `https://`, `http://` for loopback only. Required. |
+| `--fleet-model-endpoint` | — | Standard-model base URL; absolute `https://`, `http://` for loopback only. Required, from this flag or `CHIRON_FLEET_MODEL_ENDPOINT`, never a base config. |
 | `--fleet-model-name` | — | Model identifier sent on every call. Required. |
 | `--fleet-model-key-ref` | — | `secret://` reference to the model key. Required. |
-| `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required. |
+| `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required, from this flag or `CHIRON_FLEET_SEARCH_ENDPOINT`, never a base config. |
 | `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
 | `--fleet-search-tool` | `search` | MCP tool the search client invokes; change it for a search server that names its tool differently. |
 | `--fleet-search-query-arg` | `query` | Argument key the search query is passed under; change it to match the configured tool. |
@@ -168,7 +181,7 @@ chiron research --agent worker \
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
 | `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
-| `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider. |
+| `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider, from this flag or `CHIRON_FLEET_KNOWLEDGE_ENDPOINT`, never a base config. |
 | `--fleet-knowledge-key-ref` | — | `secret://` reference to the knowledge store key; required for `alexandria`, optional for `billet`. |
 | `--fleet-knowledge-space` | — | Alexandria space slug to scope recalls to (`alexandria` only). |
 | `--fleet-knowledge-limit` | `5` | Hits per recall, 1 to 20. |
@@ -185,6 +198,17 @@ refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
 `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
 `--template`) are rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+
+The endpoints come only from their flags or from
+`CHIRON_FLEET_MODEL_ENDPOINT`, `CHIRON_FLEET_SEARCH_ENDPOINT` and
+`CHIRON_FLEET_KNOWLEDGE_ENDPOINT`, and a set flag wins over its
+variable. A `--config` file or piped config that names an endpoint is
+refused before any key is resolved, because a shared config must not
+choose both a key reference and the host that key is sent to. Before the
+first model call the run names its destinations on stderr, by scheme and
+host only, in one `delta` event:
+`{"endpoints":{"model":"https://api.openai.com","search":"https://search.example.com"}}`,
+with a `knowledge` entry when a knowledge store is configured.
 
 #### Organisational knowledge (Billet, Alexandria)
 
@@ -242,8 +266,9 @@ stdout belongs to the report; diagnostics and progress go to stderr:
   relative links.
 - **stderr** carries NDJSON run events (`run_started`,
   `interaction_created`, `status_changed`, `delta`, `run_completed`,
-  `cost_summary`) — streamed thought summaries arrive as `delta`
-  events. Separate them with `2>events.ndjson`.
+  `cost_summary`) — streamed thought summaries, and a worker run's
+  endpoint hosts, arrive as `delta` events. Separate them with
+  `2>events.ndjson`.
 
 ### Environment variables
 
@@ -253,6 +278,7 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
 | `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
+| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` | The worker's model, search and knowledge store endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. The knowledge variable is read only with a knowledge provider. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
 
 ## Documents
 

@@ -22,7 +22,7 @@ func requireKnowledge(fc config.FleetConfig) error {
 		return nil
 	}
 	if fc.KnowledgeEndpoint == "" {
-		return errors.New("research --agent worker: fleet.knowledge_endpoint is required when fleet.knowledge_provider is set")
+		return fmt.Errorf("research --agent worker: fleet.knowledge_endpoint is required when fleet.knowledge_provider is set; pass --fleet-knowledge-endpoint or set %s", config.EnvFleetKnowledgeEndpoint)
 	}
 	if fc.KnowledgeProvider == config.KnowledgeAlexandria && fc.KnowledgeKeyRef == "" {
 		return errors.New("research --agent worker: fleet.knowledge_key_ref is required for the alexandria provider")
@@ -35,7 +35,7 @@ func requireKnowledge(fc config.FleetConfig) error {
 // adapter holds none). It returns nil halves when no provider is set. The key
 // reference is resolved only when set, since Billet may be keyless; every
 // call to the store is bounded by callTimeout.
-func buildKnowledge(ctx context.Context, fc config.FleetConfig, callTimeout time.Duration) (memory.Recaller, memory.Rememberer, io.Closer, error) {
+func buildKnowledge(ctx context.Context, fc config.FleetConfig, resolver secret.Resolver, callTimeout time.Duration) (memory.Recaller, memory.Rememberer, io.Closer, error) {
 	if fc.KnowledgeProvider == "" {
 		return nil, nil, nil, nil
 	}
@@ -44,7 +44,7 @@ func buildKnowledge(ctx context.Context, fc config.FleetConfig, callTimeout time
 	}
 	var apiKey string
 	if fc.KnowledgeKeyRef != "" {
-		key, err := secret.Default().Resolve(ctx, fc.KnowledgeKeyRef)
+		key, err := resolver.Resolve(ctx, fc.KnowledgeKeyRef)
 		if err != nil {
 			return nil, nil, nil, err
 		}

@@ -13,9 +13,9 @@ import (
 )
 
 func TestDecodeEmptyInputYieldsDefaults(t *testing.T) {
-	cfg, err := Decode(strings.NewReader(""))
+	cfg, err := decode(strings.NewReader(""))
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if !reflect.DeepEqual(cfg, Default()) {
 		t.Errorf("got %+v, want defaults %+v", cfg, Default())
@@ -24,9 +24,9 @@ func TestDecodeEmptyInputYieldsDefaults(t *testing.T) {
 
 func TestDecodeOverlaysDefaults(t *testing.T) {
 	// Absent keys must keep their defaults; present keys must override.
-	cfg, err := Decode(strings.NewReader("agent: deep-research-max\nstream: false\n"))
+	cfg, err := decode(strings.NewReader("agent: deep-research-max\nstream: false\n"))
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if cfg.Agent != AgentDeepResearchMax {
 		t.Errorf("agent: got %q", cfg.Agent)
@@ -40,7 +40,7 @@ func TestDecodeOverlaysDefaults(t *testing.T) {
 }
 
 func TestDecodeRejectsUnknownKeys(t *testing.T) {
-	if _, err := Decode(strings.NewReader("agnet: deep-research\n")); err == nil {
+	if _, err := decode(strings.NewReader("agnet: deep-research\n")); err == nil {
 		t.Error("typo key was accepted silently")
 	}
 }
@@ -57,9 +57,9 @@ func TestJSONRoundTripThroughDecode(t *testing.T) {
 	if err := in.EncodeJSON(&buf); err != nil {
 		t.Fatalf("EncodeJSON: %v", err)
 	}
-	out, err := Decode(&buf)
+	out, err := decode(&buf)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if out.Query != in.Query || out.Agent != in.Agent || out.Timeout != in.Timeout || out.MCP["corp"] != "https://mcp.internal" {
 		t.Errorf("round trip lost data: %+v", out)
@@ -167,7 +167,7 @@ func newFlagSet(t *testing.T) *pflag.FlagSet {
 
 // TestJSONNativeRoundTrip pins C2-TEST-5: pipeline tooling may decode
 // research-config output with encoding/json rather than a YAML decoder,
-// which routes durations through UnmarshalJSON — a path Decode (yaml.v3
+// which routes durations through UnmarshalJSON — a path decode (yaml.v3
 // underneath) never exercises. The string duration form EncodeJSON
 // emits must survive json.Unmarshal.
 func TestJSONNativeRoundTrip(t *testing.T) {

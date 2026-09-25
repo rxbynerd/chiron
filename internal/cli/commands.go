@@ -9,9 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rxbynerd/chiron/internal/config"
+	"github.com/rxbynerd/chiron/internal/secret"
 )
 
-func newResearchCommand() *cobra.Command {
+func newResearchCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research [query]",
 		Short: "Start a research task, await it, and emit the report",
@@ -40,6 +41,14 @@ with the fleet-price flags, --fleet-worker-timeout), and the
 deep-research levers are rejected rather than ignored. fleet, the
 multi-worker orchestrator, is not implemented yet.
 
+The worker's endpoints come only from --fleet-model-endpoint,
+--fleet-search-endpoint and --fleet-knowledge-endpoint, or from
+CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
+CHIRON_FLEET_KNOWLEDGE_ENDPOINT when the flag is unset. A base config
+naming one is refused, because a shared config must not choose where
+credentials are sent. The endpoint hosts are emitted on stderr as one
+delta event before the first model call.
+
 Exit codes:
 
   0  the research completed and the report was emitted
@@ -56,7 +65,7 @@ Exit codes:
 			if err != nil {
 				return err
 			}
-			return runResearch(cmd, cfg)
+			return runResearch(cmd, cfg, resolver)
 		},
 	}
 	addResearchFlags(cmd)
@@ -72,9 +81,19 @@ result as JSON. Composable in a pipeline:
 
   chiron research-config --agent deep-research-max \
     | chiron research-config --visualise \
-    | chiron research --query "..." --out report.md`,
+    | chiron research --query "..." --out report.md
+
+The fleet endpoints never travel through a pipeline: the next stage
+refuses a base config that names one, so --fleet-model-endpoint,
+--fleet-search-endpoint and --fleet-knowledge-endpoint are refused here.
+Give them to the final chiron research stage as flags, or set
+CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
+CHIRON_FLEET_KNOWLEDGE_ENDPOINT for it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := refuseEndpointFlags(cmd.Flags()); err != nil {
+				return err
+			}
 			cfg, err := resolveConfig(cmd, nil)
 			if err != nil {
 				return err
@@ -86,7 +105,7 @@ result as JSON. Composable in a pipeline:
 	return cmd
 }
 
-func newGetCommand() *cobra.Command {
+func newGetCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <interaction-id>",
 		Short: "Re-fetch and format an interaction (resume after a crash)",
@@ -102,14 +121,14 @@ in-process worker (wkr_...) hold no server-side state and are refused.`,
 			if err != nil {
 				return err
 			}
-			return runGet(cmd, cfg, args[0])
+			return runGet(cmd, cfg, resolver, args[0])
 		},
 	}
 	addResearchFlags(cmd)
 	return cmd
 }
 
-func newFollowUpCommand() *cobra.Command {
+func newFollowUpCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "follow-up <interaction-id>",
 		Short: "Ask a follow-up question against a completed interaction",
@@ -124,7 +143,7 @@ minted by the in-process worker (wkr_...) are refused.`,
 			if err != nil {
 				return err
 			}
-			return runFollowUp(cmd, cfg, args[0])
+			return runFollowUp(cmd, cfg, resolver, args[0])
 		},
 	}
 	addResearchFlags(cmd)
@@ -168,7 +187,8 @@ func resolveConfig(cmd *cobra.Command, args []string) (config.ResearchConfig, er
 
 // loadBase reads the base config from --config (a path, or "-" for
 // stdin), or from stdin when it is piped — the pipeline-composition path.
-// With neither, the defaults are the base.
+// With neither, the defaults are the base. A base naming a fleet endpoint is
+// refused here, before any flag is applied or secret resolved.
 func loadBase(cmd *cobra.Command) (config.ResearchConfig, error) {
 	path, err := cmd.Flags().GetString("config")
 	if err != nil {
@@ -177,16 +197,16 @@ func loadBase(cmd *cobra.Command) (config.ResearchConfig, error) {
 
 	switch {
 	case path == "-":
-		return config.Decode(cmd.InOrStdin())
+		return config.DecodeBase(cmd.InOrStdin())
 	case path != "":
 		f, err := os.Open(path)
 		if err != nil {
 			return config.ResearchConfig{}, fmt.Errorf("open base config: %w", err)
 		}
 		defer f.Close()
-		return config.Decode(f)
+		return config.DecodeBase(f)
 	case stdinIsPiped(cmd.InOrStdin()):
-		return config.Decode(cmd.InOrStdin())
+		return config.DecodeBase(cmd.InOrStdin())
 	default:
 		return config.Default(), nil
 	}

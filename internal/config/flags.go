@@ -37,10 +37,10 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	// In-process research knobs (--agent worker/fleet), prefixed fleet- to
 	// stay clear of the deep-research levers they sit beside; defaults come
 	// from Default().Fleet.
-	fs.String("fleet-model-endpoint", "", "standard-model base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-model-endpoint", "", "standard-model base URL (absolute https://, http:// loopback only; overrides "+EnvFleetModelEndpoint+"; refused in a base config)")
 	fs.String("fleet-model-name", "", "standard frontier model name (required for worker/fleet)")
 	fs.String("fleet-model-key-ref", "", "secret:// reference to the standard-model key (never a literal)")
-	fs.String("fleet-search-endpoint", "", "web-search MCP base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-search-endpoint", "", "web-search MCP base URL (absolute https://, http:// loopback only; overrides "+EnvFleetSearchEndpoint+"; refused in a base config)")
 	fs.String("fleet-search-key-ref", "", "secret:// reference to the search-MCP key (never a literal)")
 	fs.String("fleet-search-tool", d.Fleet.SearchTool, "MCP tool the search client invokes")
 	fs.String("fleet-search-query-arg", d.Fleet.SearchQueryArg, "argument key the search query is passed under")
@@ -55,7 +55,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Int("fleet-concurrency", d.Fleet.Concurrency, "maximum workers running at once (<= fleet-max-workers)")
 	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q (%q is reserved and not yet implemented)", MemoryNoop, MemoryInMemory))
 	fs.String("fleet-knowledge-provider", "", fmt.Sprintf("knowledge store the worker recalls from: %q or %q (unset disables recall)", KnowledgeBillet, KnowledgeAlexandria))
-	fs.String("fleet-knowledge-endpoint", "", "knowledge store base URL (absolute https://, http:// loopback only)")
+	fs.String("fleet-knowledge-endpoint", "", "knowledge store base URL (absolute https://, http:// loopback only; overrides "+EnvFleetKnowledgeEndpoint+"; refused in a base config)")
 	fs.String("fleet-knowledge-key-ref", "", "secret:// reference to the knowledge store key (never a literal; required for alexandria)")
 	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
 	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
