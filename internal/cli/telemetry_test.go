@@ -5,14 +5,17 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -370,4 +373,105 @@ func TestNewTracerPrecedence(t *testing.T) {
 			t.Fatal("no span reached the environment's collector")
 		}
 	})
+}
+
+// reportOTelError passes err to the SDK error handler while a run is bound
+// and returns what the run's stderr received.
+func reportOTelError(err error) string {
+	var buf bytes.Buffer
+	restore := routeOTelErrors(&buf)
+	otelErrors.Handle(err)
+	restore()
+	return buf.String()
+}
+
+// TestOTelErrorReportIsBounded: a report is scrubbed within a bounded
+// prefix of the SDK's text, cut to 1 KiB of valid UTF-8, and marked
+// truncated whenever either cut dropped text.
+func TestOTelErrorReportIsBounded(t *testing.T) {
+	const marker = " [truncated]\"\n"
+
+	t.Run("cut at 1 KiB", func(t *testing.T) {
+		out := reportOTelError(errors.New(strings.Repeat("x", 2000)))
+		if !strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes)+marker) {
+			t.Errorf("report does not end with 1 KiB of the error and the marker:\n%s", out)
+		}
+		if strings.Contains(out, strings.Repeat("x", maxOTelErrorBytes+1)) {
+			t.Error("report carries more than 1 KiB of the error")
+		}
+	})
+
+	t.Run("credential straddling the cut", func(t *testing.T) {
+		basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
+		head := "failed to send: 401 Unauthorized (body: Authorization: Basic " + basic + " "
+		body := head + strings.Repeat(".", 1000-len(head)) + testLangfuseSecret + " " + strings.Repeat("y", 4<<20)
+		if strings.Index(body, testLangfuseSecret) != 1000 {
+			t.Fatal("the secret key must start at byte 1000 to straddle the cut")
+		}
+		out := reportOTelError(errors.New(body))
+		if strings.Contains(out, basic) || strings.Contains(out, testLangfuseSecret[:len("sk-lf-")+8]) {
+			t.Errorf("a credential survived the report:\n%.2000s", out)
+		}
+		if !strings.HasSuffix(out, marker) {
+			t.Errorf("report lacks the truncation marker:\n%.2000s", out)
+		}
+	})
+
+	t.Run("rune split by the cut", func(t *testing.T) {
+		out := reportOTelError(errors.New(strings.Repeat("x", maxOTelErrorBytes-1) + "é" + strings.Repeat("z", 100)))
+		if !utf8.ValidString(out) {
+			t.Errorf("report is not valid UTF-8: %q", out)
+		}
+		if !strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes-1)+marker) {
+			t.Errorf("the split rune was not dropped:\n%q", out)
+		}
+	})
+
+	t.Run("scan cut alone marks the report", func(t *testing.T) {
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		out := reportOTelError(errors.New(strings.Repeat(alphabet, 300)))
+		if !strings.Contains(out, "[REDACTED:high-entropy]") {
+			t.Errorf("the scanned prefix was not scrubbed:\n%s", out)
+		}
+		if !strings.HasSuffix(out, marker) {
+			t.Errorf("report lacks the truncation marker although the scan cut dropped text:\n%s", out)
+		}
+	})
+}
+
+// TestOTelErrorsDroppedWithoutRun: with no run bound, including after a
+// run's route is restored, SDK error reports are dropped rather than
+// written to the process stderr.
+func TestOTelErrorsDroppedWithoutRun(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = orig
+		w.Close()
+		r.Close()
+	})
+
+	(&otelErrorHandler{}).Handle(nil)
+	(&otelErrorHandler{}).Handle(errors.New("Authorization: Basic dXNlcjpwYXNz"))
+	var buf bytes.Buffer
+	restore := routeOTelErrors(&buf)
+	restore()
+	otelErrors.Handle(errors.New("late"))
+
+	os.Stderr = orig
+	w.Close()
+	written, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading the stderr pipe: %v", err)
+	}
+	if len(written) != 0 {
+		t.Errorf("an unbound report reached the process stderr: %q", written)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("a report after restore reached the run's stderr: %q", buf.String())
+	}
 }
