@@ -165,7 +165,9 @@ type ResearchConfig struct {
 //
 // Endpoint and key fields are optional at the config layer and required by
 // the composition root when the agent runs; the caps carry documented
-// defaults so a bare `--agent worker` run is already bounded.
+// defaults so a bare `--agent worker` run is already bounded. The endpoints
+// come only from their flags or environment variables (FleetEndpoints); a
+// base config naming one is refused by DecodeBase.
 type FleetConfig struct {
 	// ModelEndpoint is the standard-model base URL. Absolute https://,
 	// with http:// permitted for loopback test servers only. Distinct
@@ -279,7 +281,8 @@ func defaultFleet() FleetConfig {
 // subset, so one strict decoder covers both) overlaid on the defaults.
 // Empty input yields the defaults, so an empty stdin pipe is harmless.
 // Unknown keys are an error: configs are small and a silent typo would
-// silently change a paid run.
+// silently change a paid run. A base config is read with DecodeBase, which
+// also refuses fleet endpoints.
 func Decode(r io.Reader) (ResearchConfig, error) {
 	cfg := Default()
 	dec := yaml.NewDecoder(r)
