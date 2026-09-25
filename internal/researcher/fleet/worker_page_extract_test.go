@@ -261,6 +261,24 @@ func TestExtractSelection(t *testing.T) {
 	}
 }
 
+// TestLinkTextNested: text in elements nested inside a link counts as link
+// text exactly as text directly inside the link does.
+func TestLinkTextNested(t *testing.T) {
+	const label = "Read more about this story"
+	want := parsePage(`<div><p>` + para + `</p><a href="/x">` + label + `</a></div>`).elems[1]
+	if want.link == 0 || want.link == want.text {
+		t.Fatalf("direct link text = %d of %d bytes, want part of the text", want.link, want.text)
+	}
+	for _, src := range []string{
+		`<div><p>` + para + `</p><a href="/x"><span>` + label + `</span></a></div>`,
+		`<div><p>` + para + `</p><a href="/x"><b><span>Read more</span> about this story</b></a></div>`,
+	} {
+		if got := parsePage(src).elems[1]; got.link != want.link || got.text != want.text {
+			t.Errorf("%s: link text = %d of %d bytes, want %d of %d", src, got.link, got.text, want.link, want.text)
+		}
+	}
+}
+
 // TestExtractCommaCreditCapped: a comma-stuffed paragraph earns at most ten
 // points for its commas, so a block of it cannot outscore real prose.
 func TestExtractCommaCreditCapped(t *testing.T) {
@@ -356,6 +374,7 @@ func adversarialPages() []struct {
 	deepDivs := 20000
 	distinctTags := 5000
 	manyElements := maxPageElements + 5000
+	manyCells := 50000
 	var distinct strings.Builder
 	for i := range distinctTags {
 		distinct.WriteString("<x" + strconv.Itoa(i) + ">")
@@ -398,6 +417,20 @@ func adversarialPages() []struct {
 				}
 				if !strings.Contains(text, "tail text") {
 					t.Errorf("text lost: %q", text)
+				}
+			},
+		},
+		{
+			name: "table cells beyond the depth cap",
+			src: strings.Repeat("<div>", maxPageDepth) + "<table><tr>" + strings.Repeat("<td>cell", manyCells) +
+				"</table>" + strings.Repeat("</div>", maxPageDepth) + "<p>after</p>",
+			check: func(t *testing.T, p *pageParser, _ string) {
+				all := p.render([]int32{0}, false)
+				if n := strings.Count(all, "\tcell"); n != manyCells {
+					t.Errorf("%d of %d cells follow a tab", n, manyCells)
+				}
+				if !strings.HasSuffix(all, "\nafter") {
+					t.Errorf("text after the table is lost: %q", all[max(0, len(all)-40):])
 				}
 			},
 		},
