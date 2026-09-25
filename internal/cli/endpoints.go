@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -8,6 +10,7 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/httpx"
+	"github.com/rxbynerd/chiron/internal/transport"
 )
 
 // applyEndpointEnv fills each fleet endpoint whose flag was not set from its
@@ -35,4 +38,44 @@ func applyEndpointEnv(fc *config.FleetConfig, flags *pflag.FlagSet) error {
 		*e.Value = raw
 	}
 	return nil
+}
+
+// endpointsPayload is the delta event naming where a worker run sends its
+// credentials, by scheme and host only: a path or query can carry a token.
+type endpointsPayload struct {
+	Endpoints endpointOrigins `json:"endpoints"`
+}
+
+// endpointOrigins holds scheme://host for each destination. Knowledge is
+// omitted without a knowledge provider.
+type endpointOrigins struct {
+	Model     string `json:"model"`
+	Search    string `json:"search"`
+	Knowledge string `json:"knowledge,omitempty"`
+}
+
+// emitEndpoints emits the one endpoints event of a worker run, so its
+// destinations are visible on stderr before the first credential-bearing
+// request. Emission is best effort: a broken event stream must not abort a
+// paid run.
+func emitEndpoints(ctx context.Context, tr transport.Transport, fc config.FleetConfig) {
+	origins := endpointOrigins{Model: origin(fc.ModelEndpoint), Search: origin(fc.SearchEndpoint)}
+	if fc.KnowledgeProvider != "" {
+		origins.Knowledge = origin(fc.KnowledgeEndpoint)
+	}
+	payload, err := json.Marshal(endpointsPayload{Endpoints: origins})
+	if err != nil {
+		return
+	}
+	_ = tr.Emit(ctx, transport.Event{Kind: transport.KindDelta, Payload: payload})
+}
+
+// origin reduces an endpoint that has already passed httpx.ParseEndpoint to
+// scheme://host.
+func origin(raw string) string {
+	u, err := httpx.ParseEndpoint(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
