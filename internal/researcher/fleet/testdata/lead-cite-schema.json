@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "claims": {
+      "type": "array",
+      "description": "The report's factual claims that listed sources support, in report order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "claim": {
+            "type": "string",
+            "description": "The claim, quoted or closely paraphrased from the report."
+          },
+          "urls": {
+            "type": "array",
+            "description": "The URLs of the listed sources that support the claim, copied exactly as listed.",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["claim", "urls"]
+      }
+    }
+  },
+  "required": ["claims"]
+}

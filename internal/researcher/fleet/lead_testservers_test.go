@@ -29,6 +29,7 @@ const (
 	kindDecompose  = "decompose"
 	kindWorker     = "worker"
 	kindSynthesise = "synthesise"
+	kindCite       = "cite"
 )
 
 // fleetModel is the model endpoint for a whole fleet run. It answers each
@@ -42,6 +43,7 @@ type fleetModel struct {
 	// every worker turn reports 10 input and 5 output tokens.
 	worker    func(brief, messages int) string
 	synthesis modeltest.FakeReply
+	cite      modeltest.FakeReply
 
 	mu       sync.Mutex
 	requests map[string][][]model.Message
@@ -71,6 +73,8 @@ func (m *fleetModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			kind = kindDecompose
 		case actionSchemaName:
 			kind = kindWorker
+		case citeSchemaName:
+			kind = kindCite
 		default:
 			m.t.Errorf("a request names the unknown schema %q", rf.JSONSchema.Name)
 		}
@@ -100,6 +104,8 @@ func (m *fleetModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeWorkerReply(w, m.worker(n, len(msgs)))
 	case kindSynthesise:
 		writeChatReply(w, m.synthesis)
+	case kindCite:
+		writeChatReply(w, m.cite)
 	}
 }
 
@@ -138,12 +144,33 @@ func writeChatReply(w http.ResponseWriter, reply modeltest.FakeReply) {
 	})
 }
 
-// synthesisUsage is the usage every scripted synthesis reply reports.
-var synthesisUsage = model.Usage{InputTokens: 300, OutputTokens: 200, TotalTokens: 500}
+// Usage the lead's scripted synthesis and citation replies report.
+var (
+	synthesisUsage = model.Usage{InputTokens: 300, OutputTokens: 200, TotalTokens: 500}
+	citeUsage      = model.Usage{InputTokens: 150, OutputTokens: 50, TotalTokens: 200}
+)
 
 // synthesisReply scripts a completed synthesis reply carrying body.
 func synthesisReply(body string) modeltest.FakeReply {
 	return modeltest.FakeReply{Content: body, FinishReason: "stop", Usage: synthesisUsage}
+}
+
+// citedClaims is a citation reply's claims in order, each with its URLs.
+type citedClaims []citedClaim
+
+// json marshals the claims as a citation reply.
+func (c citedClaims) json(t *testing.T) string {
+	t.Helper()
+	b, err := json.Marshal(citeReply{Claims: append([]citedClaim{}, c...)})
+	if err != nil {
+		t.Fatalf("marshal cite reply: %v", err)
+	}
+	return string(b)
+}
+
+// citeReplyOf scripts a completed citation reply carrying content.
+func citeReplyOf(content string) modeltest.FakeReply {
+	return modeltest.FakeReply{Content: content, FinishReason: "stop", Usage: citeUsage}
 }
 
 // putFinding stores f under workerID and briefID as the pool stores a
