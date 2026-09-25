@@ -123,12 +123,11 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 	})
 }
 
-// runWorkerResearch runs `chiron research --agent worker`: fill the fleet
-// endpoints no flag set from the environment, build the in-process worker
-// researcher from cfg.Fleet, name its destinations on the event stream, then
-// drive the unchanged run core. The deep-research levers (--plan, --budget
-// and the Gemini tool flags) are rejected by config validation for this
-// agent rather than ignored; the worker's spend bounds are the fleet caps.
+// runWorkerResearch runs `chiron research --agent worker`: fill unset fleet
+// endpoints from the environment, build the worker from cfg.Fleet, name its
+// destinations on the event stream, then drive the unchanged run core. The
+// deep-research levers are rejected by config validation for this agent
+// rather than ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
 	if err := applyEndpointEnv(&cfg.Fleet, cmd.Flags()); err != nil {
 		return err
@@ -158,10 +157,10 @@ const fetchRequestTimeout = 30 * time.Second
 const fetchMaxContentBytes = 1 << 20
 
 // buildWorker constructs the in-process worker researcher from the resolved
-// config. It resolves the model, search and knowledge key references through
-// resolver, at the composition root, and fails before any request if a
-// required endpoint or key is missing or unresolvable, so a misconfigured
-// worker never emits a resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
+// config. It resolves the model, search and knowledge key references here, at
+// the composition root, and fails before any request if a required endpoint
+// or key is missing or unresolvable, so a misconfigured worker never emits a
+// resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
 // run and each model, search and knowledge call; fetch has its own tighter
 // per-call bound. The returned closer ends the MCP sessions the search and
 // knowledge clients hold; when buildWorker fails, nothing is left open.
