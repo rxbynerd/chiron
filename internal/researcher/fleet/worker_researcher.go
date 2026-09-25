@@ -32,6 +32,11 @@ import (
 // costs the recorded Finding. Unlike the Gemini adapter, the id is a local
 // handle, not a durable resume token: a crashed in-process run cannot be
 // recovered by `chiron get <id>`.
+//
+// The loop can finish a turn before the run core has emitted the id Start
+// returned, so deps.Progress deliveries for a run are held until Await is
+// first entered for it; a delivery still held at its progress deadline is
+// dropped, never reordered.
 type Worker struct {
 	deps WorkerDeps
 
@@ -43,11 +48,14 @@ type Worker struct {
 // closed once finding and completed are stored, before any save-back; done is
 // closed once the run, save-back included, has finished. finding and
 // completed are written only before loopDone closes. cancel stops the loop
-// early.
+// early. awaiting is the progress gate, closed once by the first Await.
 type workerState struct {
 	query   string
 	started time.Time
 	cancel  context.CancelFunc
+
+	awaiting     chan struct{}
+	awaitingOnce sync.Once
 
 	loopDone  chan struct{}
 	done      chan struct{}
@@ -117,6 +125,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		query:    task.Query,
 		started:  time.Now(),
 		cancel:   cancel,
+		awaiting: make(chan struct{}),
 		loopDone: make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -133,7 +142,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	}
 	go func() {
 		defer cancel()
-		runWorker(runCtx, w.deps, brief, nil, after)
+		runWorker(runCtx, w.deps, brief, st.awaiting, after)
 		close(st.done)
 	}()
 
@@ -145,13 +154,15 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 // the run is cancelled so no further paid turns are taken, and the context
 // error is returned. If ctx ends after the loop has recorded its Finding,
 // Await returns nil: the finding is complete and paid for, and the save-back
-// continues under its own rememberTimeout. An unknown id is a programming
-// fault, not a user condition.
+// continues under its own rememberTimeout. Entering Await releases the run's
+// held progress deliveries. An unknown id is a programming fault, not a user
+// condition.
 func (w *Worker) Await(ctx context.Context, id string) error {
 	st, err := w.state(id)
 	if err != nil {
 		return err
 	}
+	st.awaitingOnce.Do(func() { close(st.awaiting) })
 	select {
 	case <-st.done:
 		return nil
