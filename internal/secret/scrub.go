@@ -22,18 +22,21 @@ var (
 	reBearer = regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*`)
 
 	// RFC 7617 Basic credentials in an Authorization header or assignment,
-	// however quoted.
-	reBasicHeader = regexp.MustCompile(`(?i)(authorization\b['"]?\s*[:=]\s*['"]?basic\s+)[A-Za-z0-9+/]+=*`)
+	// however quoted or URL-encoded. Header context is always redacted, so
+	// the token class also admits base64url and JSON-escaped slashes.
+	reBasicHeader = regexp.MustCompile(`(?i)(authorization\b['"]?(?:\s*[:=]|%3A)(?:\s|%20)*['"]?basic(?:\s|%20)+)[A-Za-z0-9+/_\\-]+=*`)
 
 	// Bare Basic credentials. Redacted only when the token decodes to
 	// user:password text, so prose such as "basic research" survives.
-	reBasic = regexp.MustCompile(`(?i)\b(basic\s+)([A-Za-z0-9+/]{4,}=*)`)
+	reBasic = regexp.MustCompile(`(?i)\b(basic(?:\s|%20)+)([A-Za-z0-9+/]{4,}=*)`)
 
 	// Google API keys: AIza plus 35 key characters.
 	reGoogleKey = regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}`)
 
-	// Langfuse project keys: pk-lf- (public) or sk-lf- (secret) and a UUID.
-	reLangfuseKey = regexp.MustCompile(`\b[ps]k-lf-[A-Za-z0-9_-]{20,}`)
+	// Langfuse project keys: pk-lf- (public) or sk-lf- (secret) and at
+	// least eight key characters, also inside a longer word. Generated keys
+	// carry a UUID; self-hosted projects may set shorter ones.
+	reLangfuseKey = regexp.MustCompile(`[ps]k-lf-[A-Za-z0-9_-]{8,}`)
 
 	// Candidate runs for the high-entropy backstop.
 	reCandidate = regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`)
@@ -66,9 +69,14 @@ func Scrub(s string) string {
 }
 
 // basicCredential reports whether tok is base64 of printable text holding a
-// colon: the user:password shape of an RFC 7617 credential.
+// colon: the user:password shape of an RFC 7617 credential. A truncated
+// token whose last character completes no byte is decoded without it.
 func basicCredential(tok string) bool {
-	raw, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(tok, "="))
+	tok = strings.TrimRight(tok, "=")
+	if len(tok)%4 == 1 {
+		tok = tok[:len(tok)-1]
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(tok)
 	if err != nil || !utf8.Valid(raw) {
 		return false
 	}

@@ -89,6 +89,61 @@ func TestScrubLangfuseAndBasicCredentials(t *testing.T) {
 	}
 }
 
+// survivor returns the longest substring of secret, at least eight bytes
+// long, that appears in out.
+func survivor(secret, out string) string {
+	best := ""
+	for i := range len(secret) {
+		for j := len(secret); j-i > len(best) && j-i >= 8; j-- {
+			if strings.Contains(out, secret[i:j]) {
+				best = secret[i:j]
+				break
+			}
+		}
+	}
+	return best
+}
+
+// TestScrubEncodedAndShortCredentials: short Langfuse keys, URL-encoded and
+// base64url Basic headers, and truncated Basic tokens leave no eight-byte
+// fragment behind.
+func TestScrubEncodedAndShortCredentials(t *testing.T) {
+	short := base64.StdEncoding.EncodeToString([]byte("otel-user:S3cr3t!pw"))
+	truncated := short[:17]
+	if len(truncated)%4 != 1 {
+		t.Fatalf("truncated token is %d chars, want len%%4 == 1", len(truncated))
+	}
+	urlSafe := base64.URLEncoding.EncodeToString([]byte("user:pa>>ss??word~~"))
+	if !strings.ContainsAny(urlSafe, "-_") {
+		t.Fatalf("%q has no base64url character", urlSafe)
+	}
+
+	tests := []struct {
+		name   string
+		in     string
+		secret string
+	}{
+		{"short langfuse key json", `{"secretKey":"sk-lf-1234567890"}`, "sk-lf-1234567890"},
+		{"langfuse key after a word character", "x" + fakeLangfuseSecret, strings.TrimPrefix(fakeLangfuseSecret, "sk-lf-")},
+		{"otel header variable form", "Authorization=Basic%20" + short, short},
+		{"url-encoded header", "Authorization%3A%20Basic%20" + short, short},
+		{"truncated bare basic token", "Basic " + truncated, truncated},
+		{"base64url header token", "Authorization: Basic " + urlSafe, urlSafe},
+		{"short langfuse key in a resolver error", "environment variable pk-lf-1234567890 is not set", "pk-lf-1234567890"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Scrub(tt.in)
+			if s := survivor(tt.secret, got); s != "" {
+				t.Fatalf("Scrub(%q) = %q; %q survived", tt.in, got, s)
+			}
+			if !strings.Contains(got, "[REDACTED") {
+				t.Fatalf("Scrub(%q) = %q; no redaction marker", tt.in, got)
+			}
+		})
+	}
+}
+
 func TestScrubLeavesProseAlone(t *testing.T) {
 	tests := []string{
 		"polling interaction for status, attempt 3 of 12",
@@ -99,6 +154,8 @@ func TestScrubLeavesProseAlone(t *testing.T) {
 		"Basic research methods apply here",
 		"Basic auth is disabled; the basic idea is simple",
 		"keys carry a pk-lf- or sk-lf- prefix",
+		"Basic aGVsbG8gd29ybGQ=", // "hello world": no colon
+		"Basic dXNlcjoBcGFzcw==", // "user:\x01pass": not printable
 	}
 	for _, in := range tests {
 		if got := Scrub(in); got != in {
