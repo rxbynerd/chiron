@@ -5,6 +5,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -270,4 +271,51 @@ func lineContaining(s, needle string) string {
 		}
 	}
 	return ""
+}
+
+// TestRunWorkerFindingCountsTurns: every outcome carries the number of model
+// turns the loop started, including a turn whose model call failed, and a
+// run whose context ended before its first turn reports none.
+func TestRunWorkerFindingCountsTurns(t *testing.T) {
+	searchTurn := func(n int) modeltest.FakeReply {
+		return modeltest.FakeReply{Content: `{"action":"search","query":"q` + strconv.Itoa(n) + `"}`, FinishReason: "stop"}
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tt := range []struct {
+		name     string
+		ctx      context.Context
+		maxTurns int
+		replies  []modeltest.FakeReply
+		status   types.Status
+		turns    int
+	}{
+		{"completed", context.Background(), 8, []modeltest.FakeReply{searchTurn(1), searchTurn(2), finalReply("done")}, types.StatusCompleted, 3},
+		{"turn cap", context.Background(), 2, []modeltest.FakeReply{searchTurn(1), searchTurn(2), searchTurn(3)}, types.StatusIncomplete, 2},
+		{"failed call", context.Background(), 8, []modeltest.FakeReply{searchTurn(1), {Status: http.StatusInternalServerError}}, types.StatusFailed, 2},
+		{"context ended first", cancelled, 8, nil, types.StatusIncomplete, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			modelSrv := modeltest.NewFakeServer(tt.replies...)
+			defer modelSrv.Close()
+
+			c := caps()
+			c.MaxTurns = tt.maxTurns
+			finding := RunWorker(tt.ctx, WorkerDeps{
+				Model:  newModelClient(t, modelSrv),
+				Search: newSearchClient(t, searchSrv),
+				Fetch:  newFetchClient(t),
+				Caps:   c,
+			}, Brief{Objective: "q"})
+
+			if finding.Status != tt.status || finding.Turns != tt.turns {
+				t.Errorf("finding = %s after %d turns (%s), want %s after %d", finding.Status, finding.Turns, finding.Detail, tt.status, tt.turns)
+			}
+			if got := modelSrv.CallCount(); got != tt.turns {
+				t.Errorf("model calls = %d, want one per counted turn (%d)", got, tt.turns)
+			}
+		})
+	}
 }

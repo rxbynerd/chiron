@@ -1731,3 +1731,118 @@ a large echoed body, so the failure keeps the store's error reachable via
 runs under one `decompose` span carrying `brief_count`, the call's
 `input_tokens` and `output_tokens`, `truncated_fields` and `status`. A
 failure ends the span with a scrubbed, bounded error.
+
+## 2026-09-25 — Bounded fleet worker pool
+
+Issue #21. `fleet.max_workers` and `fleet.concurrency` were validated for
+`--agent fleet`, but nothing consumed them. The worker pool
+(`internal/researcher/fleet/pool.go`) runs a decomposed plan's briefs as
+concurrent in-process workers under both caps, and writes each finding to the
+run's `ContextStore` session by reference (V2-RESEARCH-AGENT §6, lead flow
+steps 4 and 5). It is not wired to `--agent fleet` yet: `Fleet` still returns
+`ErrNotImplemented` until synthesis and the citation pass land. No new
+dependency was introduced.
+
+**Caps are validated at construction and never loosened.** `newPool` refuses
+a worker cap or concurrency that is not positive, and a concurrency above the
+worker cap, mirroring `ResearchConfig.Validate`. It also applies the checks
+`NewWorker` applies to the worker's collaborators (model, search and fetch
+clients, and a positive turn cap), through one shared helper. Every worker
+receives the shared `WorkerDeps.Caps` unchanged, so turns, tokens, the
+cost ceiling, the timeout and the page bound hold per worker. Bounded fan-out
+times these caps is the coarse spend ceiling §4 asks for.
+
+**Drop, never queue.** Each brief is dispatched through the same router table
+that validated the plan at decompose time, never by calling `RunWorker`
+directly. It runs in its own goroutine behind a slot channel sized to the
+concurrency. Briefs past `max_workers` are dropped by position, so the first
+`max_workers` briefs are the ones that run. They are never held for a later
+slot, because a queue past the cap would make the cap a delay rather than a
+bound. A brief whose target has no route is also dropped, carrying the
+router's scrubbed, bounded reason. The lead's validation makes that path
+unreachable today. Each drop is reported with its reason in the pool's
+result and on a delegate span. A failed worker is never dispatched again, so
+the no-retry rule for paid POSTs holds per worker as well as per call.
+
+**The router's dispatch carries the progress gate.** The 2026-09-25 entry
+"Fleet lead decomposition and the external-web router" gave a routing row
+`RunWorker`'s signature. That signature has no gate, and the Fleet
+researcher must hold each worker's progress deliveries until its `Await` is
+entered, exactly as `Worker` holds them behind its `awaiting` channel. The
+dispatch now takes a `progressGate` as its fourth parameter. The live
+table's one `external_web` row is `dispatchWorker`, a direct call into
+`runWorker`. Gating stays in the single implementation in the loop: each
+delivery waits for the gate within the same progress deadline, and a
+delivery still held at the deadline is dropped. `RunWorker` is unchanged for
+direct callers.
+
+**Findings by reference.** As each worker returns, its own goroutine writes
+the finding to the session before it frees its slot, rather than the pool
+batching the writes at the end. A crashed run is therefore recoverable worker
+by worker (§4), provided the session lives in a durable store; the
+`InMemory` store this wave binds does not survive the process, so today that
+recoverability is only real once a durable `ContextStore` backs it. The
+artifact is JSON named `fleet-finding-<brief id>.json`
+with media type `application/json`. Like the plan, it carries a `kind`
+(`"fleet_finding"`) and a `version` (`1`), the worker id, the brief id and
+the whole `Finding` (text, citations, usage, status, detail and turns). The
+identity lives in the body because `InMemory` keeps the first write's meta
+for identical content. The caller gets back only a lightweight result per
+brief: the ids, a disposition (`ran`, `dropped` or `not_started`), the
+reference, status, detail, usage, turn count and citation count. Results
+come back in brief order whatever the completion order, together with the
+summed usage. `readFinding` is the read-back helper for synthesis. It reads
+at most 4 MiB, the store's default artifact bound, which the pool also
+enforces on write. It then decodes strictly, refusing unknown fields,
+trailing content, another kind or version, a missing id and a non-terminal
+status with `ErrInvalidFinding`. A store failure keeps the store's error
+reachable behind a scrubbed, bounded message.
+
+**A failed store never loses the spend.** The `Put` is detached from the
+run's cancellation, under its own ten-second bound, because a cancelled
+worker's partial finding is already paid for. The bound stops a slow store
+from holding the pool open. When the store refuses a finding, the result
+still carries the worker's status, usage and turns, and the scrubbed, bounded
+store error is appended to the detail. The reference stays zero, so
+synthesis can tell a finding it cannot read back.
+
+**No save-back and a fixed tool surface.** The pool clears `Remember` and
+`ReportTemplate` from its workers' deps. A fleet worker never writes to the
+knowledge store: saving a synthesised report, if ever wanted, is the lead's
+decision, not each worker's. The lead's brief supplies the output format. The
+action schema a worker sends is therefore exactly search, fetch and final,
+plus recall only when `Knowledge` is configured. A test asserts this on the
+wire for every request, including one from a brief that asks for shell and
+file-write tools.
+
+**Cancellation stops everything, and `run` outlives its workers.** Once the
+run context ends, no slot is granted, and each brief still waiting is
+reported `not_started` with its reason. A slot won in the same instant the
+context ends is handed back. Running workers stop at their next context
+check, and an in-flight model call is cancelled with its request. `run`
+returns only after every goroutine it launched has returned and stored its
+finding. No paid turn outlives the pool, so none will outlive the Fleet's
+`Await`. Tests count model requests after the pool returns and poll the
+goroutine dump for leftover pool goroutines.
+
+**Every planned brief has one delegate span.** Each delegate span nests under
+the caller's span and carries `brief_id` and a `disposition`. A worker
+that ran adds `worker_id`, `status`, `turns`, `input_tokens`,
+`output_tokens`, `search_count`, `recall_count`, `estimated_cost_gbp`,
+`citation_count` and `finding_stored`, and that worker's `worker` span nests
+beneath it. A failed worker or an unstored finding ends the span with an
+error. A dropped or not-started brief's delegate adds the `reason` and has no
+worker beneath it. This keeps drops visible in a trace, because the pool has
+no other span of its own and the fixed vocabulary has no dispatch span. The
+reference's digest is not an attribute, because both tracers route values
+through `secret.Scrub`, whose backstop redacts a 64-character hex run. The
+brief id correlates the span with the stored finding. Worker ids are
+`worker-<n>`, from the brief's position.
+
+**Progress identifies its worker.** `Progress` gains a `WorkerID` field at
+its end. The pool stamps each delivery with it by wrapping the hook, and it
+is empty for the single-worker agent, so the CLI's event rendering is
+unchanged. `Finding` likewise gains `Turns` at its end: the number of model
+turns the loop started, including one whose call failed. The delegate span
+and the pool's result can then carry the turn count without the worker's
+own span.
