@@ -130,10 +130,11 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
-		res, err := buildWorker(ctx, cfg, deps.Tracer, stderr)
+		res, sessions, err := buildWorker(ctx, cfg, deps.Tracer, stderr)
 		if err != nil {
 			return err
 		}
+		defer func() { _ = sessions.Close() }()
 		deps.Researcher = res
 		result, err := run.Run(ctx, deps, run.Params{
 			Query: cfg.Query,
@@ -157,28 +158,29 @@ const fetchMaxContentBytes = 1 << 20
 // or key is missing or unresolvable, so a misconfigured worker never emits a
 // resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
 // run and each model, search and knowledge call; fetch has its own tighter
-// per-call bound.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer) (*fleet.Worker, error) {
+// per-call bound. The returned closer ends the MCP sessions the search and
+// knowledge clients hold; when buildWorker fails, nothing is left open.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer) (_ *fleet.Worker, _ io.Closer, err error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
-		return nil, errors.New("research --agent worker: fleet.model_endpoint is required")
+		return nil, nil, errors.New("research --agent worker: fleet.model_endpoint is required")
 	}
 	if fc.ModelName == "" {
-		return nil, errors.New("research --agent worker: fleet.model_name is required")
+		return nil, nil, errors.New("research --agent worker: fleet.model_name is required")
 	}
 	if fc.ModelKeyRef == "" {
-		return nil, errors.New("research --agent worker: fleet.model_key_ref is required")
+		return nil, nil, errors.New("research --agent worker: fleet.model_key_ref is required")
 	}
 	if fc.SearchEndpoint == "" {
-		return nil, errors.New("research --agent worker: fleet.search_endpoint is required")
+		return nil, nil, errors.New("research --agent worker: fleet.search_endpoint is required")
 	}
 	if err := requireKnowledge(fc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	modelKey, err := secret.Default().Resolve(ctx, fc.ModelKeyRef)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The search MCP may be keyless; resolve only when a reference is set, so
 	// an empty ref sends no Authorization header rather than failing.
@@ -186,14 +188,21 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 	if fc.SearchKeyRef != "" {
 		searchKey, err = secret.Default().Resolve(ctx, fc.SearchKeyRef)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	allowLoopback, err := fetchAllowLoopbackFromEnv()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	var sessions closers
+	defer func() {
+		if err != nil {
+			_ = sessions.Close()
+		}
+	}()
 
 	callTimeout := time.Duration(fc.WorkerTimeout)
 	fetchTimeout := fetchRequestTimeout
@@ -208,7 +217,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		RequestTimeout: callTimeout,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	searchClient, err := search.New(search.Options{
 		Endpoint:       fc.SearchEndpoint,
@@ -216,11 +225,15 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		RequestTimeout: callTimeout,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	recaller, rememberer, err := buildKnowledge(ctx, fc, callTimeout)
+	sessions = append(sessions, searchClient)
+	recaller, rememberer, knowledgeSession, err := buildKnowledge(ctx, fc, callTimeout)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if knowledgeSession != nil {
+		sessions = append(sessions, knowledgeSession)
 	}
 	if !fc.KnowledgeRemember {
 		rememberer = nil
@@ -231,10 +244,10 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		AllowLoopback:   allowLoopback,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return fleet.NewWorker(fleet.WorkerDeps{
+	worker, err := fleet.NewWorker(fleet.WorkerDeps{
 		Model:              modelClient,
 		Search:             searchClient,
 		Fetch:              fetchClient,
@@ -254,6 +267,21 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 			RecallLimit:      fc.KnowledgeLimit,
 		},
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return worker, sessions, nil
+}
+
+// closers closes each member, last first, and joins their errors.
+type closers []io.Closer
+
+func (cs closers) Close() error {
+	var errs []error
+	for i := len(cs) - 1; i >= 0; i-- {
+		errs = append(errs, cs[i].Close())
+	}
+	return errors.Join(errs...)
 }
 
 // fetchAllowLoopbackEnv is the test-only switch that lets web_fetch reach
