@@ -57,7 +57,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-knowledge-key-ref", "", "secret:// reference to the knowledge store key (never a literal; required for alexandria)")
 	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
 	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
-	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet only)")
+	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet, --agent worker only)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset

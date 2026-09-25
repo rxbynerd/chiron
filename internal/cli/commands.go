@@ -37,8 +37,12 @@ over one standard model (fleet.model_endpoint) plus a web-search MCP
 server (fleet.search_endpoint) and web_fetch; its spend is bounded by
 the fleet caps (--fleet-max-turns, --fleet-max-tokens, --fleet-ceiling
 with the fleet-price flags, --fleet-worker-timeout), and the
-deep-research levers are rejected rather than ignored. fleet, the
-multi-worker orchestrator, is not implemented yet.
+deep-research levers are rejected rather than ignored. fleet is the
+opt-in multi-worker orchestrator: a lead splits the question into briefs,
+at most --fleet-max-workers workers research them (--fleet-concurrency at
+once, each under the same per-worker caps), and the lead synthesises one
+cited report. It requires --fleet-memory inmemory and costs more than a
+single worker.
 
 Exit codes:
 
@@ -95,7 +99,8 @@ and format the report. State is held server-side, so a crashed run is
 recovered with no local state. An in-progress interaction is awaited to
 completion, respecting --timeout; a finished one is emitted immediately.
 No new interaction is created and nothing new is spent. Ids minted by the
-in-process worker (wkr_...) hold no server-side state and are refused.`,
+in-process worker or fleet (wkr_... or flt_...) hold no server-side state
+and are refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)
@@ -117,7 +122,7 @@ func newFollowUpCommand() *cobra.Command {
 The question is answered by a model over the stored interaction
 (previous_interaction_id), not by a new research task — quick and far
 cheaper than re-researching. --model overrides the default model. Ids
-minted by the in-process worker (wkr_...) are refused.`,
+minted by the in-process worker or fleet (wkr_... or flt_...) are refused.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, nil)

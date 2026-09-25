@@ -8,11 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -386,5 +388,83 @@ func TestWorkerScrubsSearchCredential(t *testing.T) {
 	}
 	if strings.Contains(in.StatusDetail, key) {
 		t.Errorf("the search key leaked into StatusDetail:\n%s", in.StatusDetail)
+	}
+}
+
+// TestWorkerRecoversARunPanic: a panic in the run's goroutine never reaches
+// the process. Before the loop has recorded its Finding the run is Failed
+// under the fixed detail, never the recovered value; during the save-back
+// the recorded Finding stands. Await returns nil either way.
+func TestWorkerRecoversARunPanic(t *testing.T) {
+	panickingRemember := rememberFunc(func(context.Context, memory.Namespace, memory.Memory) (memory.Reference, error) {
+		panic("store failure for key " + panicValueKey)
+	})
+	for _, tt := range []struct {
+		name       string
+		tracer     trace.Tracer
+		remember   memory.Rememberer
+		replies    []modeltest.FakeReply
+		wantStatus types.Status
+		wantDetail string
+		wantOutput bool
+		wantCalls  int
+	}{
+		{
+			name:       "before the finding",
+			tracer:     panickingTracer{panicOn: trace.SpanWorker},
+			wantStatus: types.StatusFailed,
+			wantDetail: panicRecoveryDetail,
+		},
+		{
+			name:       "during the save-back",
+			remember:   panickingRemember,
+			replies:    []modeltest.FakeReply{finalReply("answer")},
+			wantStatus: types.StatusCompleted,
+			wantOutput: true,
+			wantCalls:  1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(tt.replies...)
+			defer modelSrv.Close()
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			w, err := NewWorker(WorkerDeps{
+				Model:    newModelClient(t, modelSrv),
+				Search:   newSearchClient(t, searchSrv),
+				Fetch:    newFetchClient(t),
+				Remember: tt.remember,
+				Tracer:   tt.tracer,
+				Caps:     caps(),
+			})
+			if err != nil {
+				t.Fatalf("NewWorker: %v", err)
+			}
+
+			ctx := context.Background()
+			id, err := w.Start(ctx, researcher.Task{Query: "q"})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := w.Await(ctx, id); err != nil {
+				t.Fatalf("Await: %v", err)
+			}
+			in, err := w.Result(ctx, id)
+			if err != nil {
+				t.Fatalf("Result: %v", err)
+			}
+			if in.Status != tt.wantStatus || in.StatusDetail != tt.wantDetail {
+				t.Errorf("Result = %s %q, want %s %q", in.Status, in.StatusDetail, tt.wantStatus, tt.wantDetail)
+			}
+			if got := len(in.Outputs) == 1; got != tt.wantOutput {
+				t.Errorf("outputs = %+v, want the answer: %v", in.Outputs, tt.wantOutput)
+			}
+			if in.CompletedAt.IsZero() {
+				t.Error("CompletedAt is zero, want the time the run recorded its Finding")
+			}
+			if n := modelSrv.CallCount(); n != tt.wantCalls {
+				t.Errorf("model calls = %d, want %d", n, tt.wantCalls)
+			}
+		})
 	}
 }

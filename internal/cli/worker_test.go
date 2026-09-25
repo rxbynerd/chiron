@@ -265,3 +265,47 @@ func TestWorkerKnowledgeKeyResolution(t *testing.T) {
 		t.Error("a worker that cannot build its knowledge store must not dial any endpoint")
 	}
 }
+
+// TestInProcessKeyRefResolution: for either in-process agent, a model or
+// search key ref naming an unset variable stops the run with an error naming
+// it, before any endpoint is dialled or an id minted, and never leaks the
+// key that did resolve.
+func TestInProcessKeyRefResolution(t *testing.T) {
+	t.Setenv("MODEL_KEY", "test-model-key")
+	for _, agent := range []string{"worker", "fleet"} {
+		for _, tt := range []struct {
+			name string
+			flag string
+			env  string
+		}{
+			{"model key", "--fleet-model-key-ref", "CHIRON_TEST_UNSET_MODEL_KEY"},
+			{"search key", "--fleet-search-key-ref", "CHIRON_TEST_UNSET_SEARCH_KEY"},
+		} {
+			t.Run(agent+" "+tt.name, func(t *testing.T) {
+				modelSrv := modeltest.NewFakeServer()
+				defer modelSrv.Close()
+				searchSrv := searchtest.NewFakeServer(nil)
+				defer searchSrv.Close()
+				args := workerArgs(modelSrv, searchSrv, "-o", "none")
+				if agent == "fleet" {
+					args = fleetArgs(modelSrv.URL(), searchSrv, "-o", "none")
+				}
+				args = append(withoutFlag(args, tt.flag), tt.flag, "secret://"+tt.env)
+
+				_, stderr, err := execute(t, args...)
+				if err == nil || !strings.Contains(err.Error(), tt.env) {
+					t.Fatalf("err = %v, want it to name %s", err, tt.env)
+				}
+				if strings.Contains(err.Error(), "test-model-key") || strings.Contains(stderr, "test-model-key") {
+					t.Errorf("the resolved model key leaked: err %v, stderr:\n%s", err, stderr)
+				}
+				if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
+					t.Error("an agent whose key did not resolve dialled an endpoint")
+				}
+				if strings.Contains(stderr, "wkr_") || strings.Contains(stderr, "flt_") {
+					t.Errorf("an agent whose key did not resolve minted an id:\n%s", stderr)
+				}
+			})
+		}
+	}
+}

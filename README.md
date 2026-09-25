@@ -53,7 +53,7 @@ chiron follow-up <interaction-id> --query "..."
 | Flag | Default | Notes |
 | --- | --- | --- |
 | `--query` / positional | — | The research question. |
-| `--agent` | `deep-research` | `deep-research-max` (tier table below), or `worker` for the in-process research loop (section below). `fleet` is reserved and not yet implemented. |
+| `--agent` | `deep-research` | `deep-research-max` (tier table below), `worker` for the in-process research loop, or `fleet` for the opt-in multi-worker orchestrator (sections below). |
 | `--plan` | off | Collaborative planning: review and refine the plan before spending. |
 | `--accept-plan` | off | With `--plan`, approve the first proposed plan without prompting. |
 | `--model` | adapter default | Follow-up Q&A model (`chiron follow-up`). |
@@ -68,7 +68,7 @@ chiron follow-up <interaction-id> --query "..."
 | `--out <path>` | stdout | Write the Markdown report (and chart assets) to a file. |
 | `--config <path>` | — | Base `ResearchConfig`; `-` or piped stdin for composition. |
 | `--api-key-ref` | `secret://GEMINI_API_KEY` | Never a literal key. |
-| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; the worker uses `--fleet-ceiling`). |
+| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; `worker` and `fleet` use `--fleet-ceiling`). |
 | `--timeout <dur>` | `30m` | Wall-clock; hard cap 60m (the agent's own limit). |
 
 All four commands accept the same flag surface; configuration resolves
@@ -170,7 +170,7 @@ chiron research --agent worker \
 | `--fleet-knowledge-key-ref` | — | `secret://` reference to the knowledge store key; required for `alexandria`, optional for `billet`. |
 | `--fleet-knowledge-space` | — | Alexandria space slug to scope recalls to (`alexandria` only). |
 | `--fleet-knowledge-limit` | `5` | Hits per recall, 1 to 20. |
-| `--fleet-knowledge-remember` | `false` | Save each completed finding back to the store (`billet` only). |
+| `--fleet-knowledge-remember` | `false` | Save each completed finding back to the store (`billet` only; rejected for `--agent fleet`). |
 
 The worker keeps the v1 money rules: the paid model call is never
 auto-retried, the interaction id (a local `wkr_` handle) is emitted before
@@ -229,6 +229,69 @@ chiron research --agent worker \
 A recalled Billet memory the answer relies on is listed under Sources as
 its title and `billet://memory/<id>` locator, not as a link. Recalls count
 towards the same three-strike tool-failure bound as search and fetch.
+
+### The in-process fleet (`--agent fleet`)
+
+`--agent fleet` puts a lead in front of several workers. One lead call
+splits the question into three to five briefs, each aimed at the external
+web; a bounded pool runs one worker per brief, each the same loop as
+`--agent worker` under the same per-worker flags and caps; and the lead
+writes one synthesised report from the findings, then attributes its
+claims to the sources the workers cited. The lead and every worker share
+the one model endpoint and key.
+
+The fleet is opt-in and is not the default: a run costs several workers
+plus three lead calls, so expect a multiple of a single worker's spend.
+The eval gate that would compare it with Gemini Deep Research has not yet
+run, so `deep-research` stays the default and `worker` stays the
+single-loop path.
+
+```sh
+chiron research --agent fleet --fleet-memory inmemory \
+  --fleet-max-workers 5 --fleet-concurrency 3 \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-endpoint https://search.example.com/mcp \
+  --query "How do air-source heat pumps compare with gas boilers for UK homes?" --out report.md
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--fleet-memory` | `noop` | Must be `inmemory` for the fleet: the plan and each finding pass between the lead and its workers by reference through an in-process store, dropped when the run ends. Ignored by `worker`. |
+| `--fleet-max-workers` | `5` | Most briefs dispatched. A brief past the cap is dropped and listed as a gap, and the run ends `incomplete`. |
+| `--fleet-concurrency` | `3` | Most workers running at once; at most `--fleet-max-workers`. |
+
+The worker's money rules hold across the fleet. No lead or worker model
+call is ever auto-retried. Each worker is bounded by `--fleet-max-turns`,
+`--fleet-max-tokens`, `--fleet-ceiling` and `--fleet-worker-timeout`, so
+the workers' worst case is `--fleet-max-workers` times one worker's caps.
+Each lead call is a single attempt whose completion is capped at 16,384
+tokens. The report's tokens and estimated cost are the one rollup of every
+lead and worker call. The run ends `failed` when no worker produced a
+finding (a decomposition the lead cannot use fails before any worker
+runs), `incomplete` when a brief yielded no finding or only a partial one,
+or when synthesis or citation degraded, and `completed` otherwise.
+
+When `--timeout` ends a fleet run, no report is emitted and the command
+exits 1, because the report is written on the run's context, which has
+ended. If the lead has recorded its outcome by then, the fleet logs that
+outcome's spend to stderr instead, as one warning line. That includes an
+outcome stitched from the findings because the deadline cut off synthesis
+or citation. The line carries the `flt_` id, status, tokens, search count
+and estimated cost, never report or finding text. `--agent worker` also
+emits no report when `--timeout` ends it, and it logs no spend. An
+interrupt (Ctrl-C) ends either agent at once, with neither a report nor a
+spend line.
+
+The interaction id is a local `flt_` handle, emitted before the first
+call; like `wkr_`, it is not a resume token, so `chiron get` and
+`chiron follow-up` refuse it. Each worker turn emits the `worker_turn`
+delta described above, with a `worker_id` field and the text prefixed by
+the worker it came from. `--template` shapes the lead's synthesis only,
+under the worker template's rules; workers keep the built-in format for
+their findings. Workers can recall from a configured knowledge store, but
+`--fleet-knowledge-remember` is rejected for the fleet.
 
 ### Exit codes
 

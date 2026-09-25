@@ -1988,3 +1988,86 @@ attributes, and the run core records the run-level metrics once from the
 returned `Usage`. A test runs a synthetic fleet end to end and checks that
 the `Usage` equals the delegate spans' totals plus the lead spans' tokens,
 with no metric line in the trace.
+
+## 2026-09-25 — Wave 4 fleet orchestration
+
+Issue #26. The lead, router, pool, synthesis and citation pass had each
+landed behind a `Fleet` that still returned `ErrNotImplemented`. `Fleet`
+(`internal/researcher/fleet/fleet.go`) now composes them as a
+`Researcher`, and the CLI binds it for `--agent fleet`. This entry
+records the orchestration shape, how it generalises the money rules, and
+why the fleet stays opt-in. No new dependency was introduced.
+
+**The orchestration shape.** One run is lead, then router, then a
+bounded pool, then synthesis, then the citation pass, all behind the
+unchanged `Start`/`Await`/`Result` seam, so `internal/run` did not
+change. `Start` refuses a blank query, a follow-up, a report template that
+fails to render against the query, and a session the store cannot open,
+all before any model call. It then mints an opaque `flt_` id, opens one
+`ContextStore` session keyed on that id, and starts the lead on a context
+detached from the caller's, as the worker does. `Await` mirrors the
+worker's `Await`. It releases the progress gate and returns nil once the
+run has concluded, even when its own context ends in the same instant.
+Otherwise, when its context ends, it cancels the run and waits for the
+unwind, bounded by the finding write, the findings read-back and the
+session close, the three steps detached from cancellation. It then returns
+the context error. `Result` reports the run in progress until the lead
+concludes. When the run's `--timeout` deadline ends `Await`, no report is
+emitted, because the run core writes the report on the ended context. If
+the run has recorded its outcome by then, `Await` logs that outcome's
+spend to stderr instead, once, at Warn. The line carries the interaction
+id, status, tokens, search count and estimated cost, never report or
+finding text. The worker agent shares the no-report limitation, and it
+logs no spend. An interrupt such as Ctrl-C ends the process at once,
+because the CLI installs no signal handler, so it neither emits a report
+nor logs spend. Emitting the report after the deadline is a deferred
+follow-up for both agents. `get` and `follow-up` refuse `flt_` ids as they
+refuse `wkr_` ids, because a fleet run holds no server-side state. The
+composition root builds the fleet from the same `buildWorkerDeps` helper
+as `--agent worker`, so one model client serves the lead and every worker.
+Each `worker_turn` progress delta names its worker in a `worker_id` field
+and in its text.
+
+**The store and long-term memory.** The CLI binds a fresh `memory.InMemory`
+for each fleet run and for no other agent. The store's shape, and the
+decision that its `Remember` and `Recall` return `ErrNotImplemented`, are
+in "In-memory ContextStore and the fleet span vocabulary" above. Fleet
+workers may recall from a configured knowledge store but never save a
+finding back. Config validation rejects `fleet.knowledge_remember` for
+`--agent fleet`, and `NewFleet` refuses a non-nil `Remember` as a second
+guard, so the fleet's tool list never names `knowledge_remember`.
+
+**The money rules, generalised to many calls.** V2-PLAN §4 carries the v1
+rules to a run with many paid calls:
+
+- No lead or worker POST is ever retried. The decompose, synthesis and
+  citation calls are single attempts, like each worker turn.
+- Fan-out is bounded. At most `fleet.max_workers` briefs run,
+  `fleet.concurrency` at once, and each worker keeps the shared per-worker
+  caps on turns, tokens, estimated cost and wall-clock time. Bounded
+  fan-out times those caps is the coarse ceiling. Each lead call's
+  completion is capped at 16,384 tokens, and its prompt is bounded by the
+  query and finding byte bounds.
+- Findings pass by reference as each worker finishes. The lead reads them
+  back from the store rather than from the pool's memory, and a failed
+  synthesis still returns the stitched findings, so no paid finding is
+  lost within the process. The in-memory store dies with the process, so
+  recovering a crashed run finding by finding waits for a durable store.
+- One `Usage` rollup per run. It sums the workers' usage and the lead's
+  tokens, priced at the workers' prices. The run core records it once, and
+  spans carry per-call spend as attributes only.
+
+There is still no run-level GBP ceiling, because budgeting stays deferred
+(V2-PLAN §4, D6).
+
+**External-web-only routing, and the stopgap stays top level.** The
+router's table has one target, the external web, dispatching to an
+in-process worker. The lead's validation and the pool share that table.
+The managed Gemini Deep Research adapter is never a routing target. It
+remains a top-level `--agent` choice and is never mixed into a fleet run.
+
+**The eval gate is outstanding.** The harness that would run the fleet
+against the Gemini Deep Research baseline (issue #25) has not been built.
+Until the fleet meets or beats that baseline, `deep-research` stays the
+default agent, `worker` stays the single-loop in-process path, and
+`--agent fleet` is opt-in.
