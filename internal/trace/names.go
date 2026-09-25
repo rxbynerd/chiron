@@ -24,9 +24,10 @@ const (
 
 // Fleet span names, reserved for the lead orchestrator
 // (docs/V2-RESEARCH-AGENT §6). Beneath the research root the lead opens one
-// decompose span, then one delegate span per dispatched brief with that
-// worker's SpanWorker span as its child, then synthesise and cite.
-// SpanControlPlane wraps the control plane's scheduling of a run.
+// decompose span, then one delegate span per planned brief, with the
+// worker's SpanWorker span as its child when a worker ran the brief, then
+// synthesise and cite. SpanControlPlane wraps the control plane's
+// scheduling of a run.
 const (
 	SpanDecompose    = "decompose"
 	SpanDelegate     = "delegate"
@@ -35,8 +36,9 @@ const (
 	SpanControlPlane = "control_plane"
 )
 
-// Fleet span attribute keys. A delegate span carries the worker and brief
-// it dispatched; the decompose span carries how many briefs it produced.
+// Fleet span attribute keys. A delegate span carries its brief, and the
+// worker when one ran it; the decompose span carries how many briefs it
+// produced.
 const (
 	AttrWorkerID   = "worker_id"
 	AttrBriefID    = "brief_id"

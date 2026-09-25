@@ -81,6 +81,9 @@ type Progress struct {
 	Detail                    string
 	InputTokens, OutputTokens int
 	EstimatedCostGBP          float64
+	// WorkerID identifies the fleet worker that made the report; empty for
+	// the single-worker agent.
+	WorkerID string
 }
 
 // Caps bound one worker run deterministically. Exceeding a cap ends the loop
@@ -721,7 +724,8 @@ func (w *workerRun) scrub(s string) string {
 // boundDetail truncates a detail string to maxDetailBytes at a rune boundary.
 func boundDetail(s string) string { return boundBytes(s, maxDetailBytes) }
 
-// errWorkerNoModel is returned by NewWorker when the model client is nil.
+// errWorkerNoModel is returned by checkWorkerDeps when the model client is
+// nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
 
 // progressDeadline is the bound on one Progress delivery.

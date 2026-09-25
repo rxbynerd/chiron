@@ -81,22 +81,30 @@ func IsWorkerInteractionID(id string) bool {
 // misconfigured worker fails at the composition root rather than mid-run after
 // a resume handle has been emitted.
 func NewWorker(deps WorkerDeps) (*Worker, error) {
-	if deps.Model == nil {
-		return nil, errWorkerNoModel
-	}
-	if deps.Search == nil {
-		return nil, errors.New("fleet: worker requires a search client")
-	}
-	if deps.Fetch == nil {
-		return nil, errors.New("fleet: worker requires a fetch client")
-	}
-	if deps.Caps.MaxTurns <= 0 {
-		return nil, fmt.Errorf("fleet: worker requires a positive turn cap, got %d", deps.Caps.MaxTurns)
+	if err := checkWorkerDeps(deps); err != nil {
+		return nil, err
 	}
 	return &Worker{
 		deps: deps,
 		runs: make(map[string]*workerState),
 	}, nil
+}
+
+// checkWorkerDeps validates the collaborators and cap every worker loop
+// needs; the Worker and the fleet's worker pool both apply it at
+// construction.
+func checkWorkerDeps(deps WorkerDeps) error {
+	switch {
+	case deps.Model == nil:
+		return errWorkerNoModel
+	case deps.Search == nil:
+		return errors.New("fleet: worker requires a search client")
+	case deps.Fetch == nil:
+		return errors.New("fleet: worker requires a fetch client")
+	case deps.Caps.MaxTurns <= 0:
+		return fmt.Errorf("fleet: worker requires a positive turn cap, got %d", deps.Caps.MaxTurns)
+	}
+	return nil
 }
 
 // Start implements researcher.Researcher. It builds a Brief from the query,
