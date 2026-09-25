@@ -29,6 +29,7 @@ func TestHTMLToText(t *testing.T) {
 		{"apostrophe outside a value", "<p class=it's>kept</p>after", "\nkeptafter"},
 		{"quoted value after spaced equals", `<a title = 'a>b'>link</a>`, "link"},
 		{"close tag needs a boundary", "a<script>x</scripts>y</script >b", "a\nb"},
+		{"tag names fold ASCII case only", "<p>first</p><SCRİPT>x</SCRİPT><p>rest of the page</p>", "\nfirstx\nrest of the page"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := htmlToText(tt.in); got != tt.want {

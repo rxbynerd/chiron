@@ -171,8 +171,8 @@ func asciiLower(c byte) byte {
 	return c
 }
 
-// tagName extracts the lower-cased element name from the inside of a tag and
-// reports whether it is a closing tag. Declarations and processing
+// tagName extracts the ASCII-lower-cased element name from the inside of a
+// tag and reports whether it is a closing tag. Declarations and processing
 // instructions yield an empty name.
 func tagName(inner string) (name string, closing bool) {
 	inner = strings.TrimSpace(inner)
@@ -191,7 +191,23 @@ func tagName(inner string) (name string, closing bool) {
 		}
 		end++
 	}
-	return strings.ToLower(inner[:end]), closing
+	return asciiLowerString(inner[:end]), closing
+}
+
+// asciiLowerString lower-cases the ASCII letters of s and leaves every other
+// byte alone, as HTML does for tag names. It allocates only when s has an
+// upper-case ASCII letter.
+func asciiLowerString(s string) string {
+	for i := 0; i < len(s); i++ {
+		if 'A' <= s[i] && s[i] <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				b[j] = asciiLower(b[j])
+			}
+			return string(b)
+		}
+	}
+	return s
 }
 
 // collapseWhitespace trims trailing spaces from every line, squeezes runs of

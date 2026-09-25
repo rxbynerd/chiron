@@ -129,6 +129,24 @@ func TestExtractSelection(t *testing.T) {
 			absent: []string{"Short teaser"},
 		},
 		{
+			name:   "main landmark inside furniture is not content",
+			src:    `<nav><div role="main"><p>` + other + `</p></div></nav><article><p>` + para + `</p></article>`,
+			want:   []string{para},
+			absent: []string{other},
+		},
+		{
+			name:   "furniture tag with role main is not content",
+			src:    `<nav role="main"><p>` + other + `</p></nav><article><p>` + para + `</p></article>`,
+			want:   []string{para},
+			absent: []string{other},
+		},
+		{
+			name:   "main landmark inside a wrapper dropped by class is content",
+			src:    `<div class="has-sidebar"><div class="sidebar">Side links</div><main><p>` + para + `</p></main></div>`,
+			want:   []string{para},
+			absent: []string{"Side links"},
+		},
+		{
 			name:   "article inside aside is not content",
 			src:    `<aside><article><p>` + other + other + other + `</p></article></aside><article><p>` + para + `</p></article>`,
 			want:   []string{para},
@@ -360,6 +378,20 @@ func adversarialPages() []struct {
 				}
 				if !strings.Contains(text, "tail text") {
 					t.Errorf("text lost: %q", text)
+				}
+			},
+		},
+		{
+			// Past both caps with the overflow names saturated, the inner
+			// <section> is uncounted; its close must not pop the pushed one.
+			name: "close tag of an uncounted overflow name",
+			src:  "<section>" + strings.Repeat("<div>", maxPageDepth) + distinct.String() + "<section>inner</section>tail",
+			check: func(t *testing.T, p *pageParser, _ string) {
+				if p.elems[1].name != "section" {
+					t.Fatalf("element 1 is %s, want section", p.elems[1].name)
+				}
+				if got := p.render([]int32{1}, false); !strings.HasSuffix(got, "tail") {
+					t.Errorf("the pushed section closed early: its text ends %q", got[max(0, len(got)-40):])
 				}
 			},
 		},

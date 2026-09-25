@@ -1307,8 +1307,10 @@ and `object` are skipped unparsed, and `head` is never rendered.
 
 **Selection order.**
 
-1. The `<main>` or `role=main` element with the most non-link text,
-   wherever it sits.
+1. The `<main>` or `role=main` element with the most non-link text, even
+   inside a wrapper dropped by its id or class (`page-with-sidebar`), but
+   never one that is or sits inside `nav`, `footer`, `aside` or a page
+   `header`.
 2. Else the `<article>` with the most non-link text, outside page
    furniture.
 3. Else the best-scoring block and its qualifying siblings.
@@ -1349,7 +1351,8 @@ digits and, for a camelCase run, also its parts: `navbar`, `site-footer`,
 `siteFooter`, `SideBar` and `CybotCookiebotDialog` match, `unavailable` and
 `canvas` do not, and `navy` and `commentary` are listed exceptions.
 Guards: attribute heuristics never drop `html`, `body`, `main`, `article` or
-`role=main`, never apply inside `pre` or `code` (highlighters use classes
+`role=main` (the tag rules still do: `<nav role=main>` is dropped as a
+`nav`), never apply inside `pre` or `code` (highlighters use classes
 such as `hljs-comment`), and an id or class carrying a content word
 (`article`, `content`, `main`, `body`, `post`, `entry`, `story`, `text`,
 matched as a whole token) vetoes a class or id match. The veto keeps
@@ -1362,15 +1365,16 @@ descendants, so content a framework wraps in a form can still be chosen.
 **Linear time, bounded memory.** One forward pass, no recursion. Close tags
 match through per-name open counts, so an unmatched close tag costs O(1)
 and pops are amortised O(1). The raw-text close-tag search is an
-allocation-free, case-insensitive forward scan; the search it replaces
-lowercased the rest of the page once per skipped element, quadratic on a
-page of many scripts. Depth is capped at 512 and elements at 100 000: a tag
-beyond a cap is not pushed, but its text and line break are kept and its
-close tag does not pop a pushed ancestor. The element and token slices are
-sized once from a markup count and never grow, at most two 8-byte tokens
-per tag and one 64-byte element per start tag up to the cap, so a 1 MiB
-body stays under about 20 MB while it is parsed. Adversarial tests and
-benchmarks cover each case.
+allocation-free, case-insensitive forward scan, linear on a page of many
+scripts. Depth is capped at 512 and elements at 100 000: a tag beyond a cap
+is not pushed, but its text and line break are kept and its close tag does
+not pop a pushed ancestor. Unpushed tags are counted for up to 512 names;
+once a name does not fit, close tags of uncounted names are ignored, which
+can leave an element open but never closes the wrong one. The element and
+token slices are sized once from a markup count and never grow, at most two
+8-byte tokens per tag and one 64-byte element per start tag up to the cap,
+so a 1 MiB body stays under about 20 MB while it is parsed. Adversarial
+tests and benchmarks cover each case.
 
 **Bound and fence unchanged.** After extraction `pageText` still applies
 `strings.ToValidUTF8`, whitespace collapsing and the `fleet.max_page_bytes`

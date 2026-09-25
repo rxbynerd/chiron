@@ -153,7 +153,8 @@ type elemFlag uint32
 const (
 	flagDrop         elemFlag = 1 << iota // skipped when rendering content
 	flagHidden                            // skipped in every rendering
-	flagInFurniture                       // inside page furniture: never a content root
+	flagInFurniture                       // inside page furniture: never an article or scored content root
+	flagTagFurniture                      // nav, footer, aside or a page header, or inside one: never a content root
 	flagInLandmark                        // inside main, article or role=main
 	flagInLink                            // inside a link
 	flagInCode                            // inside pre or code
@@ -212,6 +213,10 @@ type pageParser struct {
 	// overflow counts tags left unpushed by the caps, so their close tags do
 	// not pop pushed ancestors. It holds at most maxPageDepth names.
 	overflow map[string]int32
+	// overflowFull is set once an unpushed tag's name did not fit in
+	// overflow. From then on a close tag whose name is not counted may
+	// belong to such a tag, so it is ignored rather than popping.
+	overflowFull bool
 }
 
 func newPageParser(src string) *pageParser {
@@ -300,8 +305,9 @@ scan:
 		case closing:
 			p.closeTag(name)
 		case tagInfos[name].traits&traitRawText != 0:
-			// Skip to the matching close tag; nested same-name elements do
-			// not occur for these element types.
+			// Skip to the first matching close tag. svg, template and
+			// object can nest; the outer element's content after a nested
+			// close tag is then parsed as page markup.
 			closeAt := indexCloseTag(src, i, name)
 			if closeAt < 0 {
 				break scan
@@ -380,6 +386,8 @@ func (p *pageParser) openTag(name, inner string) {
 	}
 	if n, ok := p.overflow[name]; ok || len(p.overflow) < maxPageDepth {
 		p.overflow[name] = n + 1
+	} else {
+		p.overflowFull = true
 	}
 }
 
@@ -406,7 +414,7 @@ func (p *pageParser) push(name, inner string, info tagInfo) {
 	}
 
 	e := pageElement{name: name, info: info, parent: parentIdx, open: int32(len(p.tokens))}
-	e.flags = parent.flags & (flagInFurniture | flagInLandmark | flagInLink | flagInCode)
+	e.flags = parent.flags & (flagInFurniture | flagTagFurniture | flagInLandmark | flagInLink | flagInCode)
 	if parent.flags&flagDrop != 0 && parent.info.traits&traitForm == 0 {
 		e.flags |= flagInFurniture
 	}
@@ -446,10 +454,10 @@ func classify(info tagInfo, inherited elemFlag, inner string) elemFlag {
 	switch {
 	case info.traits&traitHidden != 0:
 		f |= flagDrop | flagHidden
-	case info.traits&(traitBoilerplate|traitForm) != 0:
+	case info.traits&traitForm != 0:
 		f |= flagDrop
-	case info.traits&traitHeader != 0 && inherited&flagInLandmark == 0:
-		f |= flagDrop
+	case info.traits&traitBoilerplate != 0, info.traits&traitHeader != 0 && inherited&flagInLandmark == 0:
+		f |= flagDrop | flagTagFurniture
 	case info.traits&(traitProtected|traitCode) != 0, f&flagLandmarkMain != 0, inherited&flagInCode != 0:
 	case containsFold(boilerplateRoles, role):
 		f |= flagDrop
@@ -468,7 +476,7 @@ func (p *pageParser) closeTag(name string) {
 		}
 		return
 	}
-	if p.open[name] == 0 {
+	if p.overflowFull || p.open[name] == 0 {
 		return
 	}
 	for {
@@ -539,14 +547,19 @@ func (p *pageParser) credit(idx int32) {
 // contentRoots chooses the elements whose subtrees are the page's main
 // content: the main landmark, else the largest article, else the
 // best-scoring block and its qualifying siblings, else the body (or the
-// whole document for a fragment). A landmark holding under a quarter of the
+// whole document for a fragment). A main landmark is chosen inside a wrapper
+// dropped by its attributes but never inside a furniture tag; an article is
+// never chosen inside furniture. A landmark holding under a quarter of the
 // page's content text falls through to the next rule.
 func (d *pageDoc) contentRoots() []int32 {
 	total := d.nonLink(0)
 	plausible := func(e int32) bool {
 		return e > 0 && int(d.nonLink(e))*landmarkMinShare >= int(total)
 	}
-	if m := d.largest(func(e *pageElement) bool { return e.flags&flagLandmarkMain != 0 }); plausible(m) {
+	isMain := func(e *pageElement) bool {
+		return e.flags&flagLandmarkMain != 0 && e.flags&(flagDrop|flagTagFurniture) == 0
+	}
+	if m := d.largest(isMain); plausible(m) {
 		return []int32{m}
 	}
 	isArticle := func(e *pageElement) bool {
