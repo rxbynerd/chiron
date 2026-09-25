@@ -341,7 +341,6 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint or the fleet.knowledge_* fields"},
 		{"file_search", len(c.FileSearch) > 0, "the in-process agents search the external web only"},
 		{"inputs", len(c.Inputs) > 0, "the in-process agents take no input documents"},
-		{"template", c.Template != "", "the in-process agents do not take an output template"},
 	}
 	for _, lever := range set {
 		if lever.on {

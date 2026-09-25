@@ -250,7 +250,6 @@ func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
 		{"mcp", func(c *ResearchConfig) { c.MCP = map[string]string{"x": "https://x"} }, "mcp:"},
 		{"file_search", func(c *ResearchConfig) { c.FileSearch = []string{"store"} }, "file_search:"},
 		{"inputs", func(c *ResearchConfig) { c.Inputs = []string{"doc.pdf"} }, "inputs:"},
-		{"template", func(c *ResearchConfig) { c.Template = "t.md" }, "template:"},
 	} {
 		for _, agent := range []string{AgentWorker, AgentFleet} {
 			t.Run(tt.name+"/"+agent, func(t *testing.T) {
@@ -269,6 +268,19 @@ func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
 	cfg.BudgetGBP, cfg.Plan, cfg.Template = 2, true, "t.md"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("deep-research with levers: %v", err)
+	}
+}
+
+// TestValidateAcceptsTemplateForInProcessAgents: template shapes the worker's
+// output-format block, so it is valid for worker and fleet.
+func TestValidateAcceptsTemplateForInProcessAgents(t *testing.T) {
+	for _, agent := range []string{AgentWorker, AgentFleet} {
+		cfg := validWorker()
+		cfg.Agent = agent
+		cfg.Template = "t.md"
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s with template: %v", agent, err)
+		}
 	}
 }
 
