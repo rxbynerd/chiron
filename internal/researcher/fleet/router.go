@@ -51,8 +51,10 @@ func (e *UnroutableTargetError) Error() string {
 func (e *UnroutableTargetError) Is(target error) bool { return target == ErrUnroutableTarget }
 
 // dispatchFunc runs one brief to a Finding. Like RunWorker it never returns
-// an error: every outcome is expressed on the Finding.
-type dispatchFunc func(ctx context.Context, deps WorkerDeps, brief Brief) Finding
+// an error: every outcome is expressed on the Finding. A non-nil
+// progressGate holds each deps.Progress delivery until the gate is closed,
+// dropping it if the progress deadline passes first.
+type dispatchFunc func(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) Finding
 
 // router is the routing table, one row per live target. A target with no row
 // is refused. The managed deep-research agent is a top-level --agent, never a
@@ -63,8 +65,13 @@ type router map[Target]dispatchFunc
 // live; an internal-source target is a new constant plus one row here.
 func liveRoutes() router {
 	return router{
-		TargetExternalWeb: RunWorker,
+		TargetExternalWeb: dispatchWorker,
 	}
+}
+
+// dispatchWorker runs the in-process research worker loop for one brief.
+func dispatchWorker(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) Finding {
+	return runWorker(ctx, deps, brief, progressGate, nil)
 }
 
 // route returns the dispatch for t, or an *UnroutableTargetError.
