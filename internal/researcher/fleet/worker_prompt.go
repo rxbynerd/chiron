@@ -11,10 +11,11 @@ import (
 )
 
 // systemPromptTemplate is the worker's system prompt. The four %s slots are
-// the Brief fields (objective, output format, source guidance, boundaries).
-// It restates the action contract in prose so a model that only reads
-// instructions and one that only obeys the response schema agree; the
-// schema itself (worker_action.go) is the enforced contract.
+// the Brief fields (objective, output format, source guidance, boundaries);
+// the output-format slot is filled by outputFormatBlock. It restates the
+// action contract in prose so a model that only reads instructions and one
+// that only obeys the response schema agree; the schema itself
+// (worker_action.go) is the enforced contract.
 const systemPromptTemplate = `You are a research worker on Chiron's in-process fleet. You answer one
 research objective by consulting the external public web only, then writing a
 concise, faithful, cited finding. You have no access to internal systems, no
@@ -130,10 +131,7 @@ func buildSystemPrompt(brief Brief, recall bool) string {
 	if objective == "" {
 		objective = "(no objective was supplied)"
 	}
-	format := strings.TrimSpace(brief.OutputFormat)
-	if format == "" {
-		format = defaultOutputFormat
-	}
+	format := outputFormatBlock(brief)
 	guidance := strings.TrimSpace(brief.SourceGuidance)
 	if guidance == "" {
 		guidance = defaultSourceGuidance
@@ -150,6 +148,18 @@ func buildSystemPrompt(brief Brief, recall bool) string {
 		template = recallSystemPromptTemplate
 	}
 	return fmt.Sprintf(template, objective, format, guidance, boundaries)
+}
+
+// outputFormatBlock is the text under "Required output format:": the
+// brief's OutputFormat, or defaultOutputFormat when that is blank. It is the
+// one part of the prompt a ReportTemplate replaces, and it is defanged
+// whatever its source so it can never form a tool-result fence.
+func outputFormatBlock(brief Brief) string {
+	format := strings.TrimSpace(brief.OutputFormat)
+	if format == "" {
+		format = defaultOutputFormat
+	}
+	return defang(format)
 }
 
 // Defaults for the optional Brief fields.
@@ -187,8 +197,21 @@ const (
 
 // defang breaks any delimiter-like sequence in retrieved content so a page
 // or snippet cannot close the fence early and impersonate Chiron's framing.
+// It writes a space after every '<' that is followed by another '<', so no
+// "<<" survives however long the run, and defang(defang(s)) == defang(s).
 func defang(s string) string {
-	return strings.ReplaceAll(s, "<<<", "< < <")
+	if !strings.Contains(s, "<<") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + strings.Count(s, "<"))
+	for i := 0; i < len(s); i++ {
+		b.WriteByte(s[i])
+		if s[i] == '<' && i+1 < len(s) && s[i+1] == '<' {
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
 }
 
 // searchResultsMessage renders search results as the next user turn.

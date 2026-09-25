@@ -178,10 +178,13 @@ credentials.
   validation error rather than a silently inert cap. `fleet.max_page_bytes`
   bounds each fetched page after HTML-to-text reduction.
 - The Gemini-only levers (`budget`, `plan`, `accept_plan`, `model`,
-  `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`) are
+  `visualise`, `tools`, `mcp`, `file_search`, `inputs`) are
   rejected for `worker`/`fleet` at validation so a caller never believes a
-  cap or feature applied when the loop ignores it. `stream` is accepted
-  and ignored.
+  cap or feature applied when the loop ignores it. `stream` is accepted:
+  for `worker`/`fleet` it gates whether per-turn `worker_turn` progress
+  events reach the transport (`--quiet` disables them), but it carries no
+  spend meaning there. `template` is honoured: it replaces the worker's
+  output-format block (`fleet.LoadReportTemplate`, bounded at 8 KiB).
 
 These are config fields, not environment variables — they are per-run
 research configuration, not process-wide test hooks. If a later wave adds
