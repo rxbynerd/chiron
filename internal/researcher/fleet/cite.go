@@ -85,7 +85,7 @@ func citeUserMessage(body, findings string) string {
 	b.WriteString("Report:\n" + toolResultOpen + "\n")
 	b.WriteString(boundBytes(defang(strings.TrimSpace(body)), maxCiteBodyBytes))
 	b.WriteString("\n" + toolResultClose + "\n\n")
-	b.WriteString(findings)
+	b.WriteString(strings.TrimRight(findings, "\n") + "\n")
 	return b.String()
 }
 
