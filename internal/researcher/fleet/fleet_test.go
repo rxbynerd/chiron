@@ -18,22 +18,26 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
 // sessionStore is an InMemory store that records each session opened in it
-// and each closed. It fails every OpenSession when openErr is set, holds
-// each Close until closeGate is closed when that is set, and holds each Put
-// until putGate is closed when that is set, ignoring the context either way.
+// and each closed, with the number of Puts completed when each close began.
+// It fails every OpenSession when openErr is set, holds each Close until
+// closeGate is closed when that is set, and holds each Put until putGate is
+// closed when that is set, ignoring the context either way.
 type sessionStore struct {
 	*memory.InMemory
 	openErr   error
 	closeGate chan struct{}
 	putGate   chan struct{}
 
-	mu     sync.Mutex
-	opened []string
-	closed []memory.Namespace
+	mu          sync.Mutex
+	opened      []string
+	closed      []memory.Namespace
+	puts        int
+	putsAtClose []int
 }
 
 func newSessionStore() *sessionStore {
@@ -58,7 +62,19 @@ func (s *sessionStore) Put(ctx context.Context, ns memory.Namespace, body io.Rea
 	if s.putGate != nil {
 		<-s.putGate
 	}
-	return s.InMemory.Put(ctx, ns, body, meta)
+	ref, err := s.InMemory.Put(ctx, ns, body, meta)
+	s.mu.Lock()
+	s.puts++
+	s.mu.Unlock()
+	return ref, err
+}
+
+// putCountsAtClose returns the number of Puts completed when each session
+// close began, in close order.
+func (s *sessionStore) putCountsAtClose() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.putsAtClose)
 }
 
 // sessions returns the session ids opened and the namespaces closed, in
@@ -75,6 +91,9 @@ type recordedSession struct {
 }
 
 func (r *recordedSession) Close(ctx context.Context) error {
+	r.store.mu.Lock()
+	r.store.putsAtClose = append(r.store.putsAtClose, r.store.puts)
+	r.store.mu.Unlock()
 	if g := r.store.closeGate; g != nil {
 		<-g
 	}
@@ -498,6 +517,109 @@ func TestFleetDecomposeFailureFailsTheRun(t *testing.T) {
 	}
 	if _, closed := store.sessions(); len(closed) != 1 {
 		t.Errorf("sessions closed = %v, want the run's", closed)
+	}
+}
+
+// skipPanickingTracer's spans panic when the pool records why it skipped a
+// brief, standing in for a fault in the pool's dispatch loop rather than in
+// a worker.
+type skipPanickingTracer struct{ trace.Noop }
+
+func (p skipPanickingTracer) StartSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	ctx, span := p.Noop.StartSpan(ctx, name)
+	return ctx, skipPanickingSpan{span}
+}
+
+type skipPanickingSpan struct{ trace.Span }
+
+func (s skipPanickingSpan) SetAttr(key string, value any) {
+	if key == "reason" {
+		panic("tracer failure for key " + panicValueKey)
+	}
+	s.Span.SetAttr(key, value)
+}
+
+// TestFleetRecoversALeadPanic: a panic while the lead decomposes, or while
+// its pool dispatches with a worker already running, never reaches the
+// process. The run is Failed under the fixed lead panic detail, never the
+// recovered value, with the decomposition's usage when that call returned.
+// A worker already running is cancelled and has stored its finding before
+// the session closes, and Await returns nil once the session is closed.
+func TestFleetRecoversALeadPanic(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		tracer     trace.Tracer
+		decomposed bool
+		// wantPuts counts the plan and each stored finding.
+		wantPuts int
+	}{
+		{name: "decompose", tracer: panickingTracer{panicOn: trace.SpanDecompose}},
+		{name: "pool dispatch", tracer: skipPanickingTracer{}, decomposed: true, wantPuts: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			release := make(chan struct{})
+			fm := &fleetModel{
+				t:         t,
+				decompose: decomposeReply(decompositionJSON(t, testBriefs(3))),
+				worker: func(int, int) string {
+					<-release
+					return `{"action":"search","query":"late"}`
+				},
+			}
+			modelSrv := httptest.NewServer(fm)
+			defer modelSrv.Close()
+			defer close(release)
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			store := newSessionStore()
+			f := newTestFleet(t, modelSrv.URL, searchSrv, store, func(d *FleetDeps) {
+				d.Worker.Tracer = tt.tracer
+				d.MaxWorkers, d.Concurrency = 1, 1
+			})
+
+			ctx := context.Background()
+			id, err := f.Start(ctx, researcher.Task{Query: testQuery})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := f.Await(ctx, id); err != nil {
+				t.Fatalf("Await: %v", err)
+			}
+			if _, closed := store.sessions(); len(closed) != 1 {
+				t.Errorf("sessions closed = %v, want the run's", closed)
+			}
+			// The started worker's model call is held until the test ends,
+			// so its finding is stored before the close only if the panic
+			// cancelled it and the pool waited it out.
+			if got := store.putCountsAtClose(); !slices.Equal(got, []int{tt.wantPuts}) {
+				t.Errorf("puts when the session closed = %v, want [%d]", got, tt.wantPuts)
+			}
+
+			in, err := f.Result(ctx, id)
+			if err != nil {
+				t.Fatalf("Result: %v", err)
+			}
+			if in.Status != types.StatusFailed || in.StatusDetail != leadPanicDetail || len(in.Outputs) != 0 || len(in.Citations) != 0 {
+				t.Errorf("Result = %s %q with %d outputs and %d citations, want failed %q with neither",
+					in.Status, in.StatusDetail, len(in.Outputs), len(in.Citations), leadPanicDetail)
+			}
+			wantIn, wantOut, wantDecompose := 0, 0, 0
+			if tt.decomposed {
+				wantIn, wantOut, wantDecompose = decomposeUsage.InputTokens, decomposeUsage.OutputTokens, 1
+			}
+			if in.Usage.InputTokens != wantIn || in.Usage.OutputTokens != wantOut {
+				t.Errorf("usage = %+v, want %d input and %d output tokens", in.Usage, wantIn, wantOut)
+			}
+			if n := len(fm.requestsOf(kindDecompose)); n != wantDecompose {
+				t.Errorf("decompose requests = %d, want %d", n, wantDecompose)
+			}
+			if n := len(fm.requestsOf(kindWorker)); n > 1 {
+				t.Errorf("worker requests = %d, want at most the one started worker's first turn", n)
+			}
+			if n := len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite)); n != 0 {
+				t.Errorf("synthesis and citation requests = %d, want 0", n)
+			}
+		})
 	}
 }
 
