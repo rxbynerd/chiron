@@ -93,7 +93,7 @@ When this document says "worker" or "fleet", it means Chiron in-process code.
 | Area | Current state | Implementation requirement |
 | --- | --- | --- |
 | `internal/researcher` | `Researcher` is `Start` / `Await` / `Result`. | Worker and fleet satisfy this interface without changing it. |
-| `internal/researcher/fleet` | Wave 3 landed: `RunWorker` loop, `Worker` Researcher (`wkr_` ids), page reduction, action schema, tool-failure feedback; `--agent fleet` still returns `ErrNotImplemented`. | Build the Wave 4 lead over `RunWorker`; keep the not-implemented error meaningful until it lands. |
+| `internal/researcher/fleet` | Waves 3 and 4 landed: `RunWorker` loop, `Worker` Researcher (`wkr_` ids), page reduction, action schema, tool-failure feedback; the `Fleet` Researcher (`flt_` ids) with lead decomposition, external-web router, bounded worker pool, synthesis and citation pass, opt-in via `--agent fleet`. The eval gate against Gemini Deep Research is outstanding. | Keep the fleet opt-in and the single-call paths the default until the eval gate passes. |
 | `internal/run` | Pure core: start -> await -> result -> format -> emit. | No changes unless a design decision is re-opened. |
 | `internal/types` | Domain `Interaction`, `Output`, `Citation`, `Usage`, `Report`. | Worker/fleet map their output into these domain types, not provider wire types. |
 | `internal/memory` | Local `ContextStore` seam plus `Noop`. | Add in-memory binding for Wave 4; Paddock remains Wave 6. |
