@@ -64,12 +64,9 @@ func WithRawToolResult(raw string) FakeOption {
 }
 
 // WithExpectedTool makes the fake refuse a tools/call whose name is not
-// tool, or whose arguments lack queryArg, modelling a server that only
-// recognises its own tool and argument names — the shape a search.Client
-// pointed at the wrong fleet.search_tool/fleet.search_query_arg calls. A
-// tool-name mismatch fails as an unknown tool (a JSON-RPC error, as a real
-// server would refuse an unregistered tool); a present tool called under the
-// wrong argument key fails as a tool-level error.
+// tool, or whose arguments lack queryArg: a tool-name mismatch fails as a
+// JSON-RPC unknown-tool error; a present tool under the wrong argument key
+// fails as a tool-level error (docs/DECISIONS.md "SP-A").
 func WithExpectedTool(tool, queryArg string) FakeOption {
 	return func(f *FakeServer) { f.expectedTool, f.expectedQueryArg = tool, queryArg }
 }

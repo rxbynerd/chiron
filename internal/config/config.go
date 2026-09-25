@@ -529,11 +529,8 @@ func validKeyRef(field, ref string) error {
 
 // validIdentifier requires a non-empty MCP tool name or argument key
 // (fleet.search_tool, fleet.search_query_arg): letters, digits, underscore,
-// dot or hyphen only, at most maxSearchIdentifierLen bytes. Unlike
-// validEndpoint/validKeyRef, an unset value is not admitted — both fields
-// carry a documented default, so an empty value can only be an explicit
-// override that requires this check. The message never echoes the value,
-// which may carry a mistakenly pasted secret.
+// dot or hyphen only, at most maxSearchIdentifierLen bytes. The message
+// never echoes value, which may carry a pasted secret (docs/DECISIONS.md "SP-A").
 func validIdentifier(field, value string) error {
 	if value == "" || len(value) > maxSearchIdentifierLen || !searchIdentifier.MatchString(value) {
 		return fmt.Errorf("%s: must be a non-empty identifier of letters, digits, underscore, dot or hyphen, at most %d bytes", field, maxSearchIdentifierLen)
