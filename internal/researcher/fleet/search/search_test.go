@@ -154,6 +154,73 @@ func TestSearchProtocolVersionHeader(t *testing.T) {
 	}
 }
 
+func TestSearchReinitialisesAfterSessionExpiry(t *testing.T) {
+	// One session serves every search; when the server drops it, the next
+	// search re-initialises once and re-sends its call once.
+	want := []search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}}
+	fake := searchtest.NewFakeServer(want, searchtest.WithSessionID("sess-s"))
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	for range 2 {
+		if _, err := c.Search(context.Background(), "q"); err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+	}
+	if n := fake.InitializeCount(); n != 1 {
+		t.Fatalf("initialize count = %d after two searches, want 1", n)
+	}
+	fake.ExpireSession()
+	got, err := c.Search(context.Background(), "q")
+	if err != nil {
+		t.Fatalf("Search after the session expired: %v", err)
+	}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("results = %+v, want %+v", got, want)
+	}
+	// initialize, initialized, two tools/call; the expired tools/call;
+	// initialize, initialized and the re-sent tools/call.
+	if n := fake.CallCount(); n != 8 {
+		t.Errorf("request count = %d, want 8", n)
+	}
+	if n := fake.InitializeCount(); n != 2 {
+		t.Errorf("initialize count = %d, want 2", n)
+	}
+	if n := fake.ToolCallCount(); n != 4 {
+		t.Errorf("tools/call count = %d, want 4", n)
+	}
+}
+
+func TestSearchClose(t *testing.T) {
+	fake := searchtest.NewFakeServer(nil, searchtest.WithSessionID("sess-end"))
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	if _, err := c.Search(context.Background(), "q"); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	for range 2 {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}
+	if n := fake.DeleteCount(); n != 1 {
+		t.Fatalf("DELETE count = %d, want 1", n)
+	}
+	reqs := fake.Requests()
+	end := reqs[len(reqs)-1]
+	if end.HTTPMethod != http.MethodDelete || end.SessionID != "sess-end" {
+		t.Errorf("last request = %s on %q, want the session DELETE", end.HTTPMethod, end.SessionID)
+	}
+	if end.Authorization != "Bearer "+testKey || end.ProtocolVersion != mcpclient.ProtocolVersion {
+		t.Errorf("DELETE Authorization %q version %q, want the bearer key and %q", end.Authorization, end.ProtocolVersion, mcpclient.ProtocolVersion)
+	}
+	_, err := c.Search(context.Background(), "q")
+	if !errors.Is(err, mcpclient.ErrClosed) || !strings.HasPrefix(err.Error(), "search: ") {
+		t.Errorf("Search after Close = %v, want ErrClosed under the search: prefix", err)
+	}
+}
+
 func TestSearchUnsupportedProtocolVersion(t *testing.T) {
 	// A server choosing a revision the client does not implement fails the
 	// search before any billable tools/call.

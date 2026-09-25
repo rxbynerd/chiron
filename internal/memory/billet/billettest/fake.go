@@ -63,6 +63,12 @@ func WithToolError(text string) FakeOption {
 	return func(f *FakeServer) { f.toolError = text }
 }
 
+// WithSessionID makes the fake issue a session on initialize and require it
+// on every later request, modelling a stateful server.
+func WithSessionID(id string) FakeOption {
+	return func(f *FakeServer) { f.opts = append(f.opts, mcpclienttest.WithSessionID(id)) }
+}
+
 // WithRawResult makes every tools/call return raw verbatim as the result
 // member, for malformed-shape cases.
 func WithRawResult(raw string) FakeOption {
@@ -94,6 +100,17 @@ func (f *FakeServer) CallCount() int { return f.inner.CallCount() }
 
 // ToolCallCount reports the tools/call requests received.
 func (f *FakeServer) ToolCallCount() int { return f.inner.ToolCallCount() }
+
+// InitializeCount reports the initialize requests received: 1 per Client
+// lifetime unless a session ended.
+func (f *FakeServer) InitializeCount() int { return f.inner.InitializeCount() }
+
+// DeleteCount reports the session DELETE requests received.
+func (f *FakeServer) DeleteCount() int { return f.inner.DeleteCount() }
+
+// ExpireSession ends every session the fake has issued, so the next request
+// bearing one gets HTTP 404.
+func (f *FakeServer) ExpireSession() { f.inner.ExpireSession() }
 
 // SavedContents returns the content of every save_memory call, in order.
 func (f *FakeServer) SavedContents() []string {
