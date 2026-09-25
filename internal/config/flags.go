@@ -61,8 +61,8 @@ func RegisterFlags(fs *pflag.FlagSet) {
 
 	// Span forwarding. With none set, the OTEL_EXPORTER_OTLP_* variables
 	// still apply.
-	fs.String("otlp-endpoint", "", "OTLP/HTTP collector base URL for spans (absolute https://, http:// loopback only)")
-	fs.String("langfuse-endpoint", "", fmt.Sprintf("Langfuse OTLP base URL (absolute https://, http:// loopback only; %s when unset)", DefaultLangfuseEndpoint))
+	fs.String("otlp-endpoint", "", "OTLP/HTTP collector base URL for spans, for a collector that needs no request headers (absolute https://, http:// loopback only)")
+	fs.String("langfuse-endpoint", "", fmt.Sprintf("Langfuse OTLP base URL (absolute https://, http:// loopback only; Langfuse Cloud EU region, %s, when unset)", DefaultLangfuseEndpoint))
 	fs.String("langfuse-public-key-ref", "", "secret:// reference to the Langfuse public key (never a literal)")
 	fs.String("langfuse-secret-key-ref", "", "secret:// reference to the Langfuse secret key (never a literal)")
 }

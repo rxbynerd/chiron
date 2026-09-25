@@ -2,8 +2,8 @@ package config
 
 import "errors"
 
-// DefaultLangfuseEndpoint is the Langfuse Cloud OTLP base URL, used when
-// both Langfuse key references are set and no endpoint is given.
+// DefaultLangfuseEndpoint is the Langfuse Cloud EU region's OTLP base URL,
+// used when both Langfuse key references are set and no endpoint is given.
 const DefaultLangfuseEndpoint = "https://cloud.langfuse.com/api/public/otel"
 
 // TelemetryConfig names where a run's spans are forwarded: a generic OTLP
