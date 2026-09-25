@@ -518,6 +518,47 @@ func TestRecallRefusesRedirect(t *testing.T) {
 	}
 }
 
+func TestRecallOverridesCallerCheckRedirect(t *testing.T) {
+	// New must impose RefuseAllRedirects even when the caller's http.Client
+	// already carries a permissive policy, for every redirect including one
+	// that stays on the same origin.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	defer target.Close()
+
+	tests := []struct {
+		name     string
+		location func() string
+	}{
+		{name: "cross-origin", location: func() string { return target.URL + "/v1/search" }},
+		{name: "same-origin", location: func() string { return "/v1/search?moved=1" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRedirect(tt.location()))
+			defer fake.Close()
+			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
+				o.AccessClientID, o.AccessClientSecret = testAccessID, testAccessSecret
+				o.HTTPClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+			})
+
+			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
+			if err == nil || !strings.Contains(err.Error(), "redirect") {
+				t.Fatalf("err = %v, want a redirect refusal even though the caller's client permits redirects", err)
+			}
+			if n := len(fake.Requests()); n != 1 {
+				t.Errorf("fake requests = %d, want 1 (redirect not followed)", n)
+			}
+		})
+	}
+	if n := targetHits.Load(); n != 0 {
+		t.Errorf("redirect target received %d requests, want 0", n)
+	}
+}
+
 func TestRecallErrorStatuses(t *testing.T) {
 	echo := `{"error":"invalid token ` + testKey + `"}`
 	tests := []struct {

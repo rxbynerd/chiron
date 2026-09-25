@@ -398,6 +398,40 @@ func TestCallToolCrossHostRedirectRefused(t *testing.T) {
 	}
 }
 
+func TestCallToolCallerCheckRedirectOverridden(t *testing.T) {
+	// New must impose its own redirect policy even when the caller's
+	// http.Client already carries a permissive one.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer target.Close()
+
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
+	_, err := call(c)
+	if err == nil {
+		t.Fatal("CallTool should refuse the redirect even though the caller's client permits it")
+	}
+	if !strings.Contains(err.Error(), "cross-origin") {
+		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin hits = %d, want 1", got)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("target hits = %d, want 0", got)
+	}
+}
+
 func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
 	// net/http re-sends Authorization to the same hostname on any scheme, so
 	// an https endpoint redirecting to http on the same host must be refused
