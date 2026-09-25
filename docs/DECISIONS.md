@@ -1391,9 +1391,12 @@ deadline, so a hook that ignores its context costs at most that per turn; a
 hook that never returns leaves one goroutine parked per turn, bounded by the
 turn cap. A panic in the hook is recovered. Nothing the hook does can change
 the Finding, the usage, the caps or the exit path, and the CLI drops a
-marshal or emit failure. The binder hands `Emit` the delivery's context, so
-the stdio transport refuses an event whose deadline has passed rather than
-writing it late.
+marshal or emit failure. `Stdio.Emit` checks its context only once, before it
+locks the shared writer: once a write has started it runs to completion
+regardless of the deadline, and because every transport event shares that
+lock, a stalled stderr consumer can still strand an otherwise-complete run
+behind it. That gap predates this chunk and lives in `internal/transport`,
+not here; tracked in #38.
 
 **Ordered after the resume handle.** `Worker.Start` launches the loop before
 the run core emits `interaction_created`, so a fast first turn could report
@@ -1402,6 +1405,11 @@ first entered for that id (a per-run channel closed once), within the same
 deadline. A delivery still held at the deadline is dropped, never delivered
 late or reordered. Deliveries stay on the loop goroutine, so their order is
 the turn order. Direct `RunWorker` callers have no gate.
+
+**Citation URIs are out of scope here.** This chunk's `Progress.Detail`
+reduction is unrelated to, and unaffected by, citation rendering; whether a
+cited-but-never-fetched search result's URL needs the same userinfo/query
+stripping is tracked separately in #39.
 
 **`--quiet` suppresses them.** The hook is bound only when `cfg.Stream` is
 true, as `bindThoughtDisplay` is: `--quiet` turns the delta display surface
