@@ -197,14 +197,11 @@ func fleetDecomposition(t *testing.T, n int) string {
 	return string(b)
 }
 
-// newCLIFleetModel serves a fleet model whose decomposition yields briefs
+// newCLIFleetModel returns a fleet model whose decomposition yields briefs
 // briefs.
-func newCLIFleetModel(t *testing.T, briefs int) (*cliFleetModel, *httptest.Server) {
+func newCLIFleetModel(t *testing.T, briefs int) *cliFleetModel {
 	t.Helper()
-	m := &cliFleetModel{t: t, decompose: fleetDecomposition(t, briefs)}
-	srv := httptest.NewServer(m)
-	t.Cleanup(srv.Close)
-	return m, srv
+	return &cliFleetModel{t: t, decompose: fleetDecomposition(t, briefs)}
 }
 
 // fleetArgs returns the flags that point --agent fleet at the given fakes.
@@ -228,7 +225,9 @@ func fleetArgs(modelURL string, searchSrv *searchtest.FakeServer, extra ...strin
 // names each worker and flows only after the id is emitted, and the run's
 // usage is the lead's and workers' calls rolled up once.
 func TestFleetAgentThroughCLI(t *testing.T) {
-	fm, modelSrv := newCLIFleetModel(t, 3)
+	fm := newCLIFleetModel(t, 3)
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(fleetSources)
 	defer searchSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
@@ -319,7 +318,9 @@ func TestFleetAgentThroughCLI(t *testing.T) {
 // TestFleetTemplateShapesOnlyTheSynthesis: --template reaches the lead's
 // synthesis prompt, query substituted, and no worker's prompt.
 func TestFleetTemplateShapesOnlyTheSynthesis(t *testing.T) {
-	fm, modelSrv := newCLIFleetModel(t, 3)
+	fm := newCLIFleetModel(t, 3)
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(fleetSources)
 	defer searchSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
@@ -347,7 +348,9 @@ func TestFleetTemplateShapesOnlyTheSynthesis(t *testing.T) {
 // TestFleetFailedDecompositionExitCode: a decomposition outside the brief
 // bounds fails the run as a research outcome, and no worker runs.
 func TestFleetFailedDecompositionExitCode(t *testing.T) {
-	fm, modelSrv := newCLIFleetModel(t, 2)
+	fm := newCLIFleetModel(t, 2)
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(fleetSources)
 	defer searchSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
@@ -382,7 +385,9 @@ func TestFleetRefusedBeforeAnyRequest(t *testing.T) {
 		{"concurrency above workers", func(args []string) []string { return append(args, "--fleet-concurrency", "4") }, []string{"fleet.concurrency:"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fm, modelSrv := newCLIFleetModel(t, 3)
+			fm := newCLIFleetModel(t, 3)
+			modelSrv := httptest.NewServer(fm)
+			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(fleetSources)
 			defer searchSrv.Close()
 			t.Setenv("MODEL_KEY", "test-model-key")
