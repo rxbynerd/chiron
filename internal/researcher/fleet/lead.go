@@ -64,6 +64,11 @@ type leadDeps struct {
 	// synthesis's output-format block; nil selects the built-in format.
 	// Pass WorkerDeps.ReportTemplate: fleet workers never receive it.
 	ReportTemplate *ReportTemplate
+	// InputGBPPerMTok and OutputGBPPerMTok price the lead's own calls in the
+	// run's Usage. Pass the workers' Caps prices, so the whole run is priced
+	// alike; zero leaves the lead's share of the estimate at 0.
+	InputGBPPerMTok  float64
+	OutputGBPPerMTok float64
 }
 
 // lead is the fleet's orchestrator for one run.
