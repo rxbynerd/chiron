@@ -10,13 +10,10 @@ import (
 // original included, so at most two redirects are followed.
 const maxRedirectChain = 3
 
-// RefuseUnsafeRedirects is an http.Client CheckRedirect policy for a client
-// that sends a credential header. It follows a redirect only to the original
-// request's exact host (and port), never from an https original to a
-// non-https target, and never past maxRedirectChain requests. net/http
-// forwards custom headers to any redirect target and Authorization to any
-// target on the same hostname whatever its scheme, so a cross-host or
-// downgraded hop would hand the credential on (CWE-601, CWE-319).
+// RefuseUnsafeRedirects is a CheckRedirect policy for credential-bearing
+// clients. It follows a redirect only to the original host:port, never from
+// https to a non-https target, and within maxRedirectChain requests, because
+// net/http forwards credential headers to redirect targets (CWE-601, CWE-319).
 func RefuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 	first := via[0].URL
 	if req.URL.Host != first.Host {
@@ -31,9 +28,9 @@ func RefuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 	return nil
 }
 
-// RefuseAllRedirects is an http.Client CheckRedirect policy that follows no
-// redirect, for a client whose endpoint has no reason to redirect or whose
-// credentials include a custom header, which net/http forwards to any target.
+// RefuseAllRedirects is a CheckRedirect policy that follows no redirect, for
+// a client whose credentials include a custom header, which net/http forwards
+// to any target.
 func RefuseAllRedirects(req *http.Request, _ []*http.Request) error {
 	return fmt.Errorf("redirect to %s refused: credentials are never sent to a redirect target", req.URL.Host)
 }

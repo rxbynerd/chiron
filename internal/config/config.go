@@ -467,11 +467,8 @@ func (f FleetConfig) validateKnowledge() error {
 }
 
 // validEndpoint admits an unset endpoint (the composition root requires it)
-// and, when set, applies httpx.ParseEndpoint, the rule every
-// credential-bearing client and CHIRON_GEMINI_BASE_URL share. Credentials
-// are sent to whatever endpoint is configured, so a cleartext or internal
-// override would be a key-exfiltration and SSRF channel (CWE-918, CWE-319).
-// The message never echoes the raw value.
+// and otherwise applies httpx.ParseEndpoint: credentials go to whatever
+// endpoint is configured (CWE-918, CWE-319).
 func validEndpoint(field, raw string) error {
 	if raw == "" {
 		return nil

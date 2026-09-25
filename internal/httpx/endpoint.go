@@ -1,9 +1,7 @@
-// Package httpx holds the HTTP rules shared by every Chiron client that sends
-// a credential: which endpoints may receive it (ParseEndpoint, LoopbackHost),
-// which redirects may be followed (RefuseUnsafeRedirects, RefuseAllRedirects),
-// and how a response body is read under a bound (ReadAllBounded). It imports
-// only the standard library, so config, the CLI and every client can share
-// one copy.
+// Package httpx holds the HTTP rules every credential-bearing Chiron client
+// shares: which endpoints may receive a credential, which redirects may be
+// followed, and how a response body is read under a bound. It imports only
+// the standard library so config, the CLI and every client can use it.
 package httpx
 
 import (
@@ -24,19 +22,11 @@ func (e endpointError) Error() string { return string(e) }
 
 func (endpointError) Is(target error) bool { return target == ErrInvalidEndpoint }
 
-// ParseEndpoint parses and validates a URL that a credential will be sent to.
-// It admits an absolute https:// URL anywhere and an http:// URL only when
-// LoopbackHost admits its host, so a cleartext or internal-network endpoint
-// can never receive a key (CWE-918, CWE-319). The host must be non-empty, and
-// userinfo, a query and a fragment are refused, including a bare trailing '?'
-// or '#': a deployment origin carries none of them, and each is a place a
-// credential could hide.
-//
-// Error text names the URL by scheme and host only, never the raw value, and
-// withholds even those when the value contains '@', since a malformed URL can
-// carry credentials url.Parse does not recognise as userinfo. Each message
-// reads as a predicate, so callers prefix a subject: "model: endpoint ",
-// "CHIRON_GEMINI_BASE_URL ", or a config field name.
+// ParseEndpoint validates a URL a credential will be sent to: https anywhere,
+// http only when LoopbackHost admits the host, a non-empty host, and no
+// userinfo, query or fragment, not even a bare '?' or '#' (CWE-918, CWE-319).
+// Errors never echo the raw value and read as predicates, so callers prefix a
+// subject such as "model: endpoint " or a config field name.
 func ParseEndpoint(raw string) (*url.URL, error) {
 	if raw == "" {
 		return nil, endpointError("must not be empty")
@@ -55,12 +45,10 @@ func ParseEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// LoopbackHost reports whether host names this machine: exactly "localhost"
-// (lower-case, no trailing dot), or a literal address in 127.0.0.0/8 or ::1,
-// including the IPv4-mapped form of a 127.0.0.0/8 address. host is a bare
-// hostname as url.URL.Hostname returns it; a bracketed or port-qualified value
-// is not recognised. Any other name is refused even if it resolves to
-// loopback, because what a name resolves to is outside this check's control.
+// LoopbackHost reports whether host is exactly "localhost" or a literal
+// 127.0.0.0/8 or ::1 address, IPv4-mapped forms included. host is the bare
+// form url.URL.Hostname returns; any other name is refused whatever it
+// resolves to.
 func LoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true
@@ -80,7 +68,9 @@ func allowedScheme(u *url.URL) bool {
 	}
 }
 
-// describe names an endpoint in an error without echoing the raw value.
+// describe names an endpoint by scheme and host, withholding both when raw
+// contains '@': a malformed URL can carry credentials url.Parse does not
+// recognise as userinfo, and they can land in the host.
 func describe(raw string, u *url.URL) string {
 	switch {
 	case strings.Contains(raw, "@"):
