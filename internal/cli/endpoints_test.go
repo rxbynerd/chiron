@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -15,6 +19,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/secret"
+	"github.com/rxbynerd/chiron/internal/transport"
 )
 
 // countingResolver resolves every reference to one fixed key and counts the
@@ -285,5 +290,116 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 	}
 	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
 		t.Error("an invalid endpoint variable must not let the run dial anything")
+	}
+}
+
+// syncBuffer is a bytes.Buffer a test may read while the command writes it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// endpointsEvents returns the payloads of the delta events on stderr that
+// name the run's endpoints.
+func endpointsEvents(t *testing.T, stderr string) []string {
+	t.Helper()
+	var payloads []string
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		var ev transport.Event
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Kind != transport.KindDelta {
+			continue
+		}
+		if strings.HasPrefix(string(ev.Payload), `{"endpoints":`) {
+			payloads = append(payloads, string(ev.Payload))
+		}
+	}
+	return payloads
+}
+
+// TestWorkerEndpointsEventPrecedesFirstModelCall: a worker run emits exactly
+// one delta event naming its model, search and (with a provider) knowledge
+// destinations by scheme and host, before the first model call reaches the
+// wire; a token in an endpoint path never reaches stderr.
+func TestWorkerEndpointsEventPrecedesFirstModelCall(t *testing.T) {
+	const token = "sk-live-0123456789abcdefghijklmn"
+	for _, tt := range []struct {
+		name      string
+		knowledge bool
+	}{
+		{"with a knowledge provider", true},
+		{"without a knowledge provider", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stderr := &syncBuffer{}
+			var mu sync.Mutex
+			var atFirstCall *string
+			modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				if atFirstCall == nil {
+					snapshot := stderr.String()
+					atFirstCall = &snapshot
+				}
+				mu.Unlock()
+				body, _ := json.Marshal(map[string]any{
+					"choices": []map[string]any{{
+						"message":       map[string]string{"content": `{"action":"final","answer":"Rayleigh scattering.","citations":[]}`},
+						"finish_reason": "stop",
+					}},
+				})
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}))
+			defer modelSrv.Close()
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			kbSrv := billettest.NewFakeServer(nil)
+			defer kbSrv.Close()
+			clearEndpointEnv(t)
+
+			args := []string{
+				"research", "--query", "why is the sky blue", "--agent", "worker", "-o", "none",
+				"--fleet-model-endpoint", modelSrv.URL + "/" + token + "/v1",
+				"--fleet-model-name", "test-model",
+				"--fleet-model-key-ref", "secret://MODEL_KEY",
+				"--fleet-search-endpoint", searchSrv.URL() + "/" + token,
+			}
+			want := `{"endpoints":{"model":"` + modelSrv.URL + `","search":"` + searchSrv.URL() + `"}}`
+			if tt.knowledge {
+				args = append(args, "--fleet-knowledge-provider", "billet",
+					"--fleet-knowledge-endpoint", kbSrv.URL()+"/"+token+"/")
+				want = `{"endpoints":{"model":"` + modelSrv.URL + `","search":"` + searchSrv.URL() + `","knowledge":"` + kbSrv.URL() + `"}}`
+			}
+
+			if _, err := executeWith(t, &countingResolver{}, strings.NewReader(""), stderr, args...); err != nil {
+				t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
+			}
+			got := endpointsEvents(t, stderr.String())
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("endpoints events = %q, want exactly [%s]", got, want)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if atFirstCall == nil {
+				t.Fatal("the model was never called")
+			}
+			if len(endpointsEvents(t, *atFirstCall)) != 1 {
+				t.Errorf("the endpoints event was not on stderr when the first model call arrived:\n%s", *atFirstCall)
+			}
+			if strings.Contains(stderr.String(), token) {
+				t.Errorf("an endpoint path reached stderr:\n%s", stderr.String())
+			}
+		})
 	}
 }

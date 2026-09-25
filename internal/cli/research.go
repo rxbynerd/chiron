@@ -125,10 +125,10 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 
 // runWorkerResearch runs `chiron research --agent worker`: fill the fleet
 // endpoints no flag set from the environment, build the in-process worker
-// researcher from cfg.Fleet, then drive the unchanged run core. The
-// deep-research levers (--plan, --budget and the Gemini tool flags) are
-// rejected by config validation for this agent rather than ignored; the
-// worker's spend bounds are the fleet caps.
+// researcher from cfg.Fleet, name its destinations on the event stream, then
+// drive the unchanged run core. The deep-research levers (--plan, --budget
+// and the Gemini tool flags) are rejected by config validation for this
+// agent rather than ignored; the worker's spend bounds are the fleet caps.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
 	if err := applyEndpointEnv(&cfg.Fleet, cmd.Flags()); err != nil {
 		return err
@@ -139,6 +139,7 @@ func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver s
 			return err
 		}
 		defer func() { _ = sessions.Close() }()
+		emitEndpoints(ctx, deps.Transport, cfg.Fleet)
 		deps.Researcher = res
 		result, err := run.Run(ctx, deps, run.Params{
 			Query: cfg.Query,
