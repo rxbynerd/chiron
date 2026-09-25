@@ -107,6 +107,8 @@ type fleetState struct {
 	done      chan struct{}
 	outcome   fleetOutcome
 	completed time.Time
+
+	spendLogOnce sync.Once
 }
 
 var _ researcher.Researcher = (*Fleet)(nil)
@@ -274,9 +276,9 @@ func (f *Fleet) closeSession(ctx context.Context, id string, sess memory.Session
 }
 
 // Await implements researcher.Researcher and releases the run's held
-// progress. If ctx ends after the lead has concluded it returns nil; before
-// then it cancels the run, waits up to cancelUnwindGrace so no paid call
-// outlives it, and returns the context error.
+// progress. It returns nil once the lead has concluded. If ctx ends first, it
+// cancels the run and waits up to cancelUnwindGrace so no paid call outlives
+// it, then returns the context error. See logUnemittedSpend.
 func (f *Fleet) Await(ctx context.Context, id string) error {
 	st, err := f.state(id)
 	if err != nil {
@@ -285,11 +287,14 @@ func (f *Fleet) Await(ctx context.Context, id string) error {
 	st.awaitingOnce.Do(func() { close(st.awaiting) })
 	select {
 	case <-st.done:
-		return nil
 	case <-ctx.Done():
+	}
+	if ctx.Err() == nil {
+		return nil
 	}
 	select {
 	case <-st.concluded:
+		f.logUnemittedSpend(id, st)
 		return nil
 	default:
 	}
@@ -301,7 +306,29 @@ func (f *Fleet) Await(ctx context.Context, id string) error {
 	case <-st.done:
 	case <-grace.C:
 	}
+	select {
+	case <-st.concluded:
+		f.logUnemittedSpend(id, st)
+	default:
+	}
 	return fmt.Errorf("fleet: awaiting fleet run %s: %w", id, ctx.Err())
+}
+
+// logUnemittedSpend logs, once and at Warn, the recorded spend of a run whose
+// Await context has ended, since a report written on that context cannot be
+// emitted: the id, status, tokens, search count and estimated cost, never
+// report or finding text.
+func (f *Fleet) logUnemittedSpend(id string, st *fleetState) {
+	st.spendLogOnce.Do(func() {
+		u := st.outcome.Usage
+		f.deps.Worker.logger().Warn("fleet: the run's context ended, so its report is not emitted; its recorded spend follows",
+			"interaction_id", id,
+			"status", string(st.outcome.Status),
+			"input_tokens", u.InputTokens,
+			"output_tokens", u.OutputTokens,
+			"search_count", u.SearchCount,
+			"estimated_cost_gbp", u.EstimatedCostGBP)
+	})
 }
 
 // Result implements researcher.Researcher: map the run's outcome onto a

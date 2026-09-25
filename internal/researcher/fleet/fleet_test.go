@@ -1,10 +1,14 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
@@ -378,8 +382,9 @@ func TestFleetAwaitCancellationStopsEveryPaidCall(t *testing.T) {
 
 // TestFleetAwaitGraceBoundsTheUnwind: a store that stalls past the run's
 // cancellation cannot hold Await beyond its grace; Result then reports the
-// run still in progress. Once the store answers, the cancelled run
-// dispatches no worker and concludes.
+// run still in progress, and no spend is logged because none was recorded.
+// Once the store answers, the cancelled run dispatches no worker and
+// concludes.
 func TestFleetAwaitGraceBoundsTheUnwind(t *testing.T) {
 	fm := &fleetModel{
 		t:         t,
@@ -395,8 +400,10 @@ func TestFleetAwaitGraceBoundsTheUnwind(t *testing.T) {
 	defer searchSrv.Close()
 	store := newSessionStore()
 	store.putGate = make(chan struct{})
+	var logs bytes.Buffer
 	f := newTestFleet(t, modelSrv.URL, searchSrv, store, func(d *FleetDeps) {
 		d.unwindGraceOverride = 50 * time.Millisecond
+		d.Worker.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
 	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
@@ -427,11 +434,15 @@ func TestFleetAwaitGraceBoundsTheUnwind(t *testing.T) {
 	if n := len(fm.requestsOf(kindWorker)) + len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite)); n != 0 {
 		t.Errorf("model requests after the decomposition = %d, want 0", n)
 	}
+	if logs.Len() != 0 {
+		t.Errorf("Await logged with no outcome recorded when its context ended:\n%s", logs.String())
+	}
 }
 
 // TestFleetAwaitReturnsNilOnceConcluded: a context that ends after the lead
 // has concluded, while the session close is still running, does not turn a
-// paid, complete run into an error.
+// paid, complete run into an error, and the run's spend is logged once
+// because its report can no longer be emitted.
 func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
 	modelSrv := httptest.NewServer(syntheticFleetModel(t))
 	defer modelSrv.Close()
@@ -439,7 +450,10 @@ func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
 	defer searchSrv.Close()
 	store := newSessionStore()
 	store.closeGate = make(chan struct{})
-	f := newTestFleet(t, modelSrv.URL, searchSrv, store, nil)
+	var logs bytes.Buffer
+	f := newTestFleet(t, modelSrv.URL, searchSrv, store, func(d *FleetDeps) {
+		d.Worker.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
 	if err != nil {
@@ -467,6 +481,123 @@ func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
 	}
 	if in, _ := f.Result(context.Background(), id); in.Status != types.StatusCompleted {
 		t.Errorf("Result = %s (%s), want completed", in.Status, in.StatusDetail)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], `"interaction_id":"`+id+`"`) || !strings.Contains(lines[0], `"status":"completed"`) {
+		t.Errorf("log = %q, want one spend record for the completed run", logs.String())
+	}
+}
+
+// TestFleetAwaitLogsSpendWhenItsContextEnds: when Await's context ends while
+// the synthesis call is in flight, after every worker finished, Await
+// cancels the run, waits for it to conclude on the stitched findings and
+// returns the context error. It logs the run's rolled-up spend once, at
+// Warn, with no report or finding text, and no model request follows it.
+func TestFleetAwaitLogsSpendWhenItsContextEnds(t *testing.T) {
+	fm := syntheticFleetModel(t)
+	var synthesisCalls atomic.Int32
+	synthesisHeld := make(chan struct{})
+	modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read model request: %v", err)
+			return
+		}
+		if !bytes.Contains(body, []byte(`"response_format"`)) {
+			if synthesisCalls.Add(1) == 1 {
+				close(synthesisHeld)
+			}
+			<-r.Context().Done()
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		fm.ServeHTTP(w, r)
+	}))
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(syntheticSearchResults)
+	defer searchSrv.Close()
+	var logs bytes.Buffer
+	f := newTestFleet(t, modelSrv.URL, searchSrv, newSessionStore(), func(d *FleetDeps) {
+		d.Worker.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+		d.Worker.Caps.InputGBPPerMTok, d.Worker.Caps.OutputGBPPerMTok = 2, 10
+	})
+
+	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	awaitErr := make(chan error, 1)
+	go func() { awaitErr <- f.Await(ctx, id) }()
+	select {
+	case <-synthesisHeld:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the synthesis call never arrived")
+	}
+	cancel()
+	select {
+	case err = <-awaitErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Await did not return after its context was cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Await = %v, want the context error", err)
+	}
+	select {
+	case <-runState(t, f, id).done:
+	default:
+		t.Error("Await returned before the run unwound, so a paid call could outlive it")
+	}
+	if n := len(fm.requestsOf(kindWorker)); n != 6 {
+		t.Errorf("worker requests = %d, want every worker's two turns before synthesis", n)
+	}
+	if s, c := synthesisCalls.Load(), len(fm.requestsOf(kindCite)); s != 1 || c != 0 {
+		t.Errorf("synthesis and citation requests = %d and %d, want 1 and 0", s, c)
+	}
+	logged := logs.String()
+	if err := f.Await(ctx, id); err != nil {
+		t.Errorf("a second Await on the concluded run = %v, want nil", err)
+	}
+	if logs.String() != logged {
+		t.Errorf("a second Await logged again:\n%s", logs.String())
+	}
+
+	in, err := f.Result(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	wantIn, wantOut := 3*2*10+decomposeUsage.InputTokens, 3*2*5+decomposeUsage.OutputTokens
+	if in.Status != types.StatusIncomplete || in.Usage.InputTokens != wantIn || in.Usage.OutputTokens != wantOut || in.Usage.SearchCount != 3 {
+		t.Fatalf("Result = %s with usage %+v, want incomplete with %d/%d tokens and 3 searches", in.Status, in.Usage, wantIn, wantOut)
+	}
+
+	lines := strings.Split(strings.TrimSpace(logged), "\n")
+	if logged == "" || len(lines) != 1 {
+		t.Fatalf("log records when Await returned = %d, want exactly one:\n%s", len(lines), logged)
+	}
+	var rec struct {
+		Level         string  `json:"level"`
+		InteractionID string  `json:"interaction_id"`
+		Status        string  `json:"status"`
+		InputTokens   int     `json:"input_tokens"`
+		OutputTokens  int     `json:"output_tokens"`
+		SearchCount   int     `json:"search_count"`
+		CostGBP       float64 `json:"estimated_cost_gbp"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("decode log record: %v\n%s", err, lines[0])
+	}
+	if rec.Level != "WARN" || rec.InteractionID != id || rec.Status != string(types.StatusIncomplete) {
+		t.Errorf("log record = %+v, want a Warn naming %s and its incomplete status", rec, id)
+	}
+	if rec.InputTokens != wantIn || rec.OutputTokens != wantOut || rec.SearchCount != 3 ||
+		math.Abs(rec.CostGBP-in.Usage.EstimatedCostGBP) > 1e-12 || rec.CostGBP == 0 {
+		t.Errorf("logged spend = %+v, want the run's rollup %+v", rec, in.Usage)
+	}
+	for _, text := range []string{"three units of heat", "nine-tenths of its fuel", "Grants cover part"} {
+		if strings.Contains(logs.String(), text) {
+			t.Errorf("the log carries finding text %q:\n%s", text, logs.String())
+		}
 	}
 }
 

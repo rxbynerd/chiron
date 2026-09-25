@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -69,6 +72,10 @@ type fleetRequest struct {
 type cliFleetModel struct {
 	t         *testing.T
 	decompose string
+	// holdSynthesis, when set, is closed by the first synthesis request,
+	// which then gets no reply until its client gives up.
+	holdSynthesis chan struct{}
+	holdOnce      sync.Once
 
 	mu       sync.Mutex
 	requests map[string][]fleetRequest
@@ -110,6 +117,11 @@ func (m *cliFleetModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	m.requests[kind] = append(m.requests[kind], fleetRequest{System: system, Messages: len(body.Messages)})
 	m.mu.Unlock()
+	if kind == fleetKindSynthesise && m.holdSynthesis != nil {
+		m.holdOnce.Do(func() { close(m.holdSynthesis) })
+		<-r.Context().Done()
+		return
+	}
 
 	var content string
 	switch kind {
@@ -363,6 +375,91 @@ func TestFleetFailedDecompositionExitCode(t *testing.T) {
 	}
 	if n := searchSrv.CallCount(); n != 0 {
 		t.Errorf("search calls = %d, want 0", n)
+	}
+}
+
+// executeContext is execute with ctx as the command's context. Ending ctx
+// ends the run's context, as its --timeout deadline does.
+func executeContext(ctx context.Context, t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	root := NewRootCommand()
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(strings.NewReader(""))
+	root.SetArgs(args)
+	err = root.ExecuteContext(ctx)
+	return out.String(), errBuf.String(), err
+}
+
+var loggedCost = regexp.MustCompile(`estimated_cost_gbp=(\S+)`)
+
+// TestFleetRunEndedDuringSynthesisLogsSpend: when the run's context ends
+// while synthesis is in flight, after every worker finished, no report
+// reaches stdout and the run fails as a usage error; stderr carries the
+// run's rolled-up spend, workers included, with no finding text, and no
+// citation call is made.
+func TestFleetRunEndedDuringSynthesisLogsSpend(t *testing.T) {
+	fm := newCLIFleetModel(t, 3)
+	fm.holdSynthesis = make(chan struct{})
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(fleetSources)
+	defer searchSrv.Close()
+	t.Setenv("MODEL_KEY", "test-model-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-fm.holdSynthesis:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	stdout, stderr, err := executeContext(ctx, t, fleetArgs(modelSrv.URL, searchSrv,
+		"--fleet-price-input", "2", "--fleet-price-output", "10")...)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the run's context error\nstderr: %s", err, stderr)
+	}
+	if _, ok := errors.AsType[*ExitError](err); ok {
+		t.Errorf("a run whose context ended is a usage error, not a research outcome: %v", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want no report", stdout)
+	}
+
+	var spend string
+	for line := range strings.Lines(stderr) {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "recorded spend") {
+			spend = line
+		}
+	}
+	id := regexp.MustCompile(`interaction_id=(flt_[0-9a-f]{32})`).FindStringSubmatch(spend)
+	if id == nil || !strings.Contains(stderr, `{"interaction_id":"`+id[1]+`"}`) {
+		t.Fatalf("stderr lacks a spend line naming the emitted interaction id:\n%s", stderr)
+	}
+	wantIn, wantOut := 100+6*10, 40+6*5
+	for _, want := range []string{"status=incomplete", fmt.Sprintf("input_tokens=%d", wantIn), fmt.Sprintf("output_tokens=%d", wantOut), "search_count=3"} {
+		if !strings.Contains(spend, want) {
+			t.Errorf("spend line lacks %s: %s", want, spend)
+		}
+	}
+	cost := loggedCost.FindStringSubmatch(spend)
+	wantCost := float64(wantIn*2+wantOut*10) / 1e6
+	if cost == nil {
+		t.Fatalf("spend line lacks the estimated cost: %s", spend)
+	}
+	if got, err := strconv.ParseFloat(cost[1], 64); err != nil || math.Abs(got-wantCost) > 1e-12 {
+		t.Errorf("logged cost = %s, want %v", cost[1], wantCost)
+	}
+	if strings.Contains(stderr, "Finding 1.") {
+		t.Errorf("stderr carries finding text:\n%s", stderr)
+	}
+	for kind, want := range map[string]int{fleetKindWorker: 6, fleetKindSynthesise: 1, fleetKindCite: 0} {
+		if got := len(fm.requestsOf(kind)); got != want {
+			t.Errorf("%s requests = %d, want %d", kind, got, want)
+		}
 	}
 }
 
