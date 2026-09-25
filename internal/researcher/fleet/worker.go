@@ -23,18 +23,18 @@ import (
 // Brief is one unit of work for a worker: the objective to research and the
 // shape of the answer expected. Blank fields fall back to instructive defaults
 // (worker_prompt.go), so a minimally-populated Brief still produces a coherent
-// prompt.
+// prompt. The JSON names match the lead's decomposition schema.
 type Brief struct {
 	// Objective is the research question or subtask the worker must answer.
-	Objective string
+	Objective string `json:"objective"`
 	// OutputFormat describes the shape the finding should take (e.g. a short
 	// Markdown synthesis, a comparison table). Blank selects a default.
-	OutputFormat string
+	OutputFormat string `json:"output_format"`
 	// SourceGuidance steers which sources to prefer. Blank selects a default.
-	SourceGuidance string
+	SourceGuidance string `json:"source_guidance"`
 	// Boundaries constrains scope (what to include or exclude). Blank selects a
 	// default.
-	Boundaries string
+	Boundaries string `json:"boundaries"`
 }
 
 // Finding is the outcome of one worker run: the synthesised prose, the sources

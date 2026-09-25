@@ -1612,3 +1612,122 @@ values through `secret.Scrub`, so no tracer changed; a JSONL test proves
 a Langfuse key pair set as span attributes never reaches the trace file,
 and a second JSONL test proves the same for a Basic pair set as a
 header-shaped attribute's value alone.
+
+## 2026-09-25 — Fleet lead decomposition and the external-web router
+
+Issue #20. The fleet lead's first step (V2-RESEARCH-AGENT §6, lead flow
+steps 2 and 3) splits the user's question into worker briefs and persists
+the plan by reference. The router decides what runs each brief. Both live
+in `internal/researcher/fleet` (`lead.go`, `lead_prompt.go`, `router.go`).
+Neither is wired to `--agent fleet` yet: `Fleet` still returns
+`ErrNotImplemented` until the pool, synthesis and citation pass land. No
+new dependency was introduced.
+
+**One structured call, strict schema.** The lead makes one call to the
+model client it shares with its workers, with provider-native structured
+output. The schema is an object with one `briefs` array, `minItems` 3 and
+`maxItems` 5. Each item carries exactly `objective`, `output_format`,
+`source_guidance`, `boundaries` and `target`, all required strings, with
+`additionalProperties: false` at every level. `model.ValidateStrictSchema`
+and a byte-for-byte snapshot (`testdata/lead-decompose-schema.json`) pin
+it. OpenAI's structured-outputs guide
+(https://platform.openai.com/docs/guides/structured-outputs, read
+2026-09-25) lists `minItems` and `maxItems` as supported array keywords,
+except on fine-tuned models, where a strict request carrying them is
+rejected. `ValidateStrictSchema` checks only the two structural rules, so
+the fake accepts them either way. A fine-tuned model would therefore fail
+every decompose call with a 400, and dropping the two keywords is the fix
+if one is ever configured. An OpenAI-compatible server that ignores them
+loses nothing, because the range is enforced in Go regardless. The call
+carries a completion cap of 16,384 tokens by default, which leaves room
+for a reasoning model's reasoning tokens. The prompt restates the fields,
+the range, the per-field bounds and what a worker can do (search, fetch
+and, when configured, recall), and asks for briefs that do not overlap. A
+query over 32 KiB (`maxLeadQueryBytes`) is refused before this call runs,
+so an oversized query is never billed.
+
+**A brief cannot add capabilities.** Neither the schema nor `Brief` has a
+field that names tools or actions, and the strict decode refuses any
+property name that does not match one of the five declared fields. A
+decomposition that carries `tools`, `allowed_actions` or any other extra
+property is therefore refused before any worker spends. (`encoding/json`'s
+case-insensitive field matching still accepts a case-folded or duplicate
+variant of a declared name; that maps to the same field, so it opens no new
+one.) The worker's action schema is unchanged, so its closed vocabulary is
+the only thing that decides what a worker can do.
+
+**Validation before dispatch.** Every check runs before `decompose`
+returns, so a caller has nothing to dispatch when one fails. The reply is
+decoded with unknown fields and trailing content rejected. A reply cut off
+at the cap (`finish_reason: "length"`), refused by the model's content
+filter (`finish_reason: "content_filter"`), an empty reply, invalid JSON, a
+count outside 3 to 5, a blank field, an unknown field or a target the
+router cannot dispatch is `ErrInvalidPlan`. An unroutable target also
+matches `ErrUnroutableTarget`; its message, like the JSON-decode failure's,
+is scrubbed, defanged and bounded, because both can carry text from the
+model reply. A refused reply still returns its usage, because it was
+billed. Briefs take stable ids by position (`brief-1` to `brief-5`) for the
+delegate spans and the pool.
+
+**Truncation, not refusal, for verbosity.** Each field is trimmed,
+defanged, and then cut to its byte bound at a rune boundary with the
+worker's existing `boundBytes`. The bounds are 1 KiB for `objective`,
+`source_guidance` and `boundaries`, and 2 KiB for `output_format`.
+Defanging first means its expansion cannot push a field past its bound. A
+cut is recorded on the brief (`truncated`), logged, and counted on the
+span as `truncated_fields`. It does not fail the run, because a verbose
+but valid plan is still usable, and every worker re-sends its brief on
+each turn, so the bound is a spend bound too.
+
+**The decompose call is never retried.** The model client makes one
+attempt and the lead adds no retry, so a 5xx, a 429 or a transport error
+is `ErrDecomposeCall` after exactly one request. The error wraps the
+context error when the context ended. For every refused reply, every
+failed call status and every failed `Put`, tests assert that the fake
+model saw exactly one request and that no worker or search call followed.
+
+**Every brief field is defanged where it is rendered.** The 2026-09-25
+"Worker report-format template" entry noted that only the output-format
+block was defanged, which was safe only while every `Brief` was operator
+text. The lead now writes `Brief` values from a model reply.
+`buildSystemPrompt` now defangs every field it renders, and the lead also
+defangs each field when it parses the reply, so the persisted plan
+carries no `<<` either. `defang` is idempotent and touches only `<<`, so
+no worker golden changed. `decomposeInSpan` trims and defangs the query
+once, into a single sanitized value it sends both to the model, between
+`<<<BEGIN RESEARCH QUESTION>>>` and `<<<END RESEARCH QUESTION>>>` markers
+it therefore cannot forge, and to `persistPlan`, so the persisted `query`
+carries no `<<` either.
+
+**The router is a table with one live row.** `router` maps a `Target` to
+a dispatch with `RunWorker`'s signature, `(ctx, WorkerDeps, Brief) ->
+Finding`. The bounded pool, which lands next, calls it per brief and
+never calls `RunWorker` directly. The live table has one row,
+`external_web` to `RunWorker`. Any other target is refused with
+`*UnroutableTargetError`, which matches `ErrUnroutableTarget` under
+`errors.Is`. The managed deep-research agent is never a row. It stays a
+top-level `--agent`, so a fleet run only ever dispatches Chiron's own
+workers (D2). The internal-source branch (repository MCP, Gemini
+`file_search`) is deliberately absent (D5). Adding it means a new
+`Target` constant, one row, and the new value in the schema's `target`
+enum. A test ties that enum to the table's keys, so the schema cannot
+offer a target the router refuses.
+
+**The plan is persisted by reference.** The lead writes the plan to the
+run's `ContextStore` session as JSON before `decompose` returns, with the
+name `fleet-plan.json` and media type `application/json`. The JSON holds a
+`kind` (`"fleet_plan"`) and `version` (`1`) discriminator alongside the
+query and the planned briefs, so the artifact describes itself and a
+strict decode of unrelated JSON as a `planDocument` fails instead of
+silently zero-filling it: a reader recovering a run from the store needs
+no other context. Identity lives in the body rather than the meta, because
+`InMemory` coalesces
+identical content and keeps the first write's meta. A `Put` failure, such
+as a closed session or an artifact over the bound, fails `decompose` after
+its one call and before any worker runs, with a scrubbed and bounded
+message; `ContextStore` is a seam a remote implementation could back with
+a large echoed body, so the failure keeps the store's error reachable via
+`errors.Is`/`errors.As` while capping what the message repeats. The step
+runs under one `decompose` span carrying `brief_count`, the call's
+`input_tokens` and `output_tokens`, `truncated_fields` and `status`. A
+failure ends the span with a scrubbed, bounded error.
