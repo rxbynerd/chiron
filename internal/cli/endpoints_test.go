@@ -293,6 +293,78 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 	}
 }
 
+// TestResearchConfigRefusesEndpointFlags: research-config never emits a
+// fleet endpoint, since its output is the next stage's base config; the
+// error points at the final-stage flag and the environment variable.
+func TestResearchConfigRefusesEndpointFlags(t *testing.T) {
+	for _, e := range config.FleetEndpoints(&config.FleetConfig{}) {
+		t.Run(e.Flag, func(t *testing.T) {
+			stdout, _, err := execute(t, "research-config", "--agent", "worker", "--"+e.Flag, "https://gateway.example/v1")
+			if err == nil {
+				t.Fatalf("research-config emitted an endpoint:\n%s", stdout)
+			}
+			for _, want := range []string{"--" + e.Flag, e.Env, "final chiron research stage"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q lacks %q", err, want)
+				}
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want nothing emitted", stdout)
+			}
+		})
+	}
+}
+
+// TestWorkerPipelineTakesEndpointsAtTheFinalStage: a research-config stage
+// carries the worker's key references and caps but no endpoint, and the final
+// research stage takes the endpoints from its environment or its own flags.
+func TestWorkerPipelineTakesEndpointsAtTheFinalStage(t *testing.T) {
+	clearEndpointEnv(t)
+	first, _, err := execute(t, "research-config", "--agent", "worker",
+		"--fleet-model-name", "test-model",
+		"--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-max-turns", "3",
+	)
+	if err != nil {
+		t.Fatalf("first stage: %v", err)
+	}
+	if strings.Contains(first, "_endpoint") {
+		t.Fatalf("the emitted config names an endpoint:\n%s", first)
+	}
+
+	for _, tt := range []struct {
+		name string
+		env  bool
+	}{
+		{"environment", true},
+		{"final-stage flags", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(finalReply)
+			defer modelSrv.Close()
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			clearEndpointEnv(t)
+			args := []string{"research", "--query", "why is the sky blue", "-o", "none"}
+			if tt.env {
+				t.Setenv(config.EnvFleetModelEndpoint, modelSrv.URL())
+				t.Setenv(config.EnvFleetSearchEndpoint, searchSrv.URL())
+			} else {
+				args = append(args, "--fleet-model-endpoint", modelSrv.URL(), "--fleet-search-endpoint", searchSrv.URL())
+			}
+
+			resolver := &countingResolver{}
+			var stderr bytes.Buffer
+			if _, err := executeWith(t, resolver, pipedStdin(t, first), &stderr, args...); err != nil {
+				t.Fatalf("final stage: %v\nstderr: %s", err, stderr.String())
+			}
+			if modelSrv.CallCount() != 1 || resolver.calls.Load() != 1 {
+				t.Errorf("model calls %d, resolver calls %d; want the piped worker run to reach the model once", modelSrv.CallCount(), resolver.calls.Load())
+			}
+		})
+	}
+}
+
 // syncBuffer is a bytes.Buffer a test may read while the command writes it.
 type syncBuffer struct {
 	mu  sync.Mutex

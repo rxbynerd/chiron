@@ -73,9 +73,19 @@ result as JSON. Composable in a pipeline:
 
   chiron research-config --agent deep-research-max \
     | chiron research-config --visualise \
-    | chiron research --query "..." --out report.md`,
+    | chiron research --query "..." --out report.md
+
+The fleet endpoints never travel through a pipeline: the next stage
+refuses a base config that names one, so --fleet-model-endpoint,
+--fleet-search-endpoint and --fleet-knowledge-endpoint are refused here.
+Give them to the final chiron research stage as flags, or set
+CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
+CHIRON_FLEET_KNOWLEDGE_ENDPOINT for it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := refuseEndpointFlags(cmd.Flags()); err != nil {
+				return err
+			}
 			cfg, err := resolveConfig(cmd, nil)
 			if err != nil {
 				return err
