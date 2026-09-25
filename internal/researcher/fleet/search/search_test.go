@@ -99,6 +99,24 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 	}
 }
 
+func TestSearchWrongQueryArgKeyIsToolError(t *testing.T) {
+	// A server that recognises the tool name but not the query argument key
+	// fails as a tool-level error, distinct from an unknown-tool JSON-RPC
+	// error: the fake's tool-name check passes ("search" matches the
+	// client's default) but its argument-key check does not.
+	fake := searchtest.NewFakeServer(nil, searchtest.WithExpectedTool("search", "notquery"))
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	_, err := c.Search(context.Background(), "q")
+	if err == nil {
+		t.Fatal("Search should fail when the tool rejects the query argument key")
+	}
+	if !strings.Contains(err.Error(), `missing required argument "notquery"`) {
+		t.Errorf("error = %v, want the tool's missing-argument text surfaced", err)
+	}
+}
+
 func TestSearchSessionReused(t *testing.T) {
 	// A stateful server assigns a session on initialize and requires it on
 	// tools/call; the client echoes it on every later request and reuses it
