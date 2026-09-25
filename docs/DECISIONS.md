@@ -1946,6 +1946,16 @@ introduce a variant of a URL no worker fetched. Every other URL is dropped
 and counted as `dropped_citations` on the span. Kept citations are
 deduplicated in first attribution order and carry the worker's title,
 cleaned by `citationTitle`, never a title from the model.
+
+**Left-out sources are counted, not policed.** Any non-empty attributed
+subset completes the pass, so an injected finding could steer the model to
+attribute every claim to one page and shrink the report's sources to it.
+The `cite` span therefore records `unattributed_sources`: the worker sources
+missing from the emitted list, zero when the pass falls back to every
+worker citation. The count only makes such a shrink visible in the trace.
+It changes no status, and there is no coverage threshold, because a report
+that rests on a few of many consulted sources is ordinary, and a threshold
+would mark it Incomplete.
 The pass falls back to the deduplicated union of every worker citation, and
 is Incomplete, on a failed call, a reply that is cut off, filtered or
 invalid, or a reply that attributes no worker source. Claims are not
