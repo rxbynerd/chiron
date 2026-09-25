@@ -974,3 +974,91 @@ func TestSessionIDNeverInErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestCallToolInvalidSessionIDRefused(t *testing.T) {
+	// A session id must be at most 1024 bytes of visible ASCII. Any other
+	// fails the handshake at initialize, and the id is never echoed: not on a
+	// later request, not in a DELETE, not in the error.
+	tests := []struct {
+		name string
+		id   string
+	}{
+		{"over 1024 bytes", strings.Repeat("s", 1025)},
+		{"contains a space", "sess 1"},
+		{"contains a tab", "sess\t1"},
+		{"non-ASCII", "sess-é"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID(tt.id))
+			defer fake.Close()
+
+			c := newClient(t, fake.URL())
+			for i := range 2 {
+				_, err := call(c)
+				if err == nil || !strings.Contains(err.Error(), "invalid Mcp-Session-Id") {
+					t.Fatalf("call %d error = %v, want the session id refused", i+1, err)
+				}
+				if strings.Contains(err.Error(), tt.id) {
+					t.Errorf("call %d error carries the session id", i+1)
+				}
+			}
+			if err := c.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			for i, r := range fake.Requests() {
+				if r.HTTPMethod != http.MethodPost || r.Method != "initialize" || r.SessionID != "" {
+					t.Errorf("request[%d] = %s %q with session %.32q, want only initialize without a session", i, r.HTTPMethod, r.Method, r.SessionID)
+				}
+			}
+			if n := fake.InitializeCount(); n != 2 {
+				t.Errorf("initialize count = %d, want 2", n)
+			}
+		})
+	}
+
+	t.Run("1024 bytes accepted", func(t *testing.T) {
+		id := strings.Repeat("s", 1024)
+		fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID(id))
+		defer fake.Close()
+
+		c := newClient(t, fake.URL())
+		if _, err := call(c); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		reqs := fake.Requests()
+		if len(reqs) != 4 {
+			t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
+		}
+		for i, r := range reqs[1:] {
+			if r.SessionID != id {
+				t.Errorf("request[%d] (%s %s) did not echo the 1024-byte session id", i+1, r.HTTPMethod, r.Method)
+			}
+		}
+	})
+
+	t.Run("oversized id on a failed initialize", func(t *testing.T) {
+		var deletes deleteLog
+		id := strings.Repeat("s", 1025)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				deletes.record(w, r)
+				return
+			}
+			w.Header().Set("Mcp-Session-Id", id)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer server.Close()
+
+		_, err := call(newClient(t, server.URL))
+		if err == nil || !strings.Contains(err.Error(), "initialize failed: HTTP 500") {
+			t.Fatalf("error = %v, want the initialize failure", err)
+		}
+		if got := deletes.sessions(); len(got) != 0 {
+			t.Errorf("sent %d DELETEs, want none for a session id that is never echoed", len(got))
+		}
+	})
+}

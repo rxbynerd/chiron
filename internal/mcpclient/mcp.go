@@ -56,8 +56,10 @@ func (c *Client) establish(ctx context.Context) (session, error) {
 // initialize performs the MCP initialize request and returns the session for
 // later requests: any Mcp-Session-Id the server assigned (empty when the
 // server is stateless) and the protocol version it chose, which must be a
-// supported one. On failure the returned session still carries any issued id,
-// with no protocol version, so the caller can end it.
+// supported one. An issued id that fails validSessionID fails the handshake
+// and is dropped, so it is never echoed. On any other failure the returned
+// session still carries the issued id, with no protocol version, so the
+// caller can end it.
 func (c *Client) initialize(ctx context.Context) (session, error) {
 	id := c.nextID()
 	rpc, sessionID, err := c.doRequest(ctx, session{}, rpcRequest{
@@ -70,6 +72,12 @@ func (c *Client) initialize(ctx context.Context) (session, error) {
 			ClientInfo:      clientInfo{Name: c.clientName, Version: c.clientVersion},
 		},
 	})
+	if !validSessionID(sessionID) {
+		if err == nil {
+			err = errInvalidSessionID
+		}
+		return session{}, err
+	}
 	sess := session{id: sessionID}
 	if err != nil {
 		return sess, err
