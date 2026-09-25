@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -109,5 +110,27 @@ func TestFleetEndpointsMatchFlagsAndKeys(t *testing.T) {
 				t.Errorf("Env = %q, want the CHIRON_FLEET_ namespace", e.Env)
 			}
 		})
+	}
+}
+
+// TestFleetEndpointsCoverEveryDestinationField: every FleetConfig field whose
+// name or key suggests a destination is in FleetEndpoints, so DecodeBase
+// refuses it in a base config and the environment fallback can supply it.
+func TestFleetEndpointsCoverEveryDestinationField(t *testing.T) {
+	covered := map[string]bool{}
+	for _, e := range FleetEndpoints(&FleetConfig{}) {
+		covered[strings.TrimPrefix(e.Field, "fleet.")] = true
+	}
+	namesDestination := func(s string) bool {
+		s = strings.ToLower(s)
+		return strings.Contains(s, "endpoint") || strings.Contains(s, "url") || strings.Contains(s, "host")
+	}
+	ty := reflect.TypeOf(FleetConfig{})
+	for i := 0; i < ty.NumField(); i++ {
+		f := ty.Field(i)
+		key := strings.Split(f.Tag.Get("yaml"), ",")[0]
+		if (namesDestination(f.Name) || namesDestination(key)) && !covered[key] {
+			t.Errorf("FleetConfig.%s (fleet.%s) names a destination but is not in FleetEndpoints", f.Name, key)
+		}
 	}
 }

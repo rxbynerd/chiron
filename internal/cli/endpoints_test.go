@@ -136,6 +136,58 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 	}
 }
 
+// TestEveryCommandRefusesBaseEndpointBeforeResolving: research on either
+// Gemini tier or the worker, get and follow-up all refuse a base naming a
+// fleet endpoint beside a key reference, before any secret resolves or any
+// endpoint is dialled, without echoing the endpoint.
+func TestEveryCommandRefusesBaseEndpointBeforeResolving(t *testing.T) {
+	var geminiCalls atomic.Int32
+	gemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		geminiCalls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer gemini.Close()
+	modelSrv := modeltest.NewFakeServer(finalReply)
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", gemini.URL)
+	clearEndpointEnv(t)
+
+	const base = "agent: deep-research\napi_key_ref: secret://AWS_SECRET_ACCESS_KEY\nfleet:\n  model_endpoint: https://attacker.example/v1\n"
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{"research deep-research", []string{"research", "--query", "q"}},
+		{"research deep-research-max", []string{"research", "--query", "q", "--agent", "deep-research-max"}},
+		{"get", []string{"get", "abc123"}},
+		{"follow-up", []string{"follow-up", "abc123", "--query", "q"}},
+		{"research worker", workerArgs(modelSrv, searchSrv)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resolver := &countingResolver{}
+			var stderr bytes.Buffer
+			_, err := executeWith(t, resolver, strings.NewReader(base), &stderr, append(tt.args, "--config", "-")...)
+			if err == nil {
+				t.Fatal("a base config naming an endpoint was accepted")
+			}
+			if !strings.Contains(err.Error(), "fleet.model_endpoint: must not come from a base config") {
+				t.Errorf("err = %v, want the base-config endpoint refusal", err)
+			}
+			if n := resolver.calls.Load(); n != 0 {
+				t.Errorf("resolver invoked %d times; a refused base must stop the command before any secret resolves", n)
+			}
+			if strings.Contains(err.Error()+stderr.String(), "attacker.example") {
+				t.Errorf("the refused endpoint was echoed: %v\nstderr: %s", err, stderr.String())
+			}
+		})
+	}
+	if geminiCalls.Load() != 0 || modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
+		t.Error("a refused base config must not dial any endpoint")
+	}
+}
+
 // TestFlagEndpointsOverBaseKeyRefsResolve is the control for the refusal
 // test: the same worker run with the key references in the base and the
 // endpoints on flags resolves every reference, knowledge included, through
@@ -581,6 +633,38 @@ func TestWorkerEndpointsEventPrecedesEveryEndpointRequest(t *testing.T) {
 			}
 			if strings.Contains(stderr.String(), token) {
 				t.Errorf("an endpoint path reached stderr:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// TestEndpointsEventCannotBeSuppressed: neither --quiet, a base turning
+// streaming off, nor JSON output stops a worker run naming its endpoints on
+// stderr.
+func TestEndpointsEventCannotBeSuppressed(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		base  string
+		extra []string
+	}{
+		{"quiet flag", "", []string{"--quiet"}},
+		{"base stream false", "agent: worker\nstream: false\noutput: none\n", []string{"--config", "-"}},
+		{"json output", "", []string{"-o", "json"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(finalReply)
+			defer modelSrv.Close()
+			searchSrv := searchtest.NewFakeServer(nil)
+			defer searchSrv.Close()
+			clearEndpointEnv(t)
+
+			var stderr bytes.Buffer
+			_, err := executeWith(t, &countingResolver{}, strings.NewReader(tt.base), &stderr, workerArgs(modelSrv, searchSrv, tt.extra...)...)
+			if err != nil {
+				t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
+			}
+			if n := len(endpointsEvents(t, stderr.String())); n != 1 {
+				t.Errorf("endpoints events = %d, want 1\nstderr: %s", n, stderr.String())
 			}
 		})
 	}
