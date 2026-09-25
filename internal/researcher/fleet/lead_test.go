@@ -759,8 +759,8 @@ func TestDecomposePersistFailureFailsThePlan(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
-			if len(plan.Briefs) != 0 || findings != nil || dispatched != 0 {
-				t.Errorf("a failed persist yielded briefs=%v findings=%v dispatched=%d", plan.Briefs, findings, dispatched)
+			if len(plan.Briefs) != 0 || findings != nil || dispatched != 0 || searchSrv.CallCount() != 0 {
+				t.Errorf("a failed persist yielded briefs=%v findings=%v dispatched=%d searches=%d", plan.Briefs, findings, dispatched, searchSrv.CallCount())
 			}
 			if n := modelSrv.CallCount(); n != 1 {
 				t.Errorf("model calls = %d, want 1", n)
