@@ -478,8 +478,10 @@ prints the fields automatically.
 ## 8. Security
 
 - The knowledge endpoint and key ref are as sensitive as the search pair:
-  the key travels to whatever endpoint the config names. Same validation,
-  same never-echo rule, same header-only carriage, same scrubbing.
+  the key travels to whatever endpoint the flag or
+  `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` names; a base config naming one is
+  refused. Same validation, same never-echo rule, same header-only
+  carriage, same scrubbing.
 - Recall results and remembered content are untrusted data inside the
   fence; nothing in a hit can become an instruction or close the fence.
 - Save-back sends the finding, which was built from public-web content, to

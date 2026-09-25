@@ -146,10 +146,11 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   endpoints, so the flag and the variable are their only sources. Values
   are validated at startup: absolute `https://` required, `http://`
   admitted for loopback hosts only, and userinfo, a query or a fragment
-  refused (`internal/httpx`); the error names the variable, never the
-  value. Read only at the composition root on the worker path, the
-  knowledge variable only with a knowledge provider. Treat them as
-  operator-supplied deployment configuration, never a user-settable knob.
+  refused (`internal/httpx`); the error names the variable and at most the
+  value's scheme and host, never its path, query or credentials. Read only
+  at the composition root on the worker path, the knowledge variable only
+  with a knowledge provider. Treat them as operator-supplied deployment
+  configuration, never a user-settable knob.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` —
   standard OTel configuration; binding either sends spans carrying
   research queries and interaction ids to the named collector. The

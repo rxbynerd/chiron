@@ -1627,11 +1627,14 @@ reads every base through it, so the refusal happens at load time: before
 `ApplyFlags`, before validation and before any `secret.Resolve`. Because
 the check runs on the decoded base alone, a flag setting the same endpoint
 does not rescue a base that names one. Key references may still live in a
-base: with the destination chosen by the operator, a reference alone can
-at worst send the wrong operator-held secret to the operator's own
-provider. `config.FleetEndpoints` is the one table of field, flag and
-variable, shared by the refusal, the environment fallback and the
-`research-config` check.
+base. The operator chooses every destination, but a reference still
+chooses which secret goes there: any variable or file the process can read
+is sent to whichever party controls the endpoint, which for a keyless or
+community search or knowledge server may be a third party the operator
+does not control. A base config must therefore be trusted as much as the
+environment it resolves against. `config.FleetEndpoints` is the one table
+of field, flag and variable, shared by the refusal, the environment
+fallback and the `research-config` check.
 
 **Why not binding (option b).** Requiring the key reference from a flag
 whenever the endpoint comes from a base, or an allowlist of hosts, still
@@ -1655,11 +1658,12 @@ fix a problem in fleet config.
 pflag's `Changed` so even an explicitly empty flag is honoured: the flag
 is the per-invocation scope, the variable the deployment default. The
 variables are read only at the composition root, only on the worker path,
-and validated with `httpx.ParseEndpoint`; the error names the variable,
-never the value. The knowledge variable is read only when a knowledge
-provider is configured, so a deployment can export all three and still run
-without recall. As with `CHIRON_GEMINI_BASE_URL`, a variable that is not
-read is not validated.
+and validated with `httpx.ParseEndpoint`; the error names the variable and
+at most the value's scheme and host, never its path, query or credentials.
+The knowledge variable is read only when a knowledge provider is
+configured, so a deployment can export all three and still run without
+recall. As with `CHIRON_GEMINI_BASE_URL`, a variable that is not read is
+not validated.
 
 **Pipelines.** `research-config` output is the next stage's base, so it
 refuses the three endpoint flags with an error pointing at the final stage
