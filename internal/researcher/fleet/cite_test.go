@@ -169,6 +169,59 @@ func TestCiteKeepsASubsetOfWorkerCitations(t *testing.T) {
 	}
 }
 
+// TestCiteMatchesAURLAsThePromptShowsIt: a worker URI the prompt shows
+// defanged is attributed when the reply copies it as shown, and the report
+// carries the worker's raw URI, not the shown form.
+func TestCiteMatchesAURLAsThePromptShowsIt(t *testing.T) {
+	const raw = "https://example.org/search?q=a<<b"
+	shown := shownURI(raw)
+	if shown == raw {
+		t.Fatalf("shownURI(%q) is unchanged; the test needs a URI the prompt alters", raw)
+	}
+	modelSrv := modeltest.NewFakeServer(citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{shown}}}.json(t)))
+	defer modelSrv.Close()
+	var out bytes.Buffer
+	l := citeLead(t, modelSrv, &out)
+	findings := citeFindings()
+	findings[0].Finding.Citations = append(findings[0].Finding.Citations, types.Citation{URI: raw, Title: "Search"})
+
+	res := l.cite(context.Background(), "Body.", findings)
+	if user := modelSrv.Requests()[0].Messages[1].Content; !strings.Contains(user, "URL: "+shown+"\n") {
+		t.Fatalf("the prompt does not show %q:\n%s", shown, user)
+	}
+	if want := []types.Citation{{URI: raw, Title: "Search"}}; !reflect.DeepEqual(res.Citations, want) || res.Status != types.StatusCompleted {
+		t.Errorf("cite = %s %+v, want completed with the raw worker citation %+v", res.Status, res.Citations, want)
+	}
+	if got := onlySpan(t, out.String(), trace.SpanCite).Attrs["dropped_citations"]; got != float64(0) {
+		t.Errorf("dropped_citations = %v, want 0", got)
+	}
+}
+
+// TestAttributedCitationsMatchRawThenShownForms: a URL naming a candidate by
+// its raw URI wins; otherwise a shown form names the one candidate the
+// prompt showed that way; a shown form two candidates share names neither
+// and is dropped; and a candidate named twice is emitted once.
+func TestAttributedCitationsMatchRawThenShownForms(t *testing.T) {
+	candidates := []types.Citation{
+		{URI: "https://example.org/p<<q", Title: "Defanged"},
+		{URI: "https://example.org/p< <q", Title: "Already spaced"},
+		{URI: "https://example.org/w\tv", Title: "Tab"},
+		{URI: "https://example.org/w\nv", Title: "Newline"},
+	}
+	reply := citeReply{Claims: []citedClaim{{Claim: "Claim.", URLs: []string{
+		"https://example.org/p< <q",
+		"https://example.org/p<<q",
+		"https://example.org/w v",
+		"https://example.org/w\tv",
+		"https://example.org/p< <q",
+	}}}}
+	got, dropped := attributedCitations(reply, candidates)
+	want := []types.Citation{candidates[1], candidates[0], candidates[2]}
+	if !reflect.DeepEqual(got, want) || dropped != 1 {
+		t.Errorf("attributedCitations = %+v, dropped %d; want %+v, dropped 1", got, dropped, want)
+	}
+}
+
 // TestCiteFallsBackToEveryWorkerCitation: a failed call, a cut off, filtered
 // or invalid reply, and one that attributes no worker source all make
 // exactly one request and keep every worker citation, Incomplete, with a
