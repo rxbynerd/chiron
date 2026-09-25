@@ -125,6 +125,15 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"search endpoint fragment", func(c *ResearchConfig) {
 			c.Fleet.SearchEndpoint = "https://search.example/mcp#frag"
 		}},
+		{"model endpoint empty query", func(c *ResearchConfig) {
+			c.Fleet.ModelEndpoint = "https://model.example/v1?"
+		}},
+		{"search endpoint empty fragment", func(c *ResearchConfig) {
+			c.Fleet.SearchEndpoint = "https://search.example/mcp#"
+		}},
+		{"model endpoint port without hostname", func(c *ResearchConfig) {
+			c.Fleet.ModelEndpoint = "https://:443/v1"
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validWorker()
@@ -180,6 +189,9 @@ func TestValidateErrorsNeverEchoSecrets(t *testing.T) {
 	}{
 		{"model key", func(c *ResearchConfig) { c.Fleet.ModelKeyRef = literal }},
 		{"search key", func(c *ResearchConfig) { c.Fleet.SearchKeyRef = literal }},
+		{"model endpoint query", func(c *ResearchConfig) { c.Fleet.ModelEndpoint = "https://model.example/v1?key=" + literal }},
+		{"search endpoint path over cleartext", func(c *ResearchConfig) { c.Fleet.SearchEndpoint = "http://search.example/" + literal }},
+		{"model endpoint host hidden by an at sign", func(c *ResearchConfig) { c.Fleet.ModelEndpoint = "https://" + literal + "#@model.example" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validWorker()
