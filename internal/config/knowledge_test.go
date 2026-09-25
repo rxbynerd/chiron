@@ -26,10 +26,9 @@ func TestValidateKnowledge(t *testing.T) {
 		{"billet keyless", func(c *ResearchConfig) {
 			*c = withKnowledge(KnowledgeBillet, "http://127.0.0.1:8140/")
 		}, ""},
-		{"billet with key and remember", func(c *ResearchConfig) {
+		{"billet with key", func(c *ResearchConfig) {
 			*c = withKnowledge(KnowledgeBillet, "https://billet.internal/")
 			c.Fleet.KnowledgeKeyRef = "secret://BILLET_KEY"
-			c.Fleet.KnowledgeRemember = true
 		}, ""},
 		{"alexandria with space and limit bounds", func(c *ResearchConfig) {
 			*c = withKnowledge(KnowledgeAlexandria, "https://alexandria.example")
@@ -118,6 +117,28 @@ func TestValidateKnowledge(t *testing.T) {
 					t.Errorf("Validate = %v, want an error starting %q", err, tt.wantErr)
 				}
 			})
+		}
+	}
+}
+
+// TestValidateKnowledgeRememberIsWorkerOnly: Billet save-back is valid for
+// the single worker and refused for the fleet, whose workers never save a
+// finding back, with an error that names the field, the flag and the agent
+// that can.
+func TestValidateKnowledgeRememberIsWorkerOnly(t *testing.T) {
+	remember := withKnowledge(KnowledgeBillet, "https://billet.internal/")
+	remember.Fleet.KnowledgeRemember = true
+
+	if err := withAgent(remember, AgentWorker).Validate(); err != nil {
+		t.Errorf("worker with knowledge_remember: %v", err)
+	}
+	err := withAgent(remember, AgentFleet).Validate()
+	if err == nil {
+		t.Fatal("fleet with knowledge_remember validated, want it refused")
+	}
+	for _, want := range []string{"fleet.knowledge_remember:", "--fleet-knowledge-remember", `"worker"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to name %s", err, want)
 		}
 	}
 }
