@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +35,60 @@ func langfuseHeaders(ctx context.Context, tc config.TelemetryConfig) (map[string
 		"Authorization":                "Basic " + base64.StdEncoding.EncodeToString([]byte(public+":"+private)),
 		"x-langfuse-ingestion-version": "4",
 	}, nil
+}
+
+// otlpHeaderEnv lists the variables the OTLP exporter reads request
+// headers from.
+var otlpHeaderEnv = []string{"OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"}
+
+// otlpEnv reads an OTLP variable as the exporter does: trimmed, with a
+// blank value meaning unset.
+func otlpEnv(name string) string {
+	return strings.TrimSpace(os.Getenv(name))
+}
+
+// checkOTLPHeaderEnv refuses a header variable the OTLP exporter cannot
+// parse, applying the exporter's grammar: comma-separated name=value
+// entries with a token name and a URL-escaped value. The exporter logs a
+// malformed entry raw to the process stderr, and the value is usually a
+// credential, so the error names the variable and withholds its value.
+func checkOTLPHeaderEnv() error {
+	for _, name := range otlpHeaderEnv {
+		for _, entry := range strings.Split(otlpEnv(name), ",") {
+			if strings.TrimSpace(entry) == "" {
+				continue
+			}
+			key, value, found := strings.Cut(entry, "=")
+			if !found || !validHeaderName(strings.TrimSpace(key)) {
+				return malformedHeaderEnv(name)
+			}
+			if _, err := url.PathUnescape(value); err != nil {
+				return malformedHeaderEnv(name)
+			}
+		}
+	}
+	return nil
+}
+
+func malformedHeaderEnv(name string) error {
+	return fmt.Errorf("%s: malformed header list (value withheld); each entry must be name=value with a valid header name and a URL-escaped value", name)
+}
+
+// validHeaderName reports whether name is an HTTP token, the exporter's
+// rule for a header name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", c):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 const (
