@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,10 +35,18 @@ func langfuseHeaders(ctx context.Context, tc config.TelemetryConfig) (map[string
 	}, nil
 }
 
-// maxOTelErrorBytes bounds one reported SDK error: a failed export quotes
-// the collector's response body, which may run to megabytes.
-const maxOTelErrorBytes = 1 << 10
+const (
+	// maxOTelErrorBytes bounds one reported SDK error: a failed export
+	// quotes the collector's response body, which may run to megabytes.
+	maxOTelErrorBytes = 1 << 10
+	// maxOTelErrorScanBytes bounds the text scrubbed per report. It is well
+	// past maxOTelErrorBytes, so a credential straddling that cut is still
+	// whole when Scrub sees it.
+	maxOTelErrorScanBytes = 16 << 10
+)
 
+// One run owns the error route at a time; a later routeOTelErrors takes it
+// over.
 var (
 	otelErrors        = &otelErrorHandler{}
 	installOTelErrors sync.Once
@@ -57,23 +64,31 @@ func routeOTelErrors(stderr io.Writer) (restore func()) {
 }
 
 // otelErrorHandler reports SDK errors, chiefly failed exports, scrubbed and
-// bounded. Outside a run it writes to the process stderr.
+// bounded, to the bound run's stderr. With no run bound they are dropped.
 type otelErrorHandler struct {
 	logger atomic.Pointer[slog.Logger]
 }
 
 // Handle implements otel.ErrorHandler.
 func (h *otelErrorHandler) Handle(err error) {
-	if err == nil {
+	logger := h.logger.Load()
+	if err == nil || logger == nil {
 		return
 	}
-	logger := h.logger.Load()
-	if logger == nil {
-		logger = slog.New(secret.NewScrubHandler(slog.NewTextHandler(os.Stderr, nil)))
+	raw := err.Error()
+	truncated := len(raw) > maxOTelErrorScanBytes
+	if truncated {
+		raw = raw[:maxOTelErrorScanBytes]
 	}
-	msg := secret.Scrub(err.Error())
+	// Scrub before the final cut: cutting first could shorten a credential
+	// below its pattern's minimum length.
+	msg := secret.Scrub(raw)
 	if len(msg) > maxOTelErrorBytes {
-		msg = strings.ToValidUTF8(msg[:maxOTelErrorBytes], "") + " [truncated]"
+		msg = msg[:maxOTelErrorBytes]
+		truncated = true
+	}
+	if truncated {
+		msg = strings.ToValidUTF8(msg, "") + " [truncated]"
 	}
 	logger.Warn("telemetry error", "err", msg)
 }
