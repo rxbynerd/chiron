@@ -41,6 +41,16 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 				t.Errorf("SearchKeyRef = %q", f.SearchKeyRef)
 			}
 		}},
+		{"search-tool", []string{"--fleet-search-tool", "web_search"}, func(t *testing.T, f FleetConfig) {
+			if f.SearchTool != "web_search" {
+				t.Errorf("SearchTool = %q", f.SearchTool)
+			}
+		}},
+		{"search-query-arg", []string{"--fleet-search-query-arg", "q"}, func(t *testing.T, f FleetConfig) {
+			if f.SearchQueryArg != "q" {
+				t.Errorf("SearchQueryArg = %q", f.SearchQueryArg)
+			}
+		}},
 		{"max-turns", []string{"--fleet-max-turns", "12"}, func(t *testing.T, f FleetConfig) {
 			if f.MaxTurns != 12 {
 				t.Errorf("MaxTurns = %d", f.MaxTurns)

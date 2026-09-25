@@ -223,6 +223,8 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		Endpoint:       fc.SearchEndpoint,
 		APIKey:         searchKey,
 		RequestTimeout: callTimeout,
+		ToolName:       fc.SearchTool,
+		QueryArgKey:    fc.SearchQueryArg,
 	})
 	if err != nil {
 		return nil, nil, err
