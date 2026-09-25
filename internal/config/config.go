@@ -42,8 +42,9 @@ const (
 )
 
 // Memory bindings for the in-process research agents (V2-RESEARCH-AGENT §4).
-// noop holds no Chiron-side context; inmemory is reserved for the in-process
-// ContextStore and rejected until that store exists.
+// noop holds no Chiron-side context; inmemory is the in-process ContextStore
+// the fleet passes findings through by reference. The fleet requires
+// inmemory; the worker has no session plane and accepts either.
 const (
 	MemoryNoop     = "noop"
 	MemoryInMemory = "inmemory"
@@ -194,7 +195,8 @@ type FleetConfig struct {
 	// Concurrency caps how many workers run at once. Positive; must not
 	// exceed MaxWorkers.
 	Concurrency int `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
-	// Memory selects the ContextStore binding: noop (inmemory is reserved).
+	// Memory selects the ContextStore binding: noop or inmemory. The fleet
+	// agent requires inmemory; the worker accepts either and uses neither.
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 	// KnowledgeProvider selects the knowledge store the worker recalls from:
 	// empty (none), billet or alexandria.
@@ -354,9 +356,9 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 // is worker or fleet, so a deep-research run stays valid with a zero
 // FleetConfig. Endpoints and key references are optional here (the
 // composition root requires them); when present they must satisfy the same
-// rules the Gemini base-URL override does. agent gates the fleet-only caps:
-// a single worker has no fan-out, so MaxWorkers/Concurrency are enforced for
-// fleet only.
+// rules the Gemini base-URL override does. agent gates the fleet-only rules:
+// a single worker has no fan-out and no session plane, so MaxWorkers,
+// Concurrency and the inmemory requirement are enforced for fleet only.
 func (f FleetConfig) validate(agent string) error {
 	if err := validEndpoint("fleet.model_endpoint", f.ModelEndpoint); err != nil {
 		return err
@@ -404,9 +406,12 @@ func (f FleetConfig) validate(agent string) error {
 		}
 	}
 	switch f.Memory {
-	case MemoryNoop:
 	case MemoryInMemory:
-		return fmt.Errorf("fleet.memory: %q is not implemented yet; use %q", f.Memory, MemoryNoop)
+	case MemoryNoop:
+		if agent == AgentFleet {
+			return fmt.Errorf("fleet.memory: %q stores nothing, but agent %q passes findings between the lead and its workers by reference; set fleet.memory to %q (--fleet-memory %s)",
+				MemoryNoop, AgentFleet, MemoryInMemory, MemoryInMemory)
+		}
 	default:
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
 	}
