@@ -104,6 +104,12 @@ type ContextStore interface {
 	OpenSession(ctx context.Context, ref SessionRef) (Session, error)
 
 	// Put writes an artifact content-addressed and returns its Reference.
+	// Identical content written twice to the same namespace may be
+	// coalesced into one artifact, in which case the first write's
+	// ArtifactMeta is authoritative and a later write's meta is discarded.
+	// A caller that must distinguish writers of the same content cannot
+	// rely on Get's returned ArtifactMeta for that; it needs to encode the
+	// distinction in the body or track it in-process.
 	Put(ctx context.Context, ns Namespace, body io.Reader, meta ArtifactMeta) (Reference, error)
 
 	// Get fetches an artifact by Reference.
