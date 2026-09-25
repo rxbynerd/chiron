@@ -237,7 +237,7 @@ func TestValidateErrorsNeverEchoSecrets(t *testing.T) {
 	}
 }
 
-// TestFleetRoundTrip pins the new fields through EncodeJSON -> Decode: the
+// TestFleetRoundTrip pins the new fields through EncodeJSON -> decode: the
 // research-config command emits JSON that the next pipeline stage decodes,
 // so a dropped or misnamed fleet field would silently reset a paid run.
 func TestFleetRoundTrip(t *testing.T) {
@@ -257,9 +257,9 @@ func TestFleetRoundTrip(t *testing.T) {
 	if err := in.EncodeJSON(&buf); err != nil {
 		t.Fatalf("EncodeJSON: %v", err)
 	}
-	out, err := Decode(&buf)
+	out, err := decode(&buf)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if !reflect.DeepEqual(out.Fleet, in.Fleet) {
 		t.Errorf("fleet round trip lost data:\n got %+v\nwant %+v", out.Fleet, in.Fleet)
@@ -271,7 +271,7 @@ func TestFleetRoundTrip(t *testing.T) {
 // a silently ignored knob on a paid run.
 func TestFleetDecodeRejectsUnknownKeys(t *testing.T) {
 	const in = "agent: worker\nfleet:\n  max_trns: 4\n"
-	if _, err := Decode(strings.NewReader(in)); err == nil {
+	if _, err := decode(strings.NewReader(in)); err == nil {
 		t.Error("a typo inside the fleet block was accepted silently")
 	}
 }
@@ -342,9 +342,9 @@ func TestDefaultFleetSearchIdentifiers(t *testing.T) {
 // their documented defaults, not a zero value that would fail validation.
 func TestFleetSearchIdentifiersDefaultOnPartialBlock(t *testing.T) {
 	const in = "agent: worker\nfleet:\n  search_endpoint: https://search.example\n"
-	cfg, err := Decode(strings.NewReader(in))
+	cfg, err := decode(strings.NewReader(in))
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if f := cfg.Fleet; f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
 		t.Errorf("partial fleet block search identifiers = %q/%q, want the defaults %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
