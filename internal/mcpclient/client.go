@@ -110,8 +110,9 @@ type Options struct {
 	// RequestTimeout.
 	HTTPClient *http.Client
 	// RequestTimeout bounds one CallTool, including any initialize and
-	// initialized round-trips it performs and reading the bodies, and bounds
-	// Close's DELETE. Default 30s. A tighter caller deadline still wins.
+	// initialized round-trips it performs and reading the bodies, and
+	// separately bounds each session DELETE. Default 30s. A tighter caller
+	// deadline still wins, except over a DELETE.
 	RequestTimeout time.Duration
 	// MaxBodyBytes bounds every response body, application/json or
 	// text/event-stream. Default 8 MiB.
@@ -285,9 +286,7 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 
 	if sess != nil && sess.id != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout)
-		defer cancel()
-		c.endSession(ctx, *sess)
+		c.endSession(*sess)
 	}
 	return nil
 }
@@ -351,7 +350,7 @@ func (c *Client) lead(ctx context.Context, hs *handshake) (*session, error) {
 	close(hs.done)
 
 	if orphaned && sess.id != "" {
-		c.endSession(ctx, sess)
+		c.endSession(sess)
 	}
 	return hs.sess, hs.err
 }

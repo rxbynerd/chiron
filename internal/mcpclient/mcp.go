@@ -37,7 +37,8 @@ type callToolParams struct {
 
 // establish runs initialize and the initialized notification and returns the
 // new session. When the handshake fails after the server issued a session id
-// it still holds, that session is ended with a best-effort DELETE.
+// it still holds, that session is ended with a best-effort DELETE, even when
+// the failure is ctx ending.
 func (c *Client) establish(ctx context.Context) (session, error) {
 	sess, err := c.initialize(ctx)
 	if err == nil {
@@ -45,7 +46,7 @@ func (c *Client) establish(ctx context.Context) (session, error) {
 	}
 	if err != nil {
 		if sess.id != "" && !sessionGone(err, sess) {
-			c.endSession(ctx, sess)
+			c.endSession(sess)
 		}
 		return session{}, err
 	}
@@ -69,10 +70,10 @@ func (c *Client) initialize(ctx context.Context) (session, error) {
 			ClientInfo:      clientInfo{Name: c.clientName, Version: c.clientVersion},
 		},
 	})
-	if err != nil {
-		return session{}, err
-	}
 	sess := session{id: sessionID}
+	if err != nil {
+		return sess, err
+	}
 	if rpc.Error != nil {
 		return sess, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error(), sess))
 	}

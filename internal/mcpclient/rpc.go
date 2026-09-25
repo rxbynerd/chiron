@@ -155,8 +155,12 @@ func (c *Client) setSessionHeaders(req *http.Request, sess session) {
 
 // endSession sends the DELETE that asks the server to discard the session. It
 // is best effort: a server may refuse client-initiated termination with 405,
-// and no outcome of the DELETE affects the tool result.
-func (c *Client) endSession(ctx context.Context, sess session) {
+// and no outcome of the DELETE affects the tool result. It runs on a fresh
+// context bounded by requestTimeout, so a caller's cancelled or expired
+// context cannot skip the cleanup.
+func (c *Client) endSession(sess session) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.endpoint, nil)
 	if err != nil {
 		return
