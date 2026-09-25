@@ -137,6 +137,9 @@ type ResearchConfig struct {
 	// selects worker or fleet, so a deep-research run stays valid with a
 	// zero Fleet.
 	Fleet FleetConfig `json:"fleet,omitzero" yaml:"fleet,omitempty"`
+	// Telemetry forwards the run's spans to an OTLP collector or Langfuse.
+	// It applies to every agent.
+	Telemetry TelemetryConfig `json:"telemetry,omitzero" yaml:"telemetry,omitempty"`
 }
 
 // FleetConfig holds the knobs for Chiron's in-process research agents
@@ -319,6 +322,9 @@ func (c ResearchConfig) Validate() error {
 			return fmt.Errorf("mcp: server %q URL %q must be http(s) — MCP servers are remote endpoints", name, url)
 		}
 	}
+	if err := c.Telemetry.validate(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -477,10 +483,10 @@ func validEndpoint(field, raw string) error {
 		return nil
 	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
+	if err != nil || u.Hostname() == "" || !allowedEndpointScheme(u) {
 		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
 	}
 	return nil

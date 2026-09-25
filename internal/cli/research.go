@@ -369,14 +369,15 @@ func withRunSeams(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx cont
 // binding), so each agent requires only the secrets it actually uses. The
 // Researcher field of the passed Deps is unset; the callback binds it.
 // withRunLifecycle wraps the command's stderr in one locked writer and hands
-// it to the transport and to f, so the event stream and any logger a
-// researcher writes to share a single lock rather than racing on the same
+// it to the tracer's error reports, the transport and f, so the event stream
+// and any logger share a single lock rather than racing on the same
 // underlying writer.
 func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx context.Context, deps run.Deps, stderr io.Writer) error) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(cfg.Timeout))
 	defer cancel()
 
-	tracer, shutdown, err := newTracer(ctx)
+	stderr := &lockedWriter{w: cmd.ErrOrStderr()}
+	tracer, shutdown, err := newTracer(ctx, cfg.Telemetry, stderr)
 	if err != nil {
 		return err
 	}
@@ -390,7 +391,6 @@ func withRunLifecycle(cmd *cobra.Command, cfg config.ResearchConfig, f func(ctx 
 		}()
 	}
 
-	stderr := &lockedWriter{w: cmd.ErrOrStderr()}
 	events := transport.NewStdio(stderr)
 	defer events.Close()
 
@@ -618,17 +618,56 @@ func exitForStatus(result *types.RunResult) error {
 	}
 }
 
-// newTracer binds OTel when an OTLP endpoint is configured in the
-// environment (the standard OTEL_EXPORTER_OTLP_* variables), and the
-// no-op tracer otherwise — building an exporter with nowhere to send
-// spans would only buffer and drop them. The shutdown func is non-nil
-// only for the OTel binding.
-func newTracer(ctx context.Context) (trace.Tracer, func(context.Context) error, error) {
-	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") == "" &&
-		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") == "" {
+// newTracer binds the span destination, most explicit first: the Langfuse
+// keys (OTLP/HTTP with Basic authentication to the Langfuse endpoint), then
+// telemetry.otlp_endpoint, then the standard OTEL_EXPORTER_OTLP_* variables.
+// With none, it binds the no-op tracer — building an exporter with nowhere
+// to send spans would only buffer and drop them. Key references resolve
+// here, before any paid call. The OTLP header variables are refused beside
+// telemetry.otlp_endpoint; both the header and endpoint variables are
+// refused anywhere when malformed, before the SDK parses and logs them raw.
+// The shutdown func is non-nil only for the OTel binding; it flushes
+// pending spans, then stops routing the SDK's error reports to stderr.
+func newTracer(ctx context.Context, tc config.TelemetryConfig, stderr io.Writer) (trace.Tracer, func(context.Context) error, error) {
+	var (
+		endpoint string
+		opts     []trace.OTelOption
+	)
+	switch {
+	case tc.LangfuseTarget() != "":
+		headers, err := langfuseHeaders(ctx, tc)
+		if err != nil {
+			return nil, nil, err
+		}
+		endpoint = tc.LangfuseTarget()
+		opts = append(opts, trace.WithHeaders(headers))
+	case tc.OTLPEndpoint != "":
+		if err := checkNoOTLPHeaderEnv(); err != nil {
+			return nil, nil, err
+		}
+		endpoint = tc.OTLPEndpoint
+	case os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" ||
+		os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "":
+		// An empty endpoint defers to the environment.
+	default:
 		return trace.Noop{}, nil, nil
 	}
-	return trace.NewOTel(ctx, "")
+	if err := checkOTLPHeaderEnv(); err != nil {
+		return nil, nil, err
+	}
+	if err := checkOTLPEndpointEnv(); err != nil {
+		return nil, nil, err
+	}
+	restore := routeOTelErrors(stderr)
+	tracer, shutdown, err := trace.NewOTel(ctx, endpoint, opts...)
+	if err != nil {
+		restore()
+		return nil, nil, err
+	}
+	return tracer, func(ctx context.Context) error {
+		defer restore()
+		return shutdown(ctx)
+	}, nil
 }
 
 // buildSink composes the report sinks from the output levers

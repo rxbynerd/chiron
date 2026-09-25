@@ -1278,3 +1278,156 @@ having run.
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
 writer so the race detector, not a reviewer, is what proves they serialise.
+
+## 2026-09-25 — Langfuse and OTLP forwarding flags
+
+Issue #10 (V2-PLAN Wave 2, V2-AMENDS amend 7): the worker's per-call spend
+and the run core's metrics need a route out of the process before the
+worker fleet lands, since v2 cannot yet cap spend (D6) — it must see it
+(D7). Four flags and a `telemetry` config block forward spans to an OTLP
+collector or to Langfuse. No new dependency was introduced.
+
+**Four flags, one config block, validated for every agent.** `--otlp-endpoint`,
+`--langfuse-endpoint`, `--langfuse-public-key-ref` and
+`--langfuse-secret-key-ref` bind `internal/config.TelemetryConfig`
+(`telemetry.otlp_endpoint`, `.langfuse_endpoint`,
+`.langfuse_public_key_ref`, `.langfuse_secret_key_ref`). Unlike `fleet.*`,
+`telemetry.*` is validated for every agent, not only `worker`/`fleet`: a
+Gemini-tier run can forward its spans too. V2-PLAN specified
+`--langfuse-public-key` / `--langfuse-secret-key`; the flags ship as
+`--langfuse-public-key-ref` / `--langfuse-secret-key-ref` instead, matching
+the existing `--fleet-*-key-ref` convention (a `secret://` reference, never
+a literal) rather than introducing a second naming scheme for the same
+kind of field.
+
+**Base-URL semantics, not a literal traces endpoint.** `NewOTel`'s
+`endpointURL` parameter now carries the same meaning as
+`OTEL_EXPORTER_OTLP_ENDPOINT`: `/v1/traces` is appended to its path (a
+trailing slash tolerated, not doubled). Langfuse documents its OTLP base as
+`https://cloud.langfuse.com/api/public/otel`; the previous verbatim-URL
+semantics would have posted to that bare path instead of Langfuse's actual
+`<base>/v1/traces` ingestion endpoint. The only production caller
+previously passed an empty URL (deferring to the environment), so no
+existing behaviour changes.
+
+**Precedence, one destination per run.** `newTracer` in `internal/cli`
+binds in order: both Langfuse key refs (resolved via `LangfuseTarget()` —
+`--langfuse-endpoint`, or `DefaultLangfuseEndpoint` when only the keys are
+set), then `--otlp-endpoint`, then `OTEL_EXPORTER_OTLP_ENDPOINT` /
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then the no-op tracer. An explicit
+flag therefore wins over the environment's endpoint variables, though
+`--otlp-endpoint` is refused beside the environment's header variables
+(below). Config validation rejects `telemetry.langfuse_endpoint` set
+without both key refs (Langfuse ingestion requires authentication, so it
+could only ever fail) and `telemetry.otlp_endpoint` set together with the
+Langfuse keys — one telemetry destination per run, rather than a silent
+precedence a config reader would have to know to look for.
+
+**Langfuse keys: resolved once, sent nowhere else.** Both key refs are
+`secret://` only, required together, and resolved at the composition root
+— the only place secrets are read — into an `Authorization: Basic
+base64(public:secret)` header plus `x-langfuse-ingestion-version: 4`,
+handed to the OTLP/HTTP exporter through a new `trace.WithHeaders` option
+and nowhere else. These static headers replace any
+`OTEL_EXPORTER_OTLP_HEADERS`, so credentials meant for another collector
+are never sent to Langfuse. `internal/secret.Scrub` gained a Langfuse key
+pattern (`pk-lf-`/`sk-lf-` and at least eight key characters, matched
+inside a longer word too, since the high-entropy backstop's mixed-case
+requirement misses these keys) and two Basic-credential patterns (header
+context always redacted, including its URL-encoded and base64url forms; a
+bare `Basic <token>` redacted only when it decodes to printable
+`user:password` text, so prose like "basic research" survives). The OTel
+SDK's process-wide error handler — whose default prints unscrubbed to
+stderr, and whose OTLP/HTTP client quotes up to 4 MiB of a collector's
+response body — is routed through a scrubbing logger on the command's
+locked stderr for the lifetime of the OTel binding. Each report scrubs at
+most the first 16 KiB of the SDK's text and logs at most 1 KiB of the
+result; outside a binding, reports are dropped rather than written to the
+process stderr. The route is process-wide and last-writer-wins, which
+holds while one run owns the process. The SDK's separate logr-based
+logger prints a malformed `OTEL_EXPORTER_OTLP_HEADERS` or
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` entry raw to the process stderr, and
+the malformed part is usually the credential. `newTracer` therefore checks
+both variables against the exporter's header grammar on every OTel path,
+the environment-only one included, and refuses a malformed list before
+the SDK parses it, naming the variable and withholding its value. The same
+logger prints a malformed `OTEL_EXPORTER_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` value raw too, userinfo included, since
+the SDK parses both on every path regardless of which one an explicit
+endpoint or the Langfuse keys actually use; `newTracer` checks both with
+`url.Parse`, the SDK's own grammar, and refuses on the same terms. The
+logger's other messages stay unrouted until `go-logr/logr` is justified as
+a direct dependency.
+
+**Environment headers stay with the environment's collector.**
+`--otlp-endpoint` (`telemetry.otlp_endpoint`) is for collectors that need
+no request headers. The exporter applies `OTEL_EXPORTER_OTLP_HEADERS` and
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS` before explicit options, so an
+explicit endpoint would otherwise receive the credentials a deployment
+set for its own collector. `newTracer` instead refuses the run while
+either variable is set, before any spend and without echoing the value.
+An authenticated generic collector is configured entirely through the
+`OTEL_EXPORTER_OTLP_*` environment, endpoint and headers together, and
+`--otlp-endpoint` does not override that pairing. The Langfuse path needs
+no refusal, since its endpoint and static headers replace the
+environment's. Sending the headers
+when the environment's endpoint names the same host was rejected: with no
+environment endpoint there is no host to bind them to.
+
+**Explicit endpoints refuse redirects.** With an explicit endpoint (the
+Langfuse keys or `--otlp-endpoint`), `NewOTel` hands the exporter its own
+HTTP client, which refuses every redirect: collectors never redirect, and
+net/http re-sends `Authorization` to a same-host target on any scheme or
+port and every other header to any target. A 3xx ends the export as a
+non-retryable error through the scrubbing handler. The exporter's
+`WithHTTPClient` takes precedence over the
+`OTEL_EXPORTER_OTLP_{,TRACES_}CERTIFICATE`, `CLIENT_CERTIFICATE`,
+`CLIENT_KEY` and `TIMEOUT` variables, so those do not configure the
+connection with an explicit endpoint; compression still is. A certificate
+variable set beside an `http://` loopback endpoint still fails the run:
+the exporter's own environment parsing loads it into a TLS config that its
+insecure-transport check then refuses, ahead of `WithHTTPClient`'s
+precedence. The client clones `http.DefaultTransport`, keeping the proxy
+variables, with the exporter's default 10 s timeout. The environment-only
+path keeps the exporter's own client and all of its variables.
+
+**Known exposure: issue #28 applies to `telemetry.*`.** The telemetry
+endpoints and Langfuse key refs can come from a base config (`--config` or
+piped stdin) as well as from flags. A base config can therefore choose
+both the destination and which `secret://` references are resolved and
+sent there as the Basic credential. Unlike `fleet.*`, this reaches every
+agent, `deep-research`, `get` and `follow-up` included. A config-named
+https endpoint may also be an internal address, and up to 1 KiB of its
+scrubbed error body reaches stderr. This is accepted until #28 is
+resolved.
+
+**Spend visibility is the interim spend control.** Per amends 2 and 7 and
+V2-PLAN D6/D7, v2 defers budget enforcement rather than fixing it;
+Langfuse forwarding is what stands in until enforcement returns. The
+worker's span already carried `search_count`, `input_tokens`,
+`output_tokens` and `estimated_cost_gbp`; the run core's per-run metrics
+ride the `metric.<name>` span-attribute convention `internal/trace`
+already used. Cached, tool-use and thought tokens are not yet attributed
+(see below).
+
+**Deferred from this entry.**
+
+- Wave 2 deliverable 2 is partly met. The worker's model adapter reports
+  no cached, tool-use or thought token counts, so the worker span carries
+  input and output tokens, search count and estimated cost only. Full
+  attribution waits for a change to the fleet model adapter.
+- Wave 2 deliverable 3 (reserving the fleet/control-plane span and metric
+  vocabulary in `internal/trace/names.go`) is a separate change.
+- Key task 3 (`secret.Scrub` parity for ConnectRPC payloads) waits for the
+  ConnectRPC transport to exist.
+- Base-config provenance for `telemetry.*` belongs to #28's decision; the
+  exposure is recorded above.
+- Rerouting the SDK's logr logger through Scrub needs `go-logr/logr` as a
+  direct dependency; the malformed-header and malformed-endpoint refusals
+  close its credential-bearing messages meanwhile.
+- Honouring the `OTEL_EXPORTER_OTLP_*` certificate, client-certificate and
+  timeout variables with an explicit endpoint needs Chiron to build its
+  own `tls.Config`. That cost is accepted until a self-hosted collector
+  with a private CA needs it. Refusing redirects on the environment-only
+  path is deferred for the same reason: a custom client there would drop
+  variables deployments may rely on.
