@@ -486,7 +486,7 @@ func validEndpoint(field, raw string) error {
 	if err != nil || u.Hostname() == "" || !allowedEndpointScheme(u) {
 		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
 	}
 	return nil

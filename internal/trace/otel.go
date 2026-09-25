@@ -58,8 +58,10 @@ func WithHeaders(h map[string]string) OTelOption {
 // with the meaning of OTEL_EXPORTER_OTLP_ENDPOINT: spans are sent to its
 // path plus /v1/traces, redirects are refused, and the
 // OTEL_EXPORTER_OTLP_* certificate, client-certificate and timeout
-// variables do not apply. An empty endpointURL defers to the standard
-// OTEL_EXPORTER_OTLP_* environment variables.
+// variables do not configure the connection (a certificate variable set
+// beside an http:// loopback endpoint still fails the call). An empty
+// endpointURL defers to the standard OTEL_EXPORTER_OTLP_* environment
+// variables.
 func NewOTel(ctx context.Context, endpointURL string, opts ...OTelOption) (*OTel, func(context.Context) error, error) {
 	var cfg otelConfig
 	for _, opt := range opts {
@@ -103,8 +105,14 @@ const exportTimeout = 10 * time.Second
 // same-host target and other headers to any target. A 3xx therefore ends
 // the export as a non-retryable status error.
 func noRedirectClient() *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	} else {
+		transport = transport.Clone()
+	}
 	return &http.Client{
-		Transport: http.DefaultTransport.(*http.Transport).Clone(),
+		Transport: transport,
 		Timeout:   exportTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

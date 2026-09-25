@@ -623,11 +623,11 @@ func exitForStatus(result *types.RunResult) error {
 // telemetry.otlp_endpoint, then the standard OTEL_EXPORTER_OTLP_* variables.
 // With none, it binds the no-op tracer — building an exporter with nowhere
 // to send spans would only buffer and drop them. Key references resolve
-// here, before any paid call, and the OTLP header variables are checked:
-// refused beside telemetry.otlp_endpoint, and refused anywhere when
-// malformed. The shutdown func is non-nil only for the OTel binding; it
-// flushes pending spans, then stops routing the SDK's error reports to
-// stderr.
+// here, before any paid call. The OTLP header variables are refused beside
+// telemetry.otlp_endpoint; both the header and endpoint variables are
+// refused anywhere when malformed, before the SDK parses and logs them raw.
+// The shutdown func is non-nil only for the OTel binding; it flushes
+// pending spans, then stops routing the SDK's error reports to stderr.
 func newTracer(ctx context.Context, tc config.TelemetryConfig, stderr io.Writer) (trace.Tracer, func(context.Context) error, error) {
 	var (
 		endpoint string
@@ -653,6 +653,9 @@ func newTracer(ctx context.Context, tc config.TelemetryConfig, stderr io.Writer)
 		return trace.Noop{}, nil, nil
 	}
 	if err := checkOTLPHeaderEnv(); err != nil {
+		return nil, nil, err
+	}
+	if err := checkOTLPEndpointEnv(); err != nil {
 		return nil, nil, err
 	}
 	restore := routeOTelErrors(stderr)
