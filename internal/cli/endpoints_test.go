@@ -136,32 +136,53 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 
 // TestFlagEndpointsOverBaseKeyRefsResolve is the control for the refusal
 // test: the same worker run with the key references in the base and the
-// endpoints on flags resolves every reference through the injected resolver
-// and sends its key to the flag-named endpoint.
+// endpoints on flags resolves every reference, knowledge included, through
+// the injected resolver and sends its key to the flag-named endpoint.
 func TestFlagEndpointsOverBaseKeyRefsResolve(t *testing.T) {
-	modelSrv := modeltest.NewFakeServer(finalReply)
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
+		finalReply,
+	)
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
+	kbSrv := billettest.NewFakeServer(nil)
+	defer kbSrv.Close()
 	clearEndpointEnv(t)
+	t.Setenv("KB_KEY", "")
 
-	const base = "agent: worker\nfleet:\n  model_name: test-model\n  model_key_ref: secret://MODEL_KEY\n  search_key_ref: secret://SEARCH_KEY\n"
+	const base = "agent: worker\nfleet:\n  model_name: test-model\n  model_key_ref: secret://MODEL_KEY\n  search_key_ref: secret://SEARCH_KEY\n" +
+		"  knowledge_provider: billet\n  knowledge_key_ref: secret://KB_KEY\n"
 	resolver := &countingResolver{}
 	var stderr bytes.Buffer
 	_, err := executeWith(t, resolver, strings.NewReader(base), &stderr,
 		"research", "--query", "why is the sky blue", "--config", "-", "-o", "none",
 		"--fleet-model-endpoint", modelSrv.URL(),
 		"--fleet-search-endpoint", searchSrv.URL(),
+		"--fleet-knowledge-endpoint", kbSrv.URL(),
 	)
 	if err != nil {
 		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
 	}
-	if n := resolver.calls.Load(); n != 2 {
-		t.Errorf("resolver calls = %d, want 2 (model and search key)", n)
+	if n := resolver.calls.Load(); n != 3 {
+		t.Errorf("resolver calls = %d, want 3 (model, search and knowledge key)", n)
 	}
 	reqs := modelSrv.Requests()
-	if len(reqs) != 1 || reqs[0].Authorization != "Bearer test-resolved-key" {
-		t.Errorf("model requests = %+v, want one carrying the resolved key", reqs)
+	if len(reqs) != 2 {
+		t.Fatalf("model requests = %d, want the recall turn and the final turn", len(reqs))
+	}
+	for i, req := range reqs {
+		if req.Authorization != "Bearer test-resolved-key" {
+			t.Errorf("model request %d Authorization = %q, want the resolved key", i, req.Authorization)
+		}
+	}
+	if kbSrv.ToolCallCount() != 1 {
+		t.Fatalf("knowledge tool calls = %d, want the one recall", kbSrv.ToolCallCount())
+	}
+	for i, req := range kbSrv.Requests() {
+		if req.Authorization != "Bearer test-resolved-key" {
+			t.Errorf("knowledge request %d Authorization = %q, want the resolved key", i, req.Authorization)
+		}
 	}
 }
 
