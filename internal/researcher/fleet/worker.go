@@ -169,10 +169,9 @@ type WorkerDeps struct {
 	Tracer             trace.Tracer
 	Caps               Caps
 	// Progress, when non-nil, receives one Progress per turn whose action
-	// parsed; a turn that ends before that reports nothing. Delivery is best
-	// effort within progressTimeout: a panic is recovered, a hook still
-	// running at the deadline is abandoned, and nothing the hook does
-	// affects the Finding.
+	// parsed. Delivery is best effort within progressTimeout: a panic is
+	// recovered, a hook still running at the deadline is abandoned, and
+	// nothing the hook does affects the Finding.
 	Progress func(ctx context.Context, p Progress)
 
 	// progressTimeoutOverride replaces progressTimeout when positive, so

@@ -507,10 +507,9 @@ type workerTurnPayload struct {
 	EstimatedCostGBP float64 `json:"estimated_cost_gbp"`
 }
 
-// bindWorkerProgress routes the worker's per-turn progress onto the run's
-// transport as delta events typed worker_turn: the worker's counterpart of
-// bindThoughtDisplay, switched off with it by --quiet (nil when !stream).
-// text is a self-contained line because the proto Delta carries only text.
+// bindWorkerProgress routes worker progress onto the transport as delta
+// events typed worker_turn and, like bindThoughtDisplay, binds nothing under
+// --quiet. text stands alone because the proto Delta carries only text.
 // Emission is best effort: a marshal or emit failure is dropped.
 func bindWorkerProgress(stream bool, tr transport.Transport) func(context.Context, fleet.Progress) {
 	if !stream {
