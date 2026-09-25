@@ -86,6 +86,28 @@ func malformedHeaderEnv(name string) error {
 	return fmt.Errorf("%s: malformed header list (value withheld); each entry must be name=value with a valid header name and a URL-escaped value", name)
 }
 
+// otlpEndpointEnv lists the variables the OTLP exporter parses as URLs
+// while building its environment-derived configuration.
+var otlpEndpointEnv = []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"}
+
+// checkOTLPEndpointEnv refuses an OTLP endpoint variable the exporter
+// cannot parse. The exporter parses both variables on every path, even
+// one where an explicit endpoint or the Langfuse keys choose the actual
+// destination, and its logger prints an unparseable value raw — userinfo
+// included — to the process stderr.
+func checkOTLPEndpointEnv() error {
+	for _, name := range otlpEndpointEnv {
+		v := otlpEnv(name)
+		if v == "" {
+			continue
+		}
+		if _, err := url.Parse(v); err != nil {
+			return fmt.Errorf("%s: malformed URL (value withheld)", name)
+		}
+	}
+	return nil
+}
+
 // validHeaderName reports whether name is an HTTP token, the exporter's
 // rule for a header name.
 func validHeaderName(name string) bool {
@@ -155,8 +177,9 @@ func (h *otelErrorHandler) Handle(err error) {
 		msg = msg[:maxOTelErrorBytes]
 		truncated = true
 	}
+	msg = strings.ToValidUTF8(msg, "")
 	if truncated {
-		msg = strings.ToValidUTF8(msg, "") + " [truncated]"
+		msg += " [truncated]"
 	}
 	logger.Warn("telemetry error", "err", msg)
 }

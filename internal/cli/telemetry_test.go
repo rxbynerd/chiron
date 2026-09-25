@@ -578,6 +578,26 @@ func TestOTelErrorReportIsBounded(t *testing.T) {
 			t.Errorf("report lacks the truncation marker although the scan cut dropped text:\n%s", out)
 		}
 	})
+
+	t.Run("invalid UTF-8 with no cut", func(t *testing.T) {
+		// slog's text handler escapes any invalid byte it is given into a
+		// valid-UTF-8 \xNN sequence, so utf8.ValidString(out) alone cannot
+		// tell whether Handle sanitized msg or slog merely escaped it: check
+		// that the invalid bytes were dropped, not preserved as an escape.
+		out := reportOTelError(errors.New("failed to send: 400 Bad Request (body: \xff\xfe bad bytes)"))
+		if !utf8.ValidString(out) {
+			t.Errorf("report is not valid UTF-8: %q", out)
+		}
+		if strings.Contains(out, `\xff`) || strings.Contains(out, `\xfe`) {
+			t.Errorf("invalid bytes were escaped rather than stripped by Handle:\n%q", out)
+		}
+		if !strings.Contains(out, "failed to send") || !strings.Contains(out, "bad bytes") {
+			t.Errorf("report lost the valid text around the invalid bytes:\n%q", out)
+		}
+		if strings.Contains(out, "[truncated]") {
+			t.Errorf("a short error was marked truncated:\n%s", out)
+		}
+	})
 }
 
 // TestOTelErrorsDroppedWithoutRun: with no run bound, including after a
@@ -701,6 +721,94 @@ func TestWellFormedOTLPHeaderEnvReachesCollector(t *testing.T) {
 		if v := r.header.Get("Authorization"); v != "Basic Zm9vOmJhcg==" {
 			t.Errorf("Authorization = %q, want the decoded value", v)
 		}
+	}
+}
+
+// malformedEndpointEnvSecret is the credential fragment the userinfo case
+// of malformedEndpointEnvLists carries.
+const malformedEndpointEnvSecret = "S3cr3tQk99"
+
+// malformedEndpointEnvLists are OTLP endpoint variables url.Parse rejects,
+// the same grammar the exporter's own envconfig applies.
+var malformedEndpointEnvLists = []struct {
+	name  string
+	value string
+}{
+	{"bad escape with userinfo", "https://otel-user:" + malformedEndpointEnvSecret + "%ZZ@collector.example"},
+	{"control character", "https://collector.example/\x7f"},
+}
+
+// TestMalformedOTLPEndpointEnvRefused: on every OTel path, an endpoint
+// variable url.Parse rejects stops newTracer before an exporter or error
+// route exists, and the error names the variable without its value.
+func TestMalformedOTLPEndpointEnvRefused(t *testing.T) {
+	for _, tt := range malformedEndpointEnvLists {
+		for _, name := range otlpEndpointEnv {
+			for _, path := range []string{"langfuse", "otlp-endpoint", "environment"} {
+				t.Run(tt.name+"/"+name+"/"+path, func(t *testing.T) {
+					collector := &otlpCollector{}
+					srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
+					defer srv.Close()
+					t.Setenv("LANGFUSE_PUBLIC_KEY", testLangfusePublic)
+					t.Setenv("LANGFUSE_SECRET_KEY", testLangfuseSecret)
+					isolateOTLPEnv(t)
+					t.Setenv(name, tt.value)
+					var tc config.TelemetryConfig
+					switch path {
+					case "langfuse":
+						tc = langfuseTelemetry(srv.URL + "/api/public/otel")
+					case "otlp-endpoint":
+						tc = config.TelemetryConfig{OTLPEndpoint: srv.URL}
+					}
+
+					_, shutdown, err := newTracer(context.Background(), tc, io.Discard)
+					if err == nil {
+						_ = shutdown(context.Background())
+						t.Fatal("newTracer accepted a malformed endpoint variable")
+					}
+					if !strings.HasPrefix(err.Error(), name+":") {
+						t.Errorf("err = %v, want it to name %s", err, name)
+					}
+					if strings.Contains(err.Error(), malformedEndpointEnvSecret) {
+						t.Errorf("the error echoes the endpoint value: %v", err)
+					}
+					if n := len(collector.recorded()); n != 0 {
+						t.Errorf("the collector received %d requests", n)
+					}
+					if otelErrors.logger.Load() != nil {
+						t.Error("a refused run left the SDK error route bound")
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestWellFormedOTLPEndpointEnvReachesCollector: a well-formed endpoint
+// variable passes the check, and the environment-only path still binds
+// OTel and reaches its collector.
+func TestWellFormedOTLPEndpointEnvReachesCollector(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		envVar  string
+		envPath string
+	}{
+		{"generic endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT", ""},
+		{"traces endpoint", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "/v1/traces"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			collector := &otlpCollector{}
+			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
+			defer srv.Close()
+			isolateOTLPEnv(t)
+			t.Setenv(tt.envVar, srv.URL+tt.envPath)
+
+			exportOneSpan(t, config.TelemetryConfig{})
+
+			if len(collector.recorded()) == 0 {
+				t.Fatal("no span reached the environment's collector")
+			}
+		})
 	}
 }
 
