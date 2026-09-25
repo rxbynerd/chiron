@@ -1341,3 +1341,76 @@ just for them, a minimal `export_test.go` (`billet.ToolError`,
 `billet.SaveTool`, `billet.MaxToolErrBytes`, `billet.MCPClient`,
 `billet.FirstLine`) lets the whole suite live in one external
 `package billet_test` file.
+
+## 2026-09-25 — Per-turn worker progress events
+
+Issue #18. Between `interaction_created` and `run_completed` a worker run
+emitted nothing for up to `fleet.worker_timeout`, so an operator could not
+tell progress from a hang; V2-RESEARCH-AGENT §6 asks for best-effort
+progress emission. The worker now reports each turn through an optional
+hook, and the CLI emits each report as a transport event. No new dependency
+was introduced.
+
+**A `delta` typed `worker_turn`, not a new event kind.** Transport event
+kinds mirror `proto/chiron/v1` one-to-one, and `delta` already carries
+typed payloads discriminated by `type` (`thought_summary`, and
+`stream_degraded` since cycle 2). A new kind would need a proto change for
+an observability signal. The payload keeps the `type` and `text` keys every
+delta has, with `text` a self-contained line such as `turn 2/8: fetch
+https://example.org (104 tokens so far)` because the proto `Delta` carries
+only `text`. Typed `turn`, `max_turns`, `action`, `detail`,
+`input_tokens`, `output_tokens` and `estimated_cost_gbp` fields serve
+NDJSON consumers.
+
+**The fleet API is a hook, not a transport.** `fleet.WorkerDeps.Progress`
+receives a `fleet.Progress` per turn, so the fleet package stays free of
+the transport seam; the CLI binds the hook (`bindWorkerProgress`) beside
+`bindThoughtDisplay`. `RunWorker`'s signature is unchanged.
+
+**One report per parsed action.** The hook is called after the model's
+action parses and before it is dispatched, so a report always names an
+action the loop is about to take. A turn that ends earlier (a model error,
+a `length` cut-off, an invalid action) reports nothing; the terminal event
+and the report carry that outcome. The token and cost fields are the
+accumulated usage including the turn's own model call.
+
+**The detail names the target, never content.** Search and recall report
+the query. Fetch reports the URL reduced to `scheme://host`: the port is
+kept, userinfo, path, query and fragment are dropped, and an unparsable or
+scheme-less URL gives an empty detail. Final reports nothing. The detail is
+flattened to one printable line (terminal escapes and bidirectional
+overrides dropped), scrubbed, then bounded to 200 runes; scrubbing comes
+first so the cut cannot leave a credential fragment too short for the
+scrubber's high-entropy backstop. It never carries page content, search
+results, the answer or a full URL. The CLI scrubs `text` and `detail` again
+at the transport boundary, as every output path does.
+
+**Best effort, bounded and inert.** Each delivery has a 2-second deadline.
+The hook runs in its own goroutine and the loop stops waiting at the
+deadline, so a hook that ignores its context costs at most that per turn; a
+hook that never returns leaves one goroutine parked per turn, bounded by the
+turn cap. A panic in the hook is recovered. Nothing the hook does can change
+the Finding, the usage, the caps or the exit path, and the CLI drops a
+marshal or emit failure. `Stdio.Emit` checks its context only once, before it
+locks the shared writer: once a write has started it runs to completion
+regardless of the deadline, and because every transport event shares that
+lock, a stalled stderr consumer can still strand an otherwise-complete run
+behind it. That gap predates this chunk and lives in `internal/transport`,
+not here; tracked in #38.
+
+**Ordered after the resume handle.** `Worker.Start` launches the loop before
+the run core emits `interaction_created`, so a fast first turn could report
+ahead of it. The Worker therefore holds a run's deliveries until `Await` is
+first entered for that id (a per-run channel closed once), within the same
+deadline. A delivery still held at the deadline is dropped, never delivered
+late or reordered. Deliveries stay on the loop goroutine, so their order is
+the turn order. Direct `RunWorker` callers have no gate.
+
+**Citation URIs are out of scope here.** This chunk's `Progress.Detail`
+reduction is unrelated to, and unaffected by, citation rendering; whether a
+cited-but-never-fetched search result's URL needs the same userinfo/query
+stripping is tracked separately in #39.
+
+**`--quiet` suppresses them.** The hook is bound only when `cfg.Stream` is
+true, as `bindThoughtDisplay` is: `--quiet` turns the delta display surface
+off. Exit codes, the report and every existing event are unchanged.

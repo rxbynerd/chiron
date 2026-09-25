@@ -183,6 +183,9 @@ refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
 `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
 `--template`) are rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+Each turn emits a `delta` event (`type: worker_turn`, with the turn, action,
+a scrubbed target and tokens so far) on stderr between `interaction_created`
+and `run_completed`, unless `--quiet`.
 
 #### Organisational knowledge (Billet, Alexandria)
 

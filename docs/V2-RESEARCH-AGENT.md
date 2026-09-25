@@ -287,7 +287,10 @@ Populate the Wave 2 fleet vocabulary:
 - run-level rollups.
 
 Transport emission remains best effort. A failed progress event must not fail a
-paid run.
+paid run. A lead must call `Await` for a worker immediately after `Start`,
+with no intervening work: `reportProgress`'s gate wait shares its budget with
+the per-call progress deadline, so a delayed `Await` costs that deadline on
+every subsequent turn, not just the first.
 
 ### Acceptance criteria
 
