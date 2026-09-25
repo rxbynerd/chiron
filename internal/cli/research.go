@@ -177,10 +177,8 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 }
 
 // buildFleet binds the fleet over the shared worker deps, so one model
-// client serves its lead and every worker. Each run's plan and findings pass
-// through an in-process session store (fleet.memory: inmemory, which config
-// validation requires for this agent); the fan-out caps are
-// fleet.max_workers and fleet.concurrency.
+// client serves its lead and every worker, with an in-process session store
+// and fleet.max_workers and fleet.concurrency as its fan-out caps.
 func buildFleet(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, error) {
 	wd, err := buildWorkerDeps(ctx, cfg, tracer, stderr, progress)
 	if err != nil {
@@ -198,14 +196,10 @@ func buildFleet(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tra
 	return f, nil
 }
 
-// buildWorkerDeps builds the clients and caps every in-process agent's
-// workers share from the resolved config. It resolves the model, search and
-// knowledge key references here, at the composition root, and fails before
-// any request if a required endpoint or key is missing or unresolvable, so a
-// misconfigured agent never emits a resume handle for a run that cannot
-// proceed. A --template is loaded and validated here for the same reason.
-// WorkerTimeout bounds each worker's run and each model, search and
-// knowledge call; fetch has its own tighter per-call bound.
+// buildWorkerDeps builds the clients and caps every in-process agent shares.
+// It resolves every key reference and loads any --template before any
+// request, so a misconfigured agent never emits a resume handle. WorkerTimeout
+// bounds each worker and each model, search and knowledge call.
 func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (fleet.WorkerDeps, error) {
 	fc := cfg.Fleet
 	for _, required := range []struct {

@@ -218,12 +218,10 @@ func fleetArgs(modelURL string, searchSrv *searchtest.FakeServer, extra ...strin
 	return append(args, extra...)
 }
 
-// TestFleetAgentThroughCLI drives --agent fleet through the compiled command
-// tree against one loopback model endpoint and a fake search MCP: the lead
-// decomposes into three briefs, three workers each search and answer citing
-// their own source, and the lead synthesises and cites one report. Progress
-// names each worker and flows only after the id is emitted, and the run's
-// usage is the lead's and workers' calls rolled up once.
+// TestFleetAgentThroughCLI: --agent fleet over one loopback model endpoint
+// produces a synthesised report citing every worker's source, worker-tagged
+// progress between interaction_created and run_completed, and one usage
+// rollup of the lead's and workers' calls.
 func TestFleetAgentThroughCLI(t *testing.T) {
 	fm := newCLIFleetModel(t, 3)
 	modelSrv := httptest.NewServer(fm)
