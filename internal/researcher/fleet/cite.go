@@ -119,6 +119,7 @@ func (l *lead) cite(ctx context.Context, body string, findings []collectedFindin
 	span.SetAttr("candidate_sources", len(candidates))
 	span.SetAttr("claim_count", claims)
 	span.SetAttr("citation_count", len(res.Citations))
+	span.SetAttr("unattributed_sources", len(candidates)-len(res.Citations))
 	span.SetAttr("dropped_citations", dropped)
 	span.SetAttr("input_tokens", res.Usage.InputTokens)
 	span.SetAttr("output_tokens", res.Usage.OutputTokens)

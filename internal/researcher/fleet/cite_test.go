@@ -152,13 +152,14 @@ func TestCiteKeepsASubsetOfWorkerCitations(t *testing.T) {
 
 	span := onlySpan(t, out.String(), trace.SpanCite)
 	for key, want := range map[string]any{
-		"candidate_sources": float64(4),
-		"claim_count":       float64(3),
-		"citation_count":    float64(3),
-		"dropped_citations": float64(3),
-		"input_tokens":      float64(citeUsage.InputTokens),
-		"output_tokens":     float64(citeUsage.OutputTokens),
-		"status":            "completed",
+		"candidate_sources":    float64(4),
+		"claim_count":          float64(3),
+		"citation_count":       float64(3),
+		"unattributed_sources": float64(1),
+		"dropped_citations":    float64(3),
+		"input_tokens":         float64(citeUsage.InputTokens),
+		"output_tokens":        float64(citeUsage.OutputTokens),
+		"status":               "completed",
 	} {
 		if got := span.Attrs[key]; got != want {
 			t.Errorf("span %s = %v, want %v", key, got, want)
@@ -277,6 +278,9 @@ func TestCiteFallsBackToEveryWorkerCitation(t *testing.T) {
 			span := onlySpan(t, out.String(), trace.SpanCite)
 			if span.Attrs["status"] != "incomplete" || span.Error == "" {
 				t.Errorf("span status %v, error %q; want an incomplete span with an error", span.Attrs["status"], span.Error)
+			}
+			if got := span.Attrs["unattributed_sources"]; got != float64(0) {
+				t.Errorf("unattributed_sources = %v, want 0 when every worker source is kept", got)
 			}
 		})
 	}
