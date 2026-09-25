@@ -290,7 +290,9 @@ type findingDocument struct {
 	Finding  findingRecord `json:"finding"`
 }
 
-// findingRecord is a Finding's stored form.
+// findingRecord is a Finding's stored form. It mirrors Finding field for
+// field so each converts to the other, and a field added to Finding does not
+// compile until it is added here too.
 type findingRecord struct {
 	Text      string           `json:"text"`
 	Citations []types.Citation `json:"citations"`
@@ -308,14 +310,7 @@ func (p *pool) storeFinding(ctx context.Context, workerID, briefID string, f Fin
 		Version:  findingDocumentVersion,
 		WorkerID: workerID,
 		BriefID:  briefID,
-		Finding: findingRecord{
-			Text:      f.Text,
-			Citations: f.Citations,
-			Usage:     f.Usage,
-			Status:    f.Status,
-			Detail:    f.Detail,
-			Turns:     f.Turns,
-		},
+		Finding:  findingRecord(f),
 	})
 	if err != nil {
 		return memory.Reference{}, err
@@ -380,26 +375,18 @@ func readFinding(ctx context.Context, store memory.ContextStore, ref memory.Refe
 	}
 	switch {
 	case doc.Kind != findingDocumentKind:
-		return storedFinding{}, fmt.Errorf("%w: kind %q, want %q", ErrInvalidFinding, boundRunes(doc.Kind, maxFindingEchoRunes), findingDocumentKind)
+		return storedFinding{}, fmt.Errorf("%w: kind %q, want %q", ErrInvalidFinding, boundRunes(secret.Scrub(doc.Kind), maxFindingEchoRunes), findingDocumentKind)
 	case doc.Version != findingDocumentVersion:
 		return storedFinding{}, fmt.Errorf("%w: version %d, want %d", ErrInvalidFinding, doc.Version, findingDocumentVersion)
 	case doc.WorkerID == "" || doc.BriefID == "":
 		return storedFinding{}, fmt.Errorf("%w: the worker or brief id is missing", ErrInvalidFinding)
 	case !doc.Finding.Status.Terminal():
-		return storedFinding{}, fmt.Errorf("%w: status %q is not terminal", ErrInvalidFinding, boundRunes(string(doc.Finding.Status), maxFindingEchoRunes))
+		return storedFinding{}, fmt.Errorf("%w: status %q is not terminal", ErrInvalidFinding, boundRunes(secret.Scrub(string(doc.Finding.Status)), maxFindingEchoRunes))
 	}
-	r := doc.Finding
 	return storedFinding{
 		WorkerID: doc.WorkerID,
 		BriefID:  doc.BriefID,
-		Finding: Finding{
-			Text:      r.Text,
-			Citations: r.Citations,
-			Usage:     r.Usage,
-			Status:    r.Status,
-			Detail:    r.Detail,
-			Turns:     r.Turns,
-		},
+		Finding:  Finding(doc.Finding),
 	}, nil
 }
 
