@@ -163,7 +163,7 @@ func TestValidateKnowledgeNeverEchoesSecrets(t *testing.T) {
 	}
 }
 
-// TestKnowledgeRoundTrip: the knowledge fields survive EncodeJSON -> Decode
+// TestKnowledgeRoundTrip: the knowledge fields survive EncodeJSON -> decode
 // under their documented keys, so a pipeline stage cannot drop one.
 func TestKnowledgeRoundTrip(t *testing.T) {
 	in := withKnowledge(KnowledgeAlexandria, "https://alexandria.example")
@@ -181,18 +181,18 @@ func TestKnowledgeRoundTrip(t *testing.T) {
 			t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
 		}
 	}
-	out, err := Decode(&buf)
+	out, err := decode(&buf)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("decode: %v", err)
 	}
 	if !reflect.DeepEqual(out.Fleet, in.Fleet) {
 		t.Errorf("round trip lost data:\n got %+v\nwant %+v", out.Fleet, in.Fleet)
 	}
 
 	yamlIn := "agent: worker\nfleet:\n  knowledge_provider: billet\n  knowledge_endpoint: http://127.0.0.1:8140/\n  knowledge_remember: true\n"
-	cfg, err := Decode(strings.NewReader(yamlIn))
+	cfg, err := decode(strings.NewReader(yamlIn))
 	if err != nil {
-		t.Fatalf("Decode YAML: %v", err)
+		t.Fatalf("decode YAML: %v", err)
 	}
 	if f := cfg.Fleet; f.KnowledgeProvider != KnowledgeBillet || !f.KnowledgeRemember || f.KnowledgeLimit != DefaultKnowledgeLimit {
 		t.Errorf("YAML knowledge block = %+v, want billet with remember and the default limit", f)
