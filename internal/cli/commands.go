@@ -9,9 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rxbynerd/chiron/internal/config"
+	"github.com/rxbynerd/chiron/internal/secret"
 )
 
-func newResearchCommand() *cobra.Command {
+func newResearchCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research [query]",
 		Short: "Start a research task, await it, and emit the report",
@@ -56,7 +57,7 @@ Exit codes:
 			if err != nil {
 				return err
 			}
-			return runResearch(cmd, cfg)
+			return runResearch(cmd, cfg, resolver)
 		},
 	}
 	addResearchFlags(cmd)
@@ -86,7 +87,7 @@ result as JSON. Composable in a pipeline:
 	return cmd
 }
 
-func newGetCommand() *cobra.Command {
+func newGetCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <interaction-id>",
 		Short: "Re-fetch and format an interaction (resume after a crash)",
@@ -102,14 +103,14 @@ in-process worker (wkr_...) hold no server-side state and are refused.`,
 			if err != nil {
 				return err
 			}
-			return runGet(cmd, cfg, args[0])
+			return runGet(cmd, cfg, resolver, args[0])
 		},
 	}
 	addResearchFlags(cmd)
 	return cmd
 }
 
-func newFollowUpCommand() *cobra.Command {
+func newFollowUpCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "follow-up <interaction-id>",
 		Short: "Ask a follow-up question against a completed interaction",
@@ -124,7 +125,7 @@ minted by the in-process worker (wkr_...) are refused.`,
 			if err != nil {
 				return err
 			}
-			return runFollowUp(cmd, cfg, args[0])
+			return runFollowUp(cmd, cfg, resolver, args[0])
 		},
 	}
 	addResearchFlags(cmd)

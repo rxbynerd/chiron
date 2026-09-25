@@ -30,8 +30,15 @@ func Execute() int {
 	return 0
 }
 
-// NewRootCommand builds the chiron command tree.
+// NewRootCommand builds the chiron command tree, resolving secret://
+// references with secret.Default.
 func NewRootCommand() *cobra.Command {
+	return newRootCommand(secret.Default())
+}
+
+// newRootCommand builds the command tree around the resolver every command
+// resolves secret:// references through.
+func newRootCommand(resolver secret.Resolver) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "chiron",
 		Short: "Chiron is the Equestrianism suite's researcher",
@@ -43,10 +50,10 @@ mutates a workspace, runs no shell, and applies no edits.`,
 	}
 
 	root.AddCommand(
-		newResearchCommand(),
+		newResearchCommand(resolver),
 		newResearchConfigCommand(),
-		newGetCommand(),
-		newFollowUpCommand(),
+		newGetCommand(resolver),
+		newFollowUpCommand(resolver),
 	)
 
 	return root
