@@ -100,9 +100,11 @@ func NewWorker(deps WorkerDeps) (*Worker, error) {
 }
 
 // Start implements researcher.Researcher. It builds a Brief from the query,
-// allocates an opaque local id, launches RunWorker in a goroutine, and returns
-// the id immediately. A follow-up (PreviousInteractionID set) is rejected
-// before any work starts: the worker has no stored interaction chain.
+// with deps.ReportTemplate rendered as its OutputFormat when set, allocates an
+// opaque local id, launches RunWorker in a goroutine, and returns the id
+// immediately. A follow-up (PreviousInteractionID set) is rejected before any
+// work starts, because the worker has no stored interaction chain; so is a
+// template that fails to render.
 //
 // The run is detached from the Start context's cancellation (the run core
 // scopes that context to the start phase) and given its own cancel, which
@@ -113,6 +115,14 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	}
 	if task.PreviousInteractionID != "" {
 		return "", errors.New("fleet: the in-process worker does not support follow-up interactions")
+	}
+	brief := Brief{Objective: task.Query}
+	if w.deps.ReportTemplate != nil {
+		format, err := w.deps.ReportTemplate.Render(task.Query)
+		if err != nil {
+			return "", err
+		}
+		brief.OutputFormat = format
 	}
 
 	id, err := newInteractionID()
@@ -133,7 +143,6 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	w.runs[id] = st
 	w.mu.Unlock()
 
-	brief := Brief{Objective: task.Query}
 	after := func(ctx context.Context, f Finding, span trace.Span) {
 		st.finding = f
 		st.completed = time.Now()

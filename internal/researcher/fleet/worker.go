@@ -160,6 +160,10 @@ type WorkerDeps struct {
 	// Remember, when non-nil, saves a bounded summary of a Completed finding
 	// after the loop returns (Worker only). It is independent of Knowledge.
 	Remember memory.Rememberer
+	// ReportTemplate, when non-nil, is rendered with the query to fill the
+	// Brief's OutputFormat (Worker only; RunWorker callers set
+	// Brief.OutputFormat themselves). nil selects the built-in format.
+	ReportTemplate *ReportTemplate
 	// Logger receives the save-back outcome. nil discards it; the composition
 	// root binds a scrubbing handler on the command's stderr.
 	Logger *slog.Logger
