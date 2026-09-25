@@ -177,6 +177,60 @@ func TestNewOTelExportsToTracesPathWithHeaders(t *testing.T) {
 	}
 }
 
+// TestNewOTelRefusesRedirects: an explicit endpoint that redirects to
+// another port on the same host fails the export, so the target never
+// receives the request or its Authorization header.
+func TestNewOTelRefusesRedirects(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{"307", http.StatusTemporaryRedirect},
+		{"308", http.StatusPermanentRedirect},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu                  sync.Mutex
+				redirected, reached int
+			)
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				mu.Lock()
+				defer mu.Unlock()
+				reached++
+			}))
+			defer target.Close()
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				mu.Lock()
+				redirected++
+				mu.Unlock()
+				http.Redirect(w, r, target.URL+"/v1/traces", tt.status)
+			}))
+			defer endpoint.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tr, shutdown, err := NewOTel(ctx, endpoint.URL, WithHeaders(map[string]string{"Authorization": "Basic cGstbGY6c2stbGY="}))
+			if err != nil {
+				t.Fatalf("NewOTel: %v", err)
+			}
+			_, span := tr.StartSpan(ctx, SpanResearch)
+			span.End(nil)
+			_ = shutdown(ctx)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if redirected == 0 {
+				t.Fatal("no export reached the endpoint")
+			}
+			if reached != 0 {
+				t.Errorf("the redirect target received %d requests", reached)
+			}
+		})
+	}
+}
+
 // TestNewOTelRejectsInvalidEndpoint: an endpoint that is not an absolute
 // http(s) URL fails construction without echoing the value.
 func TestNewOTelRejectsInvalidEndpoint(t *testing.T) {
