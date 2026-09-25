@@ -1444,6 +1444,6 @@ site already wraps transport errors with one.
   on oversize would lose the diagnostic. The MCP event-stream reader returns
   the first response without waiting for the stream to end, under its own
   aggregate cap.
-- The rune-safe truncation loops the issue's comment counts are string
+- The rune-safe truncation loops the issue's comment counts as string
   handling, not HTTP, and stay where they are.
 - `internal/researcher/gemini/input.go` bounds a file read, not an HTTP body.
