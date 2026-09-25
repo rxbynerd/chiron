@@ -3,7 +3,9 @@
 // an external knowledge store (Billet, Alexandria) satisfies them through the
 // adapters in this package's subpackages, and the research worker consults
 // them as its recall action (docs/KNOWLEDGE.md). The session and artifact
-// plane (OpenSession, Put, Get) is bound only to Noop (PROPOSAL §5).
+// plane (OpenSession, Put, Get) is bound to Noop, which stores nothing, or to
+// InMemory, the in-process store the fleet passes findings through by
+// reference; InMemory's Remember and Recall report ErrNotImplemented.
 //
 // The interfaces are declared locally rather than imported from any store's
 // own module, per PADDOCK §8.4: a store satisfies them structurally, so
@@ -18,9 +20,14 @@ import (
 	"time"
 )
 
-// ErrNotFound is returned when a Reference resolves to nothing — always,
-// in the case of the no-op store.
-var ErrNotFound = errors.New("memory: reference not found")
+var (
+	// ErrNotFound is returned when a Reference resolves to nothing —
+	// always, in the case of the no-op store.
+	ErrNotFound = errors.New("memory: reference not found")
+	// ErrNotImplemented is returned by a binding for a half of the seam it
+	// does not provide, such as InMemory's Remember and Recall.
+	ErrNotImplemented = errors.New("memory: not implemented")
+)
 
 // Namespace scopes every operation. It carries the tenant, so isolation
 // is enforced on each call rather than bolted on.
