@@ -87,6 +87,8 @@ type recordingStore struct {
 	*memory.InMemory
 	putErr error
 
+	putCalls atomic.Int32
+
 	mu      sync.Mutex
 	stored  []string
 	watched map[string]chan struct{}
@@ -115,6 +117,7 @@ func (s *recordingStore) watch(briefID string) <-chan struct{} {
 }
 
 func (s *recordingStore) Put(ctx context.Context, ns memory.Namespace, body io.Reader, meta memory.ArtifactMeta) (memory.Reference, error) {
+	s.putCalls.Add(1)
 	if s.putErr != nil {
 		return memory.Reference{}, s.putErr
 	}
@@ -936,6 +939,64 @@ func TestPoolPutFailureKeepsSpend(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPoolStoreFindingRefusesOversizeBeforeReachingTheStore: storeFinding's
+// own size bound, checked ahead of the store's own, refuses an oversize
+// finding without ever calling Store.Put.
+func TestPoolStoreFindingRefusesOversizeBeforeReachingTheStore(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer()
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+	p := mustPool(t, poolDeps{
+		Worker:      poolWorkerDeps(t, newModelClient(t, modelSrv), searchSrv),
+		Store:       store,
+		Namespace:   ns,
+		MaxWorkers:  1,
+		Concurrency: 1,
+	})
+
+	f := Finding{Status: types.StatusCompleted, Text: strings.Repeat("a", maxFindingBytes)}
+	if _, err := p.storeFinding(context.Background(), "worker-1", "brief-1", f); err == nil ||
+		!strings.Contains(err.Error(), "over the") || !strings.Contains(err.Error(), "byte bound") {
+		t.Fatalf("storeFinding(oversize) = %v, want the pool's own bound error", err)
+	}
+	if n := store.putCalls.Load(); n != 0 {
+		t.Errorf("Store.Put was called %d times, want the pool's own bound to refuse before it is ever reached", n)
+	}
+}
+
+// TestPoolPutFailureAppendsToWorkerDetail: when a worker's own finding
+// already carries a detail (here, a turn cap stopped it short), a store
+// failure appends the store's error after that detail rather than replacing
+// it, so neither reason is lost.
+func TestPoolPutFailureAppendsToWorkerDetail(t *testing.T) {
+	searchTurn := modeltest.FakeReply{Content: `{"action":"search","query":"again"}`, FinishReason: "stop"}
+	modelSrv := modeltest.NewFakeServer(searchTurn)
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+	store.putErr = errors.New("store unavailable")
+
+	deps := poolWorkerDeps(t, newModelClient(t, modelSrv), searchSrv)
+	deps.Caps.MaxTurns = 1
+	p := mustPool(t, poolDeps{Worker: deps, Store: store, Namespace: ns, MaxWorkers: 1, Concurrency: 1})
+	res := p.run(context.Background(), poolBriefs(1), nil)
+
+	r := res.Briefs[0]
+	if r.Status != types.StatusIncomplete || !strings.Contains(r.Detail, "1-turn cap") {
+		t.Fatalf("result = %+v, want an incomplete worker stopped at the turn cap", r)
+	}
+	if !strings.Contains(r.Detail, "the finding was not stored") || !strings.Contains(r.Detail, "store unavailable") {
+		t.Fatalf("result detail = %q, want the store error appended to the worker's own detail", r.Detail)
+	}
+	capIdx, storeIdx := strings.Index(r.Detail, "1-turn cap"), strings.Index(r.Detail, "store unavailable")
+	if capIdx < 0 || storeIdx < capIdx {
+		t.Errorf("result detail = %q, want the worker's own detail before the store error", r.Detail)
 	}
 }
 
