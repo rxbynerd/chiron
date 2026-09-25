@@ -187,8 +187,21 @@ const (
 
 // defang breaks any delimiter-like sequence in retrieved content so a page
 // or snippet cannot close the fence early and impersonate Chiron's framing.
+// It writes a space after every '<' that is followed by another '<', so no
+// "<<" survives however long the run, and defang(defang(s)) == defang(s).
 func defang(s string) string {
-	return strings.ReplaceAll(s, "<<<", "< < <")
+	if !strings.Contains(s, "<<") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + strings.Count(s, "<"))
+	for i := 0; i < len(s); i++ {
+		b.WriteByte(s[i])
+		if s[i] == '<' && i+1 < len(s) && s[i+1] == '<' {
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
 }
 
 // searchResultsMessage renders search results as the next user turn.
