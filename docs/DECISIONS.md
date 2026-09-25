@@ -1588,14 +1588,27 @@ asserts the topology and the attribute keys.
 `sk-lf-` followed by a UUID. A lower-case UUID has no upper-case letter,
 so the high-entropy backstop never fired, and `secret.Scrub` passed the
 keys through whole. Two patterns were added. The first matches the whole
-key, case-insensitively, so no UUID group survives. The second scrubs
-Basic credentials in an `Authorization` header or assignment, which is how
-Langfuse's OTLP ingestion receives the key pair. That base64 value was
-caught only by the entropy backstop, and a low-entropy key pair encodes
-below its 4.0-bit bar. The Basic pattern is anchored on the header name,
-because "basic" on its own is ordinary prose. It also covers the
-percent-encoded form of an `OTEL_EXPORTER_OTLP_HEADERS` value and a raw
-`user:pass` value. The table test asserts that neither half of any
-credential survives. Both tracers already route attribute values through
-`secret.Scrub`, so no tracer changed; a JSONL test proves a Langfuse key
-pair set as span attributes never reaches the trace file.
+key, case-insensitively and word-boundary anchored, so no UUID group
+survives and a trailing identifier that merely contains the shape is left
+alone. The second scrubs Basic credentials wherever a "Basic" scheme
+token appears, which is how Langfuse's OTLP ingestion sends the key pair.
+That base64 value was caught only by the entropy backstop, and a
+low-entropy key pair encodes below its 4.0-bit bar. The pattern is not
+anchored on an `Authorization` header name: every call site — both
+tracers' `SetAttr`, the scrub handler — scrubs an attribute's key and its
+value as two independent `Scrub` calls, so a header-shaped attribute puts
+"authorization" in the key and "Basic ..." in the value, and an anchor
+spanning both would never fire on the value alone. Instead a
+"Basic"-prefixed candidate is only redacted once it structurally
+base64-decodes to bytes containing `:` (RFC 7617), so ordinary prose such
+as "basic authorization rules apply" still survives. It also covers the
+percent-encoded form of an `OTEL_EXPORTER_OTLP_HEADERS` value; a raw,
+unencoded `user:pass` pair is caught by the Langfuse key pattern instead,
+since each half still starts with `pk-lf-`/`sk-lf-`. The table test
+asserts that neither half of any credential survives, including a
+key/value pair scrubbed as two separate `Scrub` calls with no
+"authorization" in either string. Both tracers already route attribute
+values through `secret.Scrub`, so no tracer changed; a JSONL test proves
+a Langfuse key pair set as span attributes never reaches the trace file,
+and a second JSONL test proves the same for a Basic pair set as a
+header-shaped attribute's value alone.
