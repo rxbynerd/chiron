@@ -84,11 +84,21 @@ type leadPlan struct {
 	Ref    memory.Reference
 }
 
-// planDocument is the persisted plan: the query and its briefs, so the
-// artifact identifies its own run.
+// planDocumentKind identifies the persisted plan's shape, so a reader
+// recovering artifacts from the store can tell a plan apart from anything
+// else without guessing at its fields.
+const planDocumentKind = "fleet_plan"
+
+// planDocumentVersion is the persisted plan's schema version.
+const planDocumentVersion = 1
+
+// planDocument is the persisted plan: its kind and version, the query and
+// its briefs, so the artifact identifies its own run.
 type planDocument struct {
-	Query  string         `json:"query"`
-	Briefs []plannedBrief `json:"briefs"`
+	Kind    string         `json:"kind"`
+	Version int            `json:"version"`
+	Query   string         `json:"query"`
+	Briefs  []plannedBrief `json:"briefs"`
 }
 
 // newLead validates deps and applies the defaults.
@@ -172,6 +182,9 @@ func (l *lead) decomposeInSpan(ctx context.Context, query string) (leadPlan, typ
 	if resp.FinishReason == "length" {
 		return leadPlan{}, usage, fmt.Errorf("%w: the reply was cut off at the %d-token completion cap", ErrInvalidPlan, l.deps.MaxTokens)
 	}
+	if resp.FinishReason == "content_filter" {
+		return leadPlan{}, usage, fmt.Errorf("%w: the reply was refused by the model's content filter", ErrInvalidPlan)
+	}
 	briefs, err := parseDecomposition(resp.Content, l.deps.Routes)
 	if err != nil {
 		return leadPlan{}, usage, err
@@ -207,7 +220,12 @@ func (e *persistPlanError) Unwrap() error { return e.err }
 // persistPlan writes the plan to the run's session and returns its
 // reference.
 func (l *lead) persistPlan(ctx context.Context, query string, briefs []plannedBrief) (memory.Reference, error) {
-	body, err := json.Marshal(planDocument{Query: query, Briefs: briefs})
+	body, err := json.Marshal(planDocument{
+		Kind:    planDocumentKind,
+		Version: planDocumentVersion,
+		Query:   query,
+		Briefs:  briefs,
+	})
 	if err != nil {
 		return memory.Reference{}, err
 	}
