@@ -198,6 +198,9 @@ refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
 `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
 `--template`) are rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+Each turn emits a `delta` event (`type: worker_turn`, with the turn, action,
+a scrubbed target and tokens so far) on stderr between `interaction_created`
+and `run_completed`, unless `--quiet`.
 
 The endpoints come only from their flags or from
 `CHIRON_FLEET_MODEL_ENDPOINT`, `CHIRON_FLEET_SEARCH_ENDPOINT` and
