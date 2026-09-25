@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -293,6 +294,49 @@ func TestConcludeStatusRules(t *testing.T) {
 				t.Errorf("outputs = %+v, want none without a body", in.Outputs)
 			case out.Body != "" && !reflect.DeepEqual(in.Outputs, []types.Output{{Type: types.OutputText, Text: out.Body}}):
 				t.Errorf("outputs = %+v, want the body as the one text output", in.Outputs)
+			}
+		})
+	}
+}
+
+// TestConcludeBodyCannotHideTheSources: a synthesised or stitched body that
+// ends in an unclosed HTML comment is escaped, so once formatted the Sources
+// list still follows as a list rather than inside an HTML block that would
+// run to the end of the document.
+func TestConcludeBodyCannotHideTheSources(t *testing.T) {
+	const unclosed = "<!-- reviewer note"
+	failedCall := modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":{"message":"down"}}`}
+	attributeA := citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t))
+	for _, tt := range []struct {
+		name    string
+		replies []modeltest.FakeReply
+		text    string
+	}{
+		{"synthesised", []modeltest.FakeReply{synthesisReply("# Report\n\nThe answer is X.\n\n" + unclosed), attributeA}, "Finding 1 text."},
+		{"stitched", []modeltest.FakeReply{failedCall}, "Finding 1 text.\n\n" + unclosed},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(tt.replies...)
+			defer modelSrv.Close()
+			l, store, ns := synthesisLead(t, modelSrv, nil)
+			f := completedFinding(1, citeURLA)
+			f.Text = tt.text
+			plan, pooled := storedRun(t, store, ns, f)
+
+			out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
+			in := &types.Interaction{ID: "run-1", Agent: "fleet", Query: testQuery}
+			out.applyTo(in)
+			report, err := formatter.NewMarkdown().Format(context.Background(), in)
+			if err != nil {
+				t.Fatalf("Format: %v", err)
+			}
+			md := string(report.Markdown)
+
+			if !strings.HasSuffix(md, "\n\\"+unclosed+"\n\n## Sources\n\n1. [Source 1]("+citeURLA+")\n") {
+				t.Errorf("the report does not end in the escaped comment then the Sources list:\n%s", md)
+			}
+			if unescapedHTMLOpener.MatchString(md) {
+				t.Errorf("the report keeps an unescaped raw-HTML opener, which could hide the Sources list:\n%s", md)
 			}
 		})
 	}

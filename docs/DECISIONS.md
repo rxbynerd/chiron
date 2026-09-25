@@ -1888,6 +1888,20 @@ its body passes through `sanitiseAnswer` like a worker's answer. The
 `synthesise` span records the included, truncated and gapped finding counts,
 the tokens and the status.
 
+**No body can carry raw HTML or hide the sources.** `sanitiseAnswer`, which
+every synthesised, stitched and worker body passes through, removes HTML
+tags and comments repeatedly until none remains, since removing one tag can
+join the text around it into another. Tag removal alone misses a `<` inside
+a quoted attribute, and an unclosed `<!--` or `<script` opens a CommonMark
+HTML block that runs to the end of the document, swallowing the Sources list
+the formatter appends. So, after removal, every `<` followed by a letter,
+`/`, `!` or `?` is escaped as `\<` and renders as text. Those are the only
+ways raw HTML can begin. An `http://` or `https://` autolink is kept, and a
+`<` already escaped by a backslash is left alone. The escape is not aware of
+code spans or blocks, so a `<` before a letter in code shows its backslash.
+A test formats a body ending in an unclosed comment and checks that the
+Sources list still follows it as a list.
+
 **Synthesis degrades to the findings, never to nothing.** A reply cut off at
 the completion cap keeps its body, and synthesis is Incomplete. A failed
 call, a filtered or empty reply, or a template that fails to render makes
