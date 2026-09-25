@@ -65,11 +65,11 @@ type findingSet struct {
 	Gaps     []findingGap
 }
 
-// synthesisResult is the synthesise step's outcome. Status is Completed;
-// Incomplete for a body cut off at the completion cap; or Failed when there
-// is no synthesised body, in which case Body is the stitched fallback, or
-// empty when no finding was collected. Truncated counts the finding texts
-// cut to maxSynthesisFindingBytes.
+// synthesisResult is the synthesise step's outcome over Set, the findings
+// it was given. Status is Completed; Incomplete for a body cut off at the
+// completion cap; or Failed when there is no synthesised body, in which case
+// Body is the stitched fallback, or empty when no finding was collected.
+// Truncated counts the finding texts cut to maxSynthesisFindingBytes.
 type synthesisResult struct {
 	Set       findingSet
 	Body      string
@@ -79,14 +79,14 @@ type synthesisResult struct {
 	Truncated int
 }
 
-// synthesise reads every brief's finding back by reference and makes one
-// plain-text model call, under a synthesise span, that writes the report
-// body from them. The call is never retried. When it fails, or its reply is
-// empty or filtered, the body is the collected findings stitched together,
-// so no paid finding is lost; with no finding collected, no call is made.
-func (l *lead) synthesise(ctx context.Context, query string, plan leadPlan, pooled poolResult) synthesisResult {
+// synthesise makes one plain-text model call, under a synthesise span, that
+// writes the report body from the findings collectFindings read back. The
+// call is never retried. When it fails, or its reply is empty or filtered,
+// the body is the collected findings stitched together, so no paid finding
+// is lost; with no finding collected, no call is made.
+func (l *lead) synthesise(ctx context.Context, query string, set findingSet) synthesisResult {
 	ctx, span := l.deps.Tracer.StartSpan(ctx, trace.SpanSynthesise)
-	res := l.synthesiseInSpan(ctx, query, plan, pooled)
+	res := l.synthesiseInSpan(ctx, query, set)
 
 	span.SetAttr("findings_included", len(res.Set.Findings))
 	span.SetAttr("findings_truncated", res.Truncated)
@@ -105,8 +105,8 @@ func (l *lead) synthesise(ctx context.Context, query string, plan leadPlan, pool
 	return res
 }
 
-func (l *lead) synthesiseInSpan(ctx context.Context, query string, plan leadPlan, pooled poolResult) synthesisResult {
-	res := synthesisResult{Set: l.collectFindings(ctx, plan, pooled)}
+func (l *lead) synthesiseInSpan(ctx context.Context, query string, set findingSet) synthesisResult {
+	res := synthesisResult{Set: set}
 	if len(res.Set.Findings) == 0 {
 		res.Status = types.StatusFailed
 		res.Detail = "no worker produced a finding with text"
@@ -200,7 +200,7 @@ func (l *lead) readBack(ctx context.Context, r briefResult) (Finding, string) {
 	case ctx.Err() != nil:
 		return Finding{}, "the read-back deadline passed before the finding was read"
 	}
-	sf, err := readFinding(ctx, l.deps.Store, r.Ref)
+	sf, err := l.readFindingSafely(ctx, r.Ref)
 	if err != nil {
 		return Finding{}, "the finding could not be read back: " + err.Error()
 	}
@@ -215,6 +215,22 @@ func (l *lead) readBack(ctx context.Context, r briefResult) (Finding, string) {
 		return Finding{}, withDetail(fmt.Sprintf("the worker ended %s with no text", echoStatus(f.Status)), f.Detail)
 	}
 	return f, ""
+}
+
+// errStoreReadPanicked stands for a store read that panicked. The recovered
+// value is never included, for the reason panicRecoveryDetail gives.
+var errStoreReadPanicked = errors.New("the store panicked")
+
+// readFindingSafely runs readFinding, recovering a panic in the store into
+// errStoreReadPanicked, so one brief's read cannot lose the other briefs'
+// findings.
+func (l *lead) readFindingSafely(ctx context.Context, ref memory.Reference) (sf storedFinding, err error) {
+	defer func() {
+		if recover() != nil {
+			sf, err = storedFinding{}, errStoreReadPanicked
+		}
+	}()
+	return readFinding(ctx, l.deps.Store, ref)
 }
 
 // gapReason makes a reason safe for a lead prompt and the run's detail: one
