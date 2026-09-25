@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/template"
 	"unicode/utf8"
 )
@@ -36,16 +37,27 @@ type reportTemplateData struct {
 }
 
 // LoadReportTemplate reads, parses and validates the template at path. It
-// reads at most MaxReportTemplateBytes+1 bytes and rejects a larger file,
-// invalid UTF-8, a blank file, a parse error, and a template that fails to
-// render, renders blank or renders past MaxReportTemplateBytes for a sample
-// query, so a broken template fails before any request is made.
+// opens with O_NONBLOCK so a FIFO or other special file with no reader
+// waiting cannot wedge the open, stats the opened handle and rejects
+// anything but a regular file before reading; for a regular file O_NONBLOCK
+// has no effect on the read that follows. It reads at most
+// MaxReportTemplateBytes+1 bytes and rejects a larger file, invalid UTF-8, a
+// blank file, a parse error, and a template that fails to render, renders
+// blank or renders past MaxReportTemplateBytes for a sample query, so a
+// broken template fails before any request is made.
 func LoadReportTemplate(path string) (*ReportTemplate, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("fleet: reading report template: %w", err)
+		return nil, fmt.Errorf("fleet: reading report template %s: %w", path, err)
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("fleet: reading report template %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("fleet: report template %s is not a regular file", path)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxReportTemplateBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("fleet: reading report template %s: %w", path, err)
