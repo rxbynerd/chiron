@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -171,5 +172,17 @@ func TestApplyFlagsFleetUnsetLeavesBase(t *testing.T) {
 	}
 	if base.Fleet.ModelEndpoint != "https://from.the.pipe" || base.Fleet.MaxTurns != 3 {
 		t.Errorf("unset fleet flags clobbered the base: %+v", base.Fleet)
+	}
+}
+
+// TestFleetSearchFlagUsageHasNoDuplicateDefault: --fleet-search-tool and
+// --fleet-search-query-arg carry a non-zero default, which pflag's stock
+// help template already annotates — the usage string must not repeat it.
+func TestFleetSearchFlagUsageHasNoDuplicateDefault(t *testing.T) {
+	fs := newFlagSet(t)
+	for _, name := range []string{"fleet-search-tool", "fleet-search-query-arg"} {
+		if usage := fs.Lookup(name).Usage; strings.Contains(usage, "(default") {
+			t.Errorf("--%s usage %q duplicates pflag's own default annotation", name, usage)
+		}
 	}
 }
