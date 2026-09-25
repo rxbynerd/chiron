@@ -1656,7 +1656,8 @@ only thing that decides what a worker can do.
 **Validation before dispatch.** Every check runs before `decompose`
 returns, so a caller has nothing to dispatch when one fails. The reply is
 decoded with unknown fields and trailing content rejected. A reply cut off
-at the cap (`finish_reason: "length"`), an empty reply, invalid JSON, a
+at the cap (`finish_reason: "length"`), refused by the model's content
+filter (`finish_reason: "content_filter"`), an empty reply, invalid JSON, a
 count outside 3 to 5, a blank field, an unknown field or a target the
 router cannot dispatch is `ErrInvalidPlan`. An unroutable target also
 matches `ErrUnroutableTarget`; its message, like the JSON-decode failure's,
@@ -1711,10 +1712,13 @@ offer a target the router refuses.
 
 **The plan is persisted by reference.** The lead writes the plan to the
 run's `ContextStore` session as JSON before `decompose` returns, with the
-name `fleet-plan.json` and media type `application/json`. The JSON holds
-the query and the planned briefs, so the artifact describes itself: a
-reader recovering a run from the store needs no other context. Identity
-lives in the body rather than the meta, because `InMemory` coalesces
+name `fleet-plan.json` and media type `application/json`. The JSON holds a
+`kind` (`"fleet_plan"`) and `version` (`1`) discriminator alongside the
+query and the planned briefs, so the artifact describes itself and a
+strict decode of unrelated JSON as a `planDocument` fails instead of
+silently zero-filling it: a reader recovering a run from the store needs
+no other context. Identity lives in the body rather than the meta, because
+`InMemory` coalesces
 identical content and keeps the first write's meta. A `Put` failure, such
 as a closed session or an artifact over the bound, fails `decompose` after
 its one call and before any worker runs, with a scrubbed and bounded

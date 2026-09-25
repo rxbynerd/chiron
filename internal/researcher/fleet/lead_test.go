@@ -313,9 +313,14 @@ func TestDecomposeProducesPersistedPlan(t *testing.T) {
 				t.Fatalf("Get plan: %v", err)
 			}
 			defer rc.Close()
+			dec := json.NewDecoder(rc)
+			dec.DisallowUnknownFields()
 			var doc planDocument
-			if err := json.NewDecoder(rc).Decode(&doc); err != nil {
+			if err := dec.Decode(&doc); err != nil {
 				t.Fatalf("decode plan: %v", err)
+			}
+			if doc.Kind != planDocumentKind || doc.Version != planDocumentVersion {
+				t.Errorf("plan kind/version = %q/%d, want %q/%d", doc.Kind, doc.Version, planDocumentKind, planDocumentVersion)
 			}
 			if doc.Query != testQuery || !reflect.DeepEqual(doc.Briefs, plan.Briefs) {
 				t.Errorf("persisted plan = %+v, want the query and the returned briefs", doc)
@@ -343,6 +348,7 @@ func TestDecomposeRefusesInvalidRepliesBeforeDispatch(t *testing.T) {
 		{name: "empty reply", reply: decomposeReply("")},
 		{name: "whitespace reply", reply: decomposeReply(" \n\t ")},
 		{name: "truncated reply", reply: modeltest.FakeReply{Content: valid, FinishReason: "length", Usage: decomposeUsage}},
+		{name: "content-filtered reply", reply: modeltest.FakeReply{Content: valid, FinishReason: "content_filter", Usage: decomposeUsage}},
 		{name: "no briefs", reply: decomposeReply(decompositionJSON(t, nil))},
 		{name: "two briefs", reply: decomposeReply(decompositionJSON(t, testBriefs(2)))},
 		{name: "six briefs", reply: decomposeReply(decompositionJSON(t, testBriefs(6)))},
@@ -981,5 +987,16 @@ func TestDecomposePersistFailureErrorIsBounded(t *testing.T) {
 	span := onlySpan(t, spans.String(), trace.SpanDecompose)
 	if n := len(span.Error); n > maxDetailBytes+128 {
 		t.Errorf("span error is %d bytes, want at most around %d", n, maxDetailBytes)
+	}
+}
+
+// TestPlanDocumentRejectsUnknownShape: a strict decode of JSON that is not a
+// plan document errors, rather than silently zero-filling Kind and Briefs.
+func TestPlanDocumentRejectsUnknownShape(t *testing.T) {
+	dec := json.NewDecoder(strings.NewReader(`{"text":"x"}`))
+	dec.DisallowUnknownFields()
+	var doc planDocument
+	if err := dec.Decode(&doc); err == nil {
+		t.Fatalf("decode succeeded as %+v, want an error for an unrecognised shape", doc)
 	}
 }
