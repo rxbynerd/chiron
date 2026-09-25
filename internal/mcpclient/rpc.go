@@ -30,6 +30,30 @@ const (
 	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
+// maxSessionIDBytes bounds an accepted Mcp-Session-Id. It admits any UUID,
+// hash or JWT-shaped id while keeping a hostile one out of every later
+// request header and error scrub.
+const maxSessionIDBytes = 1024
+
+// errInvalidSessionID fails an initialize whose reply issued a session id this
+// client will not store or echo.
+var errInvalidSessionID = fmt.Errorf("mcp: initialize issued an invalid %s: want at most %d visible ASCII characters", mcpSessionHeader, maxSessionIDBytes)
+
+// validSessionID reports whether id is empty (a stateless server) or at most
+// maxSessionIDBytes of visible ASCII (0x21-0x7E), the only characters MCP
+// permits in a session id.
+func validSessionID(id string) bool {
+	if len(id) > maxSessionIDBytes {
+		return false
+	}
+	for i := range len(id) {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // session is the state initialize establishes for every later request.
 type session struct {
 	id              string // empty for a stateless server

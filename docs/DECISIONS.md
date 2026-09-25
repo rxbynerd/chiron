@@ -1528,7 +1528,10 @@ handshake that completes after `Close` ends its new session at once.
 **The session id is handled like the key.** Within a stateful server it
 works as a bearer, so no error carries it. It is redacted by exact match from
 server-supplied error bodies, JSON-RPC error messages, tool-error text and
-the quoted protocol version.
+the quoted protocol version. An issued id over 1024 bytes, or with any
+character outside visible ASCII (the only range MCP permits), fails the
+handshake at `initialize` as a protocol error and is never stored, echoed or
+ended.
 
 **Close's bound at the CLI.** There `RequestTimeout` is
 `fleet.worker_timeout`, five minutes by default. A server that accepts the
