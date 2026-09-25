@@ -202,6 +202,23 @@ func acquireSlot(ctx context.Context, slots chan struct{}) bool {
 	return true
 }
 
+// panicRecoveryDetail is the finding detail for a worker goroutine that
+// panicked. The recovered value is never included: it can carry request or
+// response content from an attacker-influenced source.
+const panicRecoveryDetail = "the worker's goroutine panicked"
+
+// dispatchSafely runs dispatch, recovering a panic into a Failed Finding so
+// one brief's crash cannot take the process, or a sibling brief still in
+// flight, down with it.
+func (p *pool) dispatchSafely(ctx context.Context, dispatch dispatchFunc, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) (f Finding) {
+	defer func() {
+		if recover() != nil {
+			f = Finding{Status: types.StatusFailed, Detail: panicRecoveryDetail}
+		}
+	}()
+	return dispatch(ctx, deps, brief, progressGate)
+}
+
 // runBrief runs one brief under its own delegate span, stores the finding
 // as soon as the worker returns, and records the outcome on the span. The
 // worker's own span nests beneath the delegate.
@@ -211,7 +228,7 @@ func (p *pool) runBrief(ctx context.Context, workerID string, pb plannedBrief, d
 	span.SetAttr(trace.AttrBriefID, pb.ID)
 	span.SetAttr("disposition", string(dispositionRan))
 
-	f := dispatch(ctx, p.workerDeps(workerID), pb.Brief, progressGate)
+	f := p.dispatchSafely(ctx, dispatch, p.workerDeps(workerID), pb.Brief, progressGate)
 	res := briefResult{
 		BriefID:       pb.ID,
 		WorkerID:      workerID,
