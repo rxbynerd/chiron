@@ -238,8 +238,17 @@ func (e *sessionOpenError) Unwrap() error { return e.err }
 // conduct runs one fleet run's lead flow to its outcome: decompose, run the
 // plan through p with every worker's progress held behind progressGate, then
 // conclude. A failed decomposition dispatches nothing: the run is Failed,
-// with the decomposition's usage because a refused reply is still billed.
-func (l *lead) conduct(ctx context.Context, query string, p *pool, progressGate <-chan struct{}) fleetOutcome {
+// with the decomposition's usage because a refused reply is still billed. A
+// panic while decomposing or dispatching is recovered into panicOutcome with
+// no findings, so it cannot take the process down.
+func (l *lead) conduct(ctx context.Context, query string, p *pool, progressGate <-chan struct{}) (out fleetOutcome) {
+	var planUsage types.Usage
+	defer func() {
+		if recover() != nil {
+			out = panicOutcome(findingSet{}, l.runUsage(types.Usage{}, planUsage))
+		}
+	}()
+
 	plan, planUsage, err := l.decompose(ctx, query)
 	if err != nil {
 		return fleetOutcome{
