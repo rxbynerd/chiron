@@ -55,9 +55,9 @@ func deref(id *int) int {
 }
 
 // answerHandshake reads one request in full and answers it when it belongs to
-// the MCP handshake, as a minimal stateless server whose initialize result
-// names no protocol version. It returns the decoded request and whether it
-// was answered; the caller answers anything else (tools/call).
+// the MCP handshake, as a minimal stateless server that accepts the client's
+// protocol version. It returns the decoded request and whether it was
+// answered; the caller answers anything else (tools/call).
 func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
 	t.Helper()
 	var req rpcRequest
@@ -73,7 +73,7 @@ func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcR
 	switch req.Method {
 	case "initialize":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID))
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q,"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID), mcpclient.ProtocolVersion)
 		return req, true
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
@@ -209,6 +209,81 @@ func TestCallToolProtocolVersionHeader(t *testing.T) {
 		if reqs[i].ProtocolVersion != "2025-03-26" {
 			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
 		}
+	}
+}
+
+func TestCallToolUnsupportedProtocolVersion(t *testing.T) {
+	// A reply naming a version outside the supported set, or none, fails the
+	// call before notifications/initialized or tools/call. A session the
+	// server issued is ended, with no version header since none was agreed.
+	tests := []struct {
+		name        string
+		opts        []mcpclienttest.FakeOption
+		wantVersion string
+		wantDeletes int
+	}{
+		{"older revision, stateful", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("2024-11-05"), mcpclienttest.WithSessionID("sess-v1")}, "2024-11-05", 1},
+		{"newer revision, stateless", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("2099-01-01")}, "2099-01-01", 0},
+		{"missing, stateful", []mcpclienttest.FakeOption{mcpclienttest.WithoutProtocolVersion(), mcpclienttest.WithSessionID("sess-v2")}, "", 1},
+		{"empty, stateless", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("")}, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := mcpclienttest.NewFakeServer(textResult("ok"), tt.opts...)
+			defer fake.Close()
+
+			_, err := call(newClient(t, fake.URL()))
+			if !errors.Is(err, mcpclient.ErrUnsupportedProtocolVersion) {
+				t.Fatalf("error = %v, want ErrUnsupportedProtocolVersion", err)
+			}
+			var pvErr *mcpclient.ProtocolVersionError
+			if !errors.As(err, &pvErr) || pvErr.Version != tt.wantVersion {
+				t.Errorf("ProtocolVersionError = %+v, want Version %q", pvErr, tt.wantVersion)
+			}
+			if strings.Contains(err.Error(), "sess-") {
+				t.Errorf("error carries the session id: %v", err)
+			}
+			var posts []string
+			deletes := 0
+			for _, r := range fake.Requests() {
+				if r.HTTPMethod != http.MethodDelete {
+					posts = append(posts, r.Method)
+					continue
+				}
+				deletes++
+				if r.SessionID == "" || r.ProtocolVersion != "" {
+					t.Errorf("DELETE session %q version %q, want the issued session and no version", r.SessionID, r.ProtocolVersion)
+				}
+			}
+			if strings.Join(posts, ",") != "initialize" {
+				t.Errorf("POSTs = %v, want only initialize", posts)
+			}
+			if deletes != tt.wantDeletes {
+				t.Errorf("DELETE count = %d, want %d", deletes, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func TestCallToolUnsupportedProtocolVersionBounded(t *testing.T) {
+	// The refused version is server-controlled text: it reaches the error
+	// scrubbed, cut to 32 bytes and quoted, so it cannot carry the key, a raw
+	// line break or bulk.
+	hostile := "\n" + testKey + strings.Repeat("A", 4096)
+	fake := mcpclienttest.NewFakeServer(nil, mcpclienttest.WithProtocolVersion(hostile))
+	defer fake.Close()
+
+	_, err := call(newClient(t, fake.URL()))
+	var pvErr *mcpclient.ProtocolVersionError
+	if !errors.As(err, &pvErr) {
+		t.Fatalf("error = %v, want a ProtocolVersionError", err)
+	}
+	if len(pvErr.Version) > 32 || strings.Contains(pvErr.Version, testKey[:12]) {
+		t.Errorf("Version = %q, want at most 32 scrubbed bytes", pvErr.Version)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") || strings.Contains(msg, testKey[:12]) || len(msg) > 200 {
+		t.Errorf("error = %q, want a short quoted excerpt without the key", msg)
 	}
 }
 

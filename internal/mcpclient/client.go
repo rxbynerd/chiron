@@ -48,11 +48,44 @@ const (
 	defaultClientVersion = "v2"
 )
 
-// ProtocolVersion is the MCP revision advertised in initialize and the
-// MCP-Protocol-Version fallback when the result names none. A server choosing
-// another revision is tolerated (only the JSON-RPC envelope is relied on), and
-// its choice is echoed on every later request.
+// ProtocolVersion is the MCP revision advertised in initialize. The server
+// may answer with any supported revision, and its choice is echoed as
+// MCP-Protocol-Version on every later request.
 const ProtocolVersion = "2025-06-18"
+
+// supportedProtocolVersions are the revisions whose Streamable-HTTP transport
+// this client implements.
+var supportedProtocolVersions = []string{ProtocolVersion, "2025-03-26"}
+
+// maxVersionEchoBytes bounds the server-chosen version quoted in a
+// ProtocolVersionError.
+const maxVersionEchoBytes = 32
+
+// ErrUnsupportedProtocolVersion matches, via errors.Is, the failure of a
+// CallTool whose initialize reply named a protocol version outside the
+// supported set, or named none. No tools/call follows such a reply.
+var ErrUnsupportedProtocolVersion = errors.New("mcp: unsupported protocol version")
+
+// ProtocolVersionError is the concrete error behind
+// ErrUnsupportedProtocolVersion.
+type ProtocolVersionError struct {
+	// Version is the server's choice, scrubbed and cut to 32 bytes; empty
+	// when the reply named none.
+	Version string
+}
+
+func (e *ProtocolVersionError) Error() string {
+	supported := strings.Join(supportedProtocolVersions, ", ")
+	if e.Version == "" {
+		return "mcp: initialize result names no protocol version; supported: " + supported
+	}
+	return fmt.Sprintf("mcp: server chose unsupported protocol version %q; supported: %s", e.Version, supported)
+}
+
+// Is reports whether target is ErrUnsupportedProtocolVersion.
+func (e *ProtocolVersionError) Is(target error) bool {
+	return target == ErrUnsupportedProtocolVersion
+}
 
 // Options configures a Client.
 type Options struct {
@@ -169,7 +202,8 @@ func New(opts Options) (*Client, error) {
 // for the named tool, then ends any session the server issued with a
 // best-effort DELETE. The exchange is bounded by RequestTimeout and
 // MaxBodyBytes. No round-trip is retried; a caller that wants to retry does so
-// knowingly.
+// knowingly. An initialize reply naming an unsupported protocol version, or
+// none, fails with ErrUnsupportedProtocolVersion before any tools/call.
 //
 // A tool-level failure is returned as a ToolResult with IsError set, not as an
 // error: the caller owns how a tool's failure text is surfaced.
@@ -181,15 +215,12 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
 
-	sess, err := c.initialize(ctx)
+	sess, err := c.handshake(ctx)
 	if err != nil {
 		return ToolResult{}, err
 	}
 	if sess.id != "" {
 		defer c.endSession(ctx, sess)
-	}
-	if err := c.notifyInitialized(ctx, sess); err != nil {
-		return ToolResult{}, err
 	}
 	return c.callTool(ctx, sess, name, args)
 }

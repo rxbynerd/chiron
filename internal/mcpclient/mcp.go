@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 )
 
 // initialize / tools/call parameter and result shapes. Only the fields this
@@ -34,10 +35,28 @@ type callToolParams struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
-// initialize performs the MCP initialize handshake and returns the session
-// for later requests: any Mcp-Session-Id the server assigned (empty when the
-// server is stateless) and the protocol version it chose, falling back to
-// ProtocolVersion when the result names none.
+// handshake runs initialize and the initialized notification and returns the
+// established session. When the handshake fails after the server issued a
+// session id, that session is ended with a best-effort DELETE.
+func (c *Client) handshake(ctx context.Context) (session, error) {
+	sess, err := c.initialize(ctx)
+	if err == nil {
+		err = c.notifyInitialized(ctx, sess)
+	}
+	if err != nil {
+		if sess.id != "" {
+			c.endSession(ctx, sess)
+		}
+		return session{}, err
+	}
+	return sess, nil
+}
+
+// initialize performs the MCP initialize request and returns the session for
+// later requests: any Mcp-Session-Id the server assigned (empty when the
+// server is stateless) and the protocol version it chose, which must be a
+// supported one. On failure the returned session still carries any issued id,
+// with no protocol version, so the caller can end it.
 func (c *Client) initialize(ctx context.Context) (session, error) {
 	id := 1
 	rpc, sessionID, err := c.doRequest(ctx, session{}, rpcRequest{
@@ -53,14 +72,18 @@ func (c *Client) initialize(ctx context.Context) (session, error) {
 	if err != nil {
 		return session{}, err
 	}
+	sess := session{id: sessionID}
 	if rpc.Error != nil {
-		return session{}, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error()))
+		return sess, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error()))
 	}
-	sess := session{id: sessionID, protocolVersion: ProtocolVersion}
 	var result initializeResult
-	if json.Unmarshal(rpc.Result, &result) == nil && result.ProtocolVersion != "" {
-		sess.protocolVersion = result.ProtocolVersion
+	if err := json.Unmarshal(rpc.Result, &result); err != nil {
+		return sess, fmt.Errorf("mcp: decoding initialize result: %s", c.scrub(err.Error()))
 	}
+	if !slices.Contains(supportedProtocolVersions, result.ProtocolVersion) {
+		return sess, &ProtocolVersionError{Version: c.excerpt(result.ProtocolVersion, maxVersionEchoBytes)}
+	}
+	sess.protocolVersion = result.ProtocolVersion
 	return sess, nil
 }
 

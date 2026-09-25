@@ -37,10 +37,11 @@ type FakeServer struct {
 
 	// sessionID, when non-empty, is returned on the initialize reply as the
 	// Mcp-Session-Id header and then required on tools/call and DELETE.
-	sessionID       string
-	protocolVersion string
-	useSSE          bool
-	rawResult       string
+	sessionID           string
+	protocolVersion     string
+	omitProtocolVersion bool
+	useSSE              bool
+	rawResult           string
 
 	mu       sync.Mutex
 	requests []FakeRequest
@@ -76,9 +77,16 @@ func WithSessionID(id string) FakeOption {
 }
 
 // WithProtocolVersion makes the fake's initialize result name version instead
-// of ProtocolVersion, modelling a server that negotiates down.
+// of ProtocolVersion, modelling a server that negotiates down or one choosing
+// a revision the client does not support.
 func WithProtocolVersion(version string) FakeOption {
 	return func(f *FakeServer) { f.protocolVersion = version }
+}
+
+// WithoutProtocolVersion makes the fake's initialize result omit
+// protocolVersion, which the MCP schema requires.
+func WithoutProtocolVersion() FakeOption {
+	return func(f *FakeServer) { f.omitProtocolVersion = true }
 }
 
 // WithSSE makes the fake return tools/call as a text/event-stream reply.
@@ -185,11 +193,14 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		if f.sessionID != "" {
 			w.Header().Set(mcpSessionHeader, f.sessionID)
 		}
-		f.writeJSON(w, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), mustJSON(map[string]any{
-			"protocolVersion": f.protocolVersion,
-			"capabilities":    map[string]any{},
-			"serverInfo":      map[string]string{"name": "fake-mcp", "version": "0"},
-		})))
+		result := map[string]any{
+			"capabilities": map[string]any{},
+			"serverInfo":   map[string]string{"name": "fake-mcp", "version": "0"},
+		}
+		if !f.omitProtocolVersion {
+			result["protocolVersion"] = f.protocolVersion
+		}
+		f.writeJSON(w, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), mustJSON(result)))
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "tools/call":
