@@ -249,11 +249,13 @@ endpoint and headers together (`OTEL_EXPORTER_OTLP_ENDPOINT` with
 that pairing: a run with it refuses to start while
 `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` is set,
 so those credentials never reach another host. The Langfuse keys replace
-both the environment's endpoint and its headers. A malformed header
-variable is refused on every path, naming the variable but not its value.
+both the environment's endpoint and its headers. A malformed header or
+endpoint variable is refused on every path, naming the variable but not
+its value.
 With `--otlp-endpoint` or the Langfuse keys, the exporter refuses
-redirects and ignores the `OTEL_EXPORTER_OTLP_*` certificate,
-client-certificate and timeout variables.
+redirects, and the `OTEL_EXPORTER_OTLP_*` certificate, client-certificate
+and timeout variables do not configure the connection (an `http://`
+loopback endpoint is refused while a certificate variable is set).
 
 ### Exit codes
 

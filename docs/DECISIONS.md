@@ -1350,7 +1350,12 @@ logger prints a malformed `OTEL_EXPORTER_OTLP_HEADERS` or
 the malformed part is usually the credential. `newTracer` therefore checks
 both variables against the exporter's header grammar on every OTel path,
 the environment-only one included, and refuses a malformed list before
-the SDK parses it, naming the variable and withholding its value. The
+the SDK parses it, naming the variable and withholding its value. The same
+logger prints a malformed `OTEL_EXPORTER_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` value raw too, userinfo included, since
+the SDK parses both on every path regardless of which one an explicit
+endpoint or the Langfuse keys actually use; `newTracer` checks both with
+`url.Parse`, the SDK's own grammar, and refuses on the same terms. The
 logger's other messages stay unrouted until `go-logr/logr` is justified as
 a direct dependency.
 
@@ -1377,11 +1382,14 @@ port and every other header to any target. A 3xx ends the export as a
 non-retryable error through the scrubbing handler. The exporter's
 `WithHTTPClient` takes precedence over the
 `OTEL_EXPORTER_OTLP_{,TRACES_}CERTIFICATE`, `CLIENT_CERTIFICATE`,
-`CLIENT_KEY` and `TIMEOUT` variables, so those are not honoured with an
-explicit endpoint; compression still is. The client clones
-`http.DefaultTransport`, keeping the proxy variables, with the exporter's
-default 10 s timeout. The environment-only path keeps the exporter's own
-client and all of its variables.
+`CLIENT_KEY` and `TIMEOUT` variables, so those do not configure the
+connection with an explicit endpoint; compression still is. A certificate
+variable set beside an `http://` loopback endpoint still fails the run:
+the exporter's own environment parsing loads it into a TLS config that its
+insecure-transport check then refuses, ahead of `WithHTTPClient`'s
+precedence. The client clones `http.DefaultTransport`, keeping the proxy
+variables, with the exporter's default 10 s timeout. The environment-only
+path keeps the exporter's own client and all of its variables.
 
 **Known exposure: issue #28 applies to `telemetry.*`.** The telemetry
 endpoints and Langfuse key refs can come from a base config (`--config` or
@@ -1415,8 +1423,8 @@ already used. Cached, tool-use and thought tokens are not yet attributed
 - Base-config provenance for `telemetry.*` belongs to #28's decision; the
   exposure is recorded above.
 - Rerouting the SDK's logr logger through Scrub needs `go-logr/logr` as a
-  direct dependency; the malformed-header refusal closes its
-  credential-bearing message meanwhile.
+  direct dependency; the malformed-header and malformed-endpoint refusals
+  close its credential-bearing messages meanwhile.
 - Honouring the `OTEL_EXPORTER_OTLP_*` certificate, client-certificate and
   timeout variables with an explicit endpoint needs Chiron to build its
   own `tls.Config`. That cost is accepted until a self-hosted collector
