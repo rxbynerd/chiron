@@ -74,6 +74,9 @@ func TestValidateTelemetryRejects(t *testing.T) {
 		{"otlp not http", func(tc *TelemetryConfig) {
 			tc.OTLPEndpoint = "grpc://otel.example:4317"
 		}, "telemetry.otlp_endpoint"},
+		{"otlp empty hostname", func(tc *TelemetryConfig) {
+			tc.OTLPEndpoint = "https://:443/otel"
+		}, "telemetry.otlp_endpoint"},
 		{"langfuse fragment", func(tc *TelemetryConfig) {
 			*tc = langfuseRefs()
 			tc.LangfuseEndpoint = "https://langfuse.example/api/public/otel#" + literal
