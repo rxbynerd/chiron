@@ -399,21 +399,26 @@ func TestSynthesiseCutOffKeepsBody(t *testing.T) {
 }
 
 // TestSynthesiseSanitisesTheBody: raw HTML, comments, every image form and
-// credentials in the synthesis reply are neutralised, while links stay.
+// credentials in the synthesis reply are neutralised, and no raw-HTML opener
+// that tag removal misses survives unescaped, while links stay.
 func TestSynthesiseSanitisesTheBody(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	reply := "# Report\n\n<script>alert(1)</script>Text <img src=\"https://beacon.example/p.gif\"> and " +
-		"![beacon](https://beacon.example/i.png) and !![double](https://beacon.example/j.png)<!-- hidden -->\n\nKey " + key
+		"![beacon](https://beacon.example/i.png) and !![double](https://beacon.example/j.png)<!-- hidden -->\n\nKey " + key +
+		"\n\n" + strings.Join(rawHTMLProbes, "\n\n")
 	modelSrv := modeltest.NewFakeServer(synthesisReply(reply))
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
 	res := l.synthesise(context.Background(), testQuery, plan, pooled)
-	for _, bad := range []string{"<script", "<img", "![", "<!--", "hidden", "beacon.example/p.gif", key} {
+	for _, bad := range []string{"![", "hidden", "beacon.example/p.gif", key} {
 		if strings.Contains(res.Body, bad) {
 			t.Errorf("body keeps %q:\n%s", bad, res.Body)
 		}
+	}
+	if unescapedHTMLOpener.MatchString(res.Body) {
+		t.Errorf("body keeps an unescaped raw-HTML opener:\n%s", res.Body)
 	}
 	if !strings.Contains(res.Body, "[beacon](https://beacon.example/i.png)") {
 		t.Errorf("body lost the link text:\n%s", res.Body)
