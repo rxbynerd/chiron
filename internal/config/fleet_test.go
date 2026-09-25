@@ -134,6 +134,12 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"model endpoint port without hostname", func(c *ResearchConfig) {
 			c.Fleet.ModelEndpoint = "https://:443/v1"
 		}},
+		{"search tool empty", func(c *ResearchConfig) { c.Fleet.SearchTool = "" }},
+		{"search tool too long", func(c *ResearchConfig) { c.Fleet.SearchTool = strings.Repeat("a", 65) }},
+		{"search tool bad characters", func(c *ResearchConfig) { c.Fleet.SearchTool = "tool name" }},
+		{"search query arg empty", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = "" }},
+		{"search query arg too long", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = strings.Repeat("q", 65) }},
+		{"search query arg whitespace", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = "query arg" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validWorker()
@@ -192,6 +198,8 @@ func TestValidateErrorsNeverEchoSecrets(t *testing.T) {
 		{"model endpoint query", func(c *ResearchConfig) { c.Fleet.ModelEndpoint = "https://model.example/v1?key=" + literal }},
 		{"search endpoint path over cleartext", func(c *ResearchConfig) { c.Fleet.SearchEndpoint = "http://search.example/" + literal }},
 		{"model endpoint host hidden by an at sign", func(c *ResearchConfig) { c.Fleet.ModelEndpoint = "https://" + literal + "#@model.example" }},
+		{"search tool", func(c *ResearchConfig) { c.Fleet.SearchTool = literal + " " + literal }},
+		{"search query arg", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = literal + "/" + literal }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validWorker()
@@ -220,6 +228,8 @@ func TestFleetRoundTrip(t *testing.T) {
 	in.Fleet.MaxWorkers = 7
 	in.Fleet.Concurrency = 4
 	in.Fleet.Memory = MemoryInMemory
+	in.Fleet.SearchTool = "web_search"
+	in.Fleet.SearchQueryArg = "q"
 
 	var buf bytes.Buffer
 	if err := in.EncodeJSON(&buf); err != nil {
@@ -291,5 +301,16 @@ func TestDefaultFleetIsBounded(t *testing.T) {
 	f := Default().Fleet
 	if f.MaxTurns <= 0 || f.MaxTokens <= 0 || f.MaxPageBytes <= 0 || time.Duration(f.WorkerTimeout) <= 0 {
 		t.Errorf("default fleet caps are not all positive: %+v", f)
+	}
+}
+
+// TestDefaultFleetSearchIdentifiers: a bare --agent worker run already
+// names the reference search MCP's tool and argument, so it needs no
+// override to reach the documented default backend (docs/DECISIONS.md,
+// 2026-09-25 "SP-A").
+func TestDefaultFleetSearchIdentifiers(t *testing.T) {
+	f := Default().Fleet
+	if f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
+		t.Errorf("default search identifiers = %q/%q, want %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
 	}
 }
