@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -17,6 +15,7 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/formatter"
+	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/planner"
@@ -490,41 +489,18 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 	}
 }
 
-// geminiBaseURL reads and validates CHIRON_GEMINI_BASE_URL before any
-// client exists. The API key travels in a header on every request to
-// this base, so an unvalidated override is a key-exfiltration and SSRF
-// channel (CWE-918, CWE-319): https:// is required, with http://
-// permitted for loopback hosts only — the CLI smoke tests' httptest
-// servers — so a cleartext or internal-network endpoint can never
-// receive the key. The variable's absence is the safe default; see
-// AGENTS.md for the operational caveat.
+// geminiBaseURL validates CHIRON_GEMINI_BASE_URL with httpx.ParseEndpoint
+// before any client exists: the API key travels to this base on every
+// request (CWE-918, CWE-319). Absence is the safe default; see AGENTS.md.
 func geminiBaseURL() (string, error) {
 	raw := os.Getenv(envGeminiBaseURL)
 	if raw == "" {
 		return "", nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !allowedBaseScheme(u) {
-		return "", fmt.Errorf("%s must be an absolute https:// URL (http:// only for loopback test servers), got %q", envGeminiBaseURL, raw)
+	if _, err := httpx.ParseEndpoint(raw); err != nil {
+		return "", fmt.Errorf("%s %w", envGeminiBaseURL, err)
 	}
 	return raw, nil
-}
-
-// allowedBaseScheme admits https anywhere and http on loopback only.
-func allowedBaseScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
 }
 
 // gateBudget enforces --budget before any create. The estimate is the

@@ -33,7 +33,8 @@ with actions pinned to full commit SHAs.
 | `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`), flag→config resolution, and the composition root: the only place environment is read, seams are bound, and exit codes (0–4) are assigned. |
 | `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines, validation (enums, timeout cap, secret:// rule, MCP URL schemes). |
 | `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md, "Wire types vs domain types"). |
-| `internal/interactions` | Hand-rolled Interactions API client: wire types (`last_verified` marker), create/get with retries and capped backoff, bounded reads everywhere, cross-host redirect refusal, poll-to-terminal, SSE streaming primitive with `?last_event_id=` resume. |
+| `internal/interactions` | Hand-rolled Interactions API client: wire types (`last_verified` marker), create/get with retries and capped backoff, bounded reads everywhere, cross-host and https-to-http redirect refusal, poll-to-terminal, SSE streaming primitive with `?last_event_id=` resume. |
+| `internal/httpx` | Stdlib-only leaf holding the HTTP rules every credential-bearing path shares: `ParseEndpoint` (https anywhere, http for `LoopbackHost` only; no userinfo, query or fragment; errors never echo the value), the `RefuseUnsafeRedirects`/`RefuseAllRedirects` `CheckRedirect` policies, and `ReadAllBounded` (fails with `ErrBodyTooLarge`, never truncates). Used by config, the CLI and every client; change a rule here, not in a caller. |
 | `internal/run` | The pure-function research core: `Run` (start→await→retrieve→format→emit) and `Resume`. Depends only on the seam interfaces; takes a context and `Deps`, reads no environment. |
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. |
 | `internal/researcher/gemini` | The Deep Research adapter: tier mapping and cost table, input grounding, prompt template, streaming await with reconnect and poll fallback, planner binding, follow-up mode. Creates are never auto-retried (money). |
@@ -127,7 +128,8 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   controls the variable receives the key. Its absence is the safe
   default; it exists for the httptest smoke tests and must never be set
   in production. Values are validated at startup: absolute `https://`
-  required, `http://` admitted for loopback hosts only. For v2 GKE
+  required, `http://` admitted for loopback hosts only, and userinfo, a
+  query or a fragment refused (`internal/httpx`). For v2 GKE
   deployments, consider disabling it entirely in release builds via a
   build tag.
 - `CHIRON_FETCH_ALLOW_LOOPBACK` — set to exactly `1`, lets the worker's
@@ -155,9 +157,10 @@ credentials.
 - `fleet.model_endpoint` / `fleet.search_endpoint` — validated at
   `ResearchConfig.Validate` with the `CHIRON_GEMINI_BASE_URL` rule:
   absolute `https://`, `http://` for loopback hosts only, so a cleartext
-  or internal-network endpoint can never receive a key. The check is a
-  mirror of `internal/cli`'s `allowedBaseScheme` (the reverse import would
-  cycle); keep the two in step.
+  or internal-network endpoint can never receive a key; userinfo, a query
+  and a fragment are refused too. Config, the CLI and each client's
+  constructor all apply `internal/httpx`'s `ParseEndpoint`, so the rule
+  has one definition.
 - `fleet.model_key_ref` / `fleet.search_key_ref` — must be `secret://`
   references; literals are rejected and never echoed in the error.
 - `fleet.knowledge_endpoint` / `fleet.knowledge_key_ref` — the knowledge

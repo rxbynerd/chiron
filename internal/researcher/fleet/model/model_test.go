@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -200,6 +199,42 @@ func TestCrossHostRedirectRefused(t *testing.T) {
 	}
 }
 
+func TestCallerCheckRedirectOverridden(t *testing.T) {
+	// New must impose its own redirect policy even when the caller's
+	// http.Client already carries a permissive one.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		w.Write([]byte(`{"choices":[{"message":{"content":"leaked"}}]}`))
+	}))
+	defer target.Close()
+
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, target.URL+chatCompletionsPath, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
+	_, err := c.Generate(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("Generate should refuse the redirect even though the caller's client permits it")
+	}
+	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
+		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin hits = %d, want 1", got)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("target hits = %d, want 0", got)
+	}
+}
+
 func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
 	// net/http re-sends Authorization to the same hostname on any scheme, so
 	// an https endpoint redirecting to http on the same host must be refused
@@ -235,48 +270,6 @@ func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
 	}
 }
 
-func TestRedirectPolicy(t *testing.T) {
-	request := func(raw string) *http.Request {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("url.Parse(%q): %v", raw, err)
-		}
-		return &http.Request{URL: u}
-	}
-	tests := []struct {
-		name    string
-		via     []string
-		target  string
-		wantErr string
-	}{
-		{"same-host https path change followed", []string{"https://api.example.com/v1/chat/completions"}, "https://api.example.com/v2/chat/completions", ""},
-		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/v1"}, "http://127.0.0.1:8080/v2", ""},
-		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/v1"}, "https://127.0.0.1:8080/v1", ""},
-		{"cross-host refused", []string{"https://api.example.com/v1"}, "https://evil.example/v1", "cross-origin"},
-		{"https to http on the same host refused", []string{"https://api.example.com/v1"}, "http://api.example.com/v1", "downgrade"},
-		{"downgrade on a later hop refused", []string{"https://api.example.com/v1", "https://api.example.com/v2"}, "http://api.example.com/v3", "downgrade"},
-		{"third hop refused", []string{"https://api.example.com/a", "https://api.example.com/b", "https://api.example.com/c"}, "https://api.example.com/d", "too many redirects"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, request(v))
-			}
-			err := refuseUnsafeRedirects(request(tt.target), via)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestEndpointValidation(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -292,6 +285,10 @@ func TestEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://api.openai.com/v1?api_key=x", true},
+		{"empty query rejected", "https://api.openai.com/v1?", true},
+		{"fragment rejected", "https://api.openai.com/v1#frag", true},
+		{"empty fragment rejected", "https://api.openai.com/v1#", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -301,6 +298,9 @@ func TestEndpointValidation(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("New(%q) = %v, want success", tt.endpoint, err)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "model: endpoint ") {
+				t.Errorf("error = %v, want the model: endpoint prefix", err)
 			}
 		})
 	}

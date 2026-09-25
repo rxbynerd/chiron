@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/secret"
 )
 
@@ -166,7 +166,7 @@ func (c *Client) Generate(ctx context.Context, req Request) (Response, error) {
 		return Response{}, c.errorFromResponse(resp)
 	}
 
-	data, err := readBounded(resp.Body, c.maxBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 	if err != nil {
 		return Response{}, fmt.Errorf("model: reading response: %s", c.scrub(err.Error()))
 	}
@@ -222,7 +222,7 @@ func (c *Client) buildRequest(req Request) chatRequest {
 // in the body Chiron sends (it is header-only), but the provider's echo is
 // outside Chiron's control, so the body is scrubbed unconditionally.
 func (c *Client) errorFromResponse(resp *http.Response) error {
-	data, err := readBounded(resp.Body, maxErrorBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
 		data = nil
 	}
@@ -245,19 +245,4 @@ func (c *Client) scrub(s string) string {
 		s = strings.ReplaceAll(s, c.apiKey, "[REDACTED:model-api-key]")
 	}
 	return secret.Scrub(s)
-}
-
-// readBounded reads at most max bytes, failing — rather than silently
-// truncating — if the body is larger, so a misbehaving server cannot
-// exhaust memory or smuggle a clipped document through as complete. This
-// mirrors internal/interactions.readBounded.
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > max {
-		return nil, fmt.Errorf("body exceeds %d-byte bound", max)
-	}
-	return data, nil
 }

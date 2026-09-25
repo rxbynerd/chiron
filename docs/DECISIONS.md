@@ -630,6 +630,9 @@ the `api_key_ref` rule. Endpoint and key fields are optional at the config
 layer (a later wave resolves and requires them); the caps are validated
 eagerly.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: config
+and the CLI now share `httpx.ParseEndpoint`; nothing is mirrored.
+
 Wave 3 prefers config fields to new environment variables for the model
 and search overrides — the endpoints are per-run research configuration,
 not process-wide test hooks like `CHIRON_GEMINI_BASE_URL`. No new
@@ -694,6 +697,9 @@ re-validates in `New` because it is a reusable seam that must not trust its
 caller to have checked. Extracting a shared `internal/httpx` (or similar)
 helper for redirect policy, bounded reads, and the loopback scheme rule is
 deferred; when a third consumer lands it should be revisited.
+
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: all
+three now live in `internal/httpx`.
 
 **Credential-scrub belt-and-braces.** The key is only ever in the
 `Authorization` header, so Chiron never puts it in a request body or URL.
@@ -773,6 +779,9 @@ diagnostic by exact match plus `secret.Scrub`; cross-host redirects carrying
 the credential are refused. `allowedEndpointScheme`, `refuseCrossHostRedirects`
 and `readBounded` are reimplemented here, the same accepted duplication noted
 for the model adapter pending a shared `internal/httpx` helper.
+
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: the
+search transport (now `internal/mcpclient`) uses `internal/httpx`.
 
 **Fake shipped in `fake.go`, not `_test.go`.** As with the model adapter, an
 `httptest.Server`-backed `FakeServer` lives in the non-test build so the later
@@ -1060,6 +1069,10 @@ The v1 `internal/interactions.refuseCrossHostRedirects` has the same shape and
 is not changed by this entry. Alongside this, both clients reject an endpoint
 that embeds userinfo, and no endpoint error echoes a value containing `@`.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**:
+`internal/interactions` now refuses the downgrade too, and no endpoint error
+echoes the raw value at all.
+
 **MCP transport conformance.** The search client now follows three more rules
 of the 2025-06-18 Streamable-HTTP transport. It sends `MCP-Protocol-Version`
 on every request after `initialize`, using the `protocolVersion` the server
@@ -1282,6 +1295,10 @@ checked against Alexandria's slug grammar in `internal/config` and again in
 the endpoint-scheme mirrors, since the adapter must not depend on config
 having run.
 
+**Superseded in part by the 2026-09-25 "Shared internal/httpx" entry
+below**: the endpoint-scheme mirrors are gone; the `knowledge_space` mirror
+stands.
+
 **Race detection in the test targets.** `just test` and CI run `go test
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
@@ -1341,3 +1358,92 @@ just for them, a minimal `export_test.go` (`billet.ToolError`,
 `billet.SaveTool`, `billet.MaxToolErrBytes`, `billet.MCPClient`,
 `billet.FirstLine`) lets the whole suite live in one external
 `package billet_test` file.
+
+## 2026-09-25 — Shared internal/httpx endpoint, redirect and bounded-read rules
+
+Issue #15. The endpoint rule (absolute `https://`, `http://` for loopback
+only), userinfo, query and fragment rejection, the redirect policies and the
+bounded body read were reimplemented in `internal/config`, `internal/cli`,
+`internal/interactions`, `internal/mcpclient`,
+`internal/researcher/fleet/model` and `internal/memory/alexandria`, accepted
+as mirrors by the 2026-07-01 and 2026-09-23 entries pending a shared helper.
+The copies had drifted: config and Alexandria refused a query and fragment
+while the model and MCP clients did not, `internal/interactions` refused only
+cross-host redirects, and the CLI echoed a rejected `CHIRON_GEMINI_BASE_URL`
+verbatim. One package replaces them all. No new dependency.
+
+**`internal/httpx` is a stdlib-only leaf.** It imports nothing from
+`internal/`, so config (which the CLI imports) and every client can depend on
+it without a cycle. Its API:
+
+- `ParseEndpoint(raw string) (*url.URL, error)`: `https` anywhere, `http`
+  only when `LoopbackHost` admits the host, a non-empty hostname, and no
+  userinfo, query or fragment, including a bare trailing `?` or `#`. Every
+  error matches `ErrInvalidEndpoint` via `errors.Is`.
+- `LoopbackHost(host string) bool`: exactly `localhost` (lower-case, no
+  trailing dot), or a literal address in 127.0.0.0/8 or `::1`, including the
+  IPv4-mapped form of a 127.0.0.0/8 address. It takes the bare hostname
+  `url.URL.Hostname` returns, so a bracketed `[::1]` is refused. Upper-case
+  `LOCALHOST`, lookalike names (`127.0.0.1.nip.io`, `localhost.evil.com`),
+  `0.0.0.0`, `::` and non-dotted-decimal IPv4 forms are refused too. No other
+  name is admitted, because what a name resolves to is outside the check's
+  control.
+- `RefuseUnsafeRedirects`: a `CheckRedirect` policy that follows a redirect
+  only to the original request's exact host and port, never from an `https`
+  original to a non-`https` target, and never past a chain of three requests
+  (two redirects).
+- `RefuseAllRedirects`: a `CheckRedirect` policy that follows nothing.
+- `ReadAllBounded(r io.Reader, limit int64) ([]byte, error)`: fails with an
+  error matching `ErrBodyTooLarge` (text `body exceeds N-byte bound`) rather
+  than truncating.
+
+**Strictest union, so no caller gets weaker.** `ParseEndpoint` takes every
+refusal any copy made: Alexandria's raw-value check that catches a bare `?` or
+`#`, config's query, fragment and userinfo refusal, and the model, MCP and
+Alexandria clients' userinfo-first ordering and `@` withholding. It adds one
+refusal no copy made: a port with an empty hostname (`https://:443`), which
+`net/http` would dial on the local machine. Errors name the URL by scheme and
+host only and withhold both when the value contains `@`, since
+`https://<key>#@host` parses with the key as its host. Messages read as
+predicates ("must be an absolute https:// URL ...") so each caller prefixes
+its own subject (`model: endpoint `, `CHIRON_GEMINI_BASE_URL `, a config field
+name) and the substrings existing tests pin survive.
+
+**What changed per caller.**
+
+- `internal/interactions` validates its effective base URL (the default or
+  `WithBaseURL`'s value) in `New`. Its redirect policy moves from cross-host
+  only to `RefuseUnsafeRedirects`, which also refuses a same-host
+  `https`-to-`http` downgrade. This is strictly stronger: `net/http` forwards
+  `x-goog-api-key` to any redirect target, so a downgraded hop would send the
+  key in cleartext, and no Gemini endpoint has a reason to downgrade.
+- `internal/mcpclient` (and so search and Billet) and the fleet model adapter
+  refuse a query or fragment in `New`, uniformly with config; their redirect
+  policy is unchanged.
+- `internal/memory/alexandria` keeps refusing every redirect through
+  `RefuseAllRedirects` rather than following same-host ones: its Cloudflare
+  Access secret is a custom header that `net/http` forwards to any target.
+- `internal/config` keeps its field-name-prefixed messages and additionally
+  refuses a bare `?` or `#` and an empty hostname.
+- `CHIRON_GEMINI_BASE_URL` now refuses userinfo, a query and a fragment, which
+  the CLI admitted before, and its error names the value by scheme and host
+  instead of echoing it with `%q`.
+
+Redirect refusals no longer carry an inner package prefix; each client's call
+site already wraps transport errors with one.
+
+**Left out on purpose.**
+
+- `internal/researcher/fleet/fetch` keeps its own policy. It fetches arbitrary
+  public URLs under connection-time SSRF pinning and re-validates every
+  redirect hop, a different and stricter question from which endpoint may
+  receive a credential, and it truncates and reports an oversize page rather
+  than failing.
+- Two bounded reads that are not read-to-EOF stay on `io.LimitReader`.
+  Alexandria's error-body excerpt keeps a bounded head by design, and failing
+  on oversize would lose the diagnostic. The MCP event-stream reader returns
+  the first response without waiting for the stream to end, under its own
+  aggregate cap.
+- The rune-safe truncation loops the issue's comment counts as string
+  handling, not HTTP, and stay where they are.
+- `internal/researcher/gemini/input.go` bounds a file read, not an HTTP body.

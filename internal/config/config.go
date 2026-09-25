@@ -17,13 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 // Agent tiers (PROPOSAL §3): the max tier is more comprehensive at roughly
@@ -466,53 +466,17 @@ func (f FleetConfig) validateKnowledge() error {
 	return nil
 }
 
-// validEndpoint admits an unset endpoint (a later wave requires it) and,
-// when set, applies the CHIRON_GEMINI_BASE_URL rule: an absolute https://
-// URL, with http:// permitted for loopback hosts only. Credentials are
-// sent to whatever endpoint is configured, so a cleartext or internal
-// override would be a key-exfiltration and SSRF channel (CWE-918,
-// CWE-319). The message never echoes a credential — only the endpoint.
+// validEndpoint admits an unset endpoint (the composition root requires it)
+// and otherwise applies httpx.ParseEndpoint: credentials go to whatever
+// endpoint is configured (CWE-918, CWE-319).
 func validEndpoint(field, raw string) error {
 	if raw == "" {
 		return nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
+	if _, err := httpx.ParseEndpoint(raw); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
-}
-
-// describeEndpoint names an endpoint in an error without echoing the raw
-// value, which may embed a credential in its userinfo.
-func describeEndpoint(u *url.URL) string {
-	if u == nil {
-		return "an unparseable URL"
-	}
-	return fmt.Sprintf("scheme %q host %q", u.Scheme, u.Host)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only —
-// the same rule the Gemini base-URL override enforces in internal/cli,
-// kept in step with it. It cannot import that copy without a cycle
-// (internal/cli imports internal/config), so the rule is mirrored here.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
 }
 
 // validKeyRef admits an unset reference and, when set, requires the

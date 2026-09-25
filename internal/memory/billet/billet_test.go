@@ -517,6 +517,8 @@ func TestNewValidatesEndpoint(t *testing.T) {
 		{"cleartext non-loopback", "http://billet.internal/", "must be an absolute https:// URL"},
 		{"userinfo", "https://user:Winter2026!@billet.internal/", "userinfo"},
 		{"empty", "", "must not be empty"},
+		{"query", "https://billet.internal/?token=Winter2026!", "query or fragment"},
+		{"fragment", "https://billet.internal/#Winter2026!", "query or fragment"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

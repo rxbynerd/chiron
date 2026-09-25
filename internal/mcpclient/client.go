@@ -26,12 +26,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 // Defaults, all overridable via Options. The body bound is generous so a
@@ -61,8 +60,8 @@ type Options struct {
 	// an absolute https:// URL, with http:// admitted for loopback hosts only
 	// (127.0.0.1, ::1, localhost): the credential travels to whatever endpoint
 	// is set, so a cleartext or internal override would be a key-exfiltration
-	// and SSRF channel (CWE-918, CWE-319). Userinfo (user:password@) is
-	// rejected.
+	// and SSRF channel (CWE-918, CWE-319). Userinfo (user:password@), a query
+	// and a fragment are rejected (httpx.ParseEndpoint).
 	Endpoint string
 	// APIKey is the already-resolved literal key, sent only in the
 	// Authorization header. Empty sends no Authorization header.
@@ -129,8 +128,8 @@ func FirstText(blocks []ContentBlock) string {
 // The client is a reusable seam and does not trust its caller to have
 // validated the endpoint already.
 func New(opts Options) (*Client, error) {
-	if err := validateEndpoint(opts.Endpoint); err != nil {
-		return nil, err
+	if _, err := httpx.ParseEndpoint(opts.Endpoint); err != nil {
+		return nil, fmt.Errorf("mcp: endpoint %w", err)
 	}
 
 	httpClient := opts.HTTPClient
@@ -140,7 +139,7 @@ func New(opts Options) (*Client, error) {
 	// The policy is set on a shallow copy, sharing the caller's Transport,
 	// jar and timeout, so a caller-supplied client cannot bypass it.
 	hc := *httpClient
-	hc.CheckRedirect = refuseUnsafeRedirects
+	hc.CheckRedirect = httpx.RefuseUnsafeRedirects
 
 	c := &Client{
 		endpoint:       strings.TrimSuffix(opts.Endpoint, "/"),
@@ -193,69 +192,4 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 		return ToolResult{}, err
 	}
 	return c.callTool(ctx, sess, name, args)
-}
-
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute https://,
-// http:// for loopback only) and rejects userinfo without echoing it. It
-// mirrors model.validateEndpoint and internal/config's check because this
-// reusable seam must not depend on config having run.
-func validateEndpoint(raw string) error {
-	if raw == "" {
-		return errors.New("mcp: endpoint must not be empty")
-	}
-	u, err := url.Parse(raw)
-	if err == nil && u.User != nil {
-		return errors.New("mcp: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
-	}
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("mcp: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
-	}
-	return nil
-}
-
-// quoteEndpoint renders an endpoint for an error message. A value containing
-// '@' is withheld: a malformed URL can carry credentials that url.Parse does
-// not recognise as userinfo.
-func quoteEndpoint(raw string) string {
-	if strings.Contains(raw, "@") {
-		return "(withheld: contains '@')"
-	}
-	return strconv.Quote(raw)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only — the
-// rule model.allowedEndpointScheme, internal/config and internal/cli enforce,
-// mirrored because this seam cannot import the CLI/config layer.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
-}
-
-// refuseUnsafeRedirects follows same-host redirects (at most three hops) and
-// refuses one to another host or from https to http: net/http re-sends
-// Authorization to any target on the same hostname whatever its scheme
-// (CWE-601, CWE-319). It mirrors model.refuseUnsafeRedirects.
-func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
-	first := via[0].URL
-	if req.URL.Host != first.Host {
-		return fmt.Errorf("mcp: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
-	}
-	if first.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("mcp: redirect to %s://%s refused: downgrade from https with sensitive headers", req.URL.Scheme, req.URL.Host)
-	}
-	if len(via) >= 3 {
-		return errors.New("mcp: too many redirects")
-	}
-	return nil
 }

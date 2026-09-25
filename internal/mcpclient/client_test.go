@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -399,6 +398,40 @@ func TestCallToolCrossHostRedirectRefused(t *testing.T) {
 	}
 }
 
+func TestCallToolCallerCheckRedirectOverridden(t *testing.T) {
+	// New must impose its own redirect policy even when the caller's
+	// http.Client already carries a permissive one.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer target.Close()
+
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
+	_, err := call(c)
+	if err == nil {
+		t.Fatal("CallTool should refuse the redirect even though the caller's client permits it")
+	}
+	if !strings.Contains(err.Error(), "cross-origin") {
+		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin hits = %d, want 1", got)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("target hits = %d, want 0", got)
+	}
+}
+
 func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
 	// net/http re-sends Authorization to the same hostname on any scheme, so
 	// an https endpoint redirecting to http on the same host must be refused
@@ -437,48 +470,6 @@ func TestCallerHTTPClientNotMutated(t *testing.T) {
 	_ = newClient(t, "https://mcp.example.com/", func(o *Options) { o.HTTPClient = hc })
 	if hc.CheckRedirect != nil {
 		t.Error("New set CheckRedirect on the caller's client; it must work on a copy")
-	}
-}
-
-func TestRedirectPolicy(t *testing.T) {
-	request := func(raw string) *http.Request {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("url.Parse(%q): %v", raw, err)
-		}
-		return &http.Request{URL: u}
-	}
-	tests := []struct {
-		name    string
-		via     []string
-		target  string
-		wantErr string
-	}{
-		{"same-host https path change followed", []string{"https://mcp.example.com/mcp"}, "https://mcp.example.com/v2/mcp", ""},
-		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/mcp"}, "http://127.0.0.1:8080/v2", ""},
-		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/mcp"}, "https://127.0.0.1:8080/mcp", ""},
-		{"cross-host refused", []string{"https://mcp.example.com/mcp"}, "https://evil.example/mcp", "cross-origin"},
-		{"https to http on the same host refused", []string{"https://mcp.example.com/mcp"}, "http://mcp.example.com/mcp", "downgrade"},
-		{"downgrade on a later hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b"}, "http://mcp.example.com/c", "downgrade"},
-		{"third hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b", "https://mcp.example.com/c"}, "https://mcp.example.com/d", "too many redirects"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, request(v))
-			}
-			err := refuseUnsafeRedirects(request(tt.target), via)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
-		})
 	}
 }
 
@@ -534,6 +525,10 @@ func TestEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://mcp.example.com/mcp?key=x", true},
+		{"empty query rejected", "https://mcp.example.com/mcp?", true},
+		{"fragment rejected", "https://mcp.example.com/mcp#frag", true},
+		{"empty fragment rejected", "https://mcp.example.com/mcp#", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

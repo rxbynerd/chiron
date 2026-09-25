@@ -22,12 +22,11 @@ package model
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 // Defaults, all overridable via Options. The body bound is generous — a
@@ -50,7 +49,8 @@ type Options struct {
 	// (127.0.0.1, ::1, localhost) — the credential travels to whatever
 	// endpoint is set, so a cleartext or internal override would be a
 	// key-exfiltration and SSRF channel (CWE-918, CWE-319). Userinfo
-	// (user:password@) is rejected.
+	// (user:password@), a query and a fragment are rejected
+	// (httpx.ParseEndpoint).
 	Endpoint string
 	// Model is the model identifier sent in the request body, e.g.
 	// "gpt-5.5". Required.
@@ -61,8 +61,8 @@ type Options struct {
 	// header.
 	APIKey string
 	// HTTPClient supplies the underlying client. nil builds one. A
-	// caller-supplied client is shallow-copied so the cross-host redirect
-	// policy can be set without mutating the caller's client; leave its
+	// caller-supplied client is shallow-copied so the redirect policy can
+	// be set without mutating the caller's client; leave its
 	// Timeout zero — per-call deadlines come from RequestTimeout.
 	HTTPClient *http.Client
 	// RequestTimeout bounds each Generate call including reading the body.
@@ -99,8 +99,8 @@ func New(opts Options) (*Client, error) {
 	if opts.Model == "" {
 		return nil, errors.New("model: model must not be empty")
 	}
-	if err := validateEndpoint(opts.Endpoint); err != nil {
-		return nil, err
+	if _, err := httpx.ParseEndpoint(opts.Endpoint); err != nil {
+		return nil, fmt.Errorf("model: endpoint %w", err)
 	}
 
 	httpClient := opts.HTTPClient
@@ -110,7 +110,7 @@ func New(opts Options) (*Client, error) {
 	// The policy is set on a shallow copy, sharing the caller's Transport,
 	// jar and timeout, so a caller-supplied client cannot bypass it.
 	hc := *httpClient
-	hc.CheckRedirect = refuseUnsafeRedirects
+	hc.CheckRedirect = httpx.RefuseUnsafeRedirects
 	httpClient = &hc
 
 	requestTimeout := opts.RequestTimeout
@@ -130,71 +130,4 @@ func New(opts Options) (*Client, error) {
 		requestTimeout: requestTimeout,
 		maxBodyBytes:   maxBodyBytes,
 	}, nil
-}
-
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute https://,
-// http:// for loopback only) and rejects userinfo without echoing it. It
-// mirrors internal/config's check because this reusable seam must not depend
-// on config having run.
-func validateEndpoint(raw string) error {
-	if raw == "" {
-		return errors.New("model: endpoint must not be empty")
-	}
-	u, err := url.Parse(raw)
-	if err == nil && u.User != nil {
-		return errors.New("model: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
-	}
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("model: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
-	}
-	return nil
-}
-
-// quoteEndpoint renders an endpoint for an error message. A value containing
-// '@' is withheld: a malformed URL can carry credentials that url.Parse does
-// not recognise as userinfo.
-func quoteEndpoint(raw string) string {
-	if strings.Contains(raw, "@") {
-		return "(withheld: contains '@')"
-	}
-	return strconv.Quote(raw)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only —
-// the same rule internal/config's allowedEndpointScheme and internal/cli's
-// allowedBaseScheme enforce, mirrored here because this seam cannot import
-// either without depending on the CLI/config layer. The duplication is
-// noted in docs/DECISIONS.md as acceptable pending a shared helper.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
-}
-
-// refuseUnsafeRedirects follows same-host redirects (at most three hops) and
-// refuses one to another host or from https to http: net/http re-sends
-// Authorization to any target on the same hostname whatever its scheme
-// (CWE-601, CWE-319). It extends internal/interactions.refuseCrossHostRedirects.
-func refuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
-	first := via[0].URL
-	if req.URL.Host != first.Host {
-		return fmt.Errorf("model: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
-	}
-	if first.Scheme == "https" && req.URL.Scheme != "https" {
-		return fmt.Errorf("model: redirect to %s://%s refused: downgrade from https with sensitive headers", req.URL.Scheme, req.URL.Host)
-	}
-	if len(via) >= 3 {
-		return errors.New("model: too many redirects")
-	}
-	return nil
 }

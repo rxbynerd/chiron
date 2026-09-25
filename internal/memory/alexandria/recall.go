@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/secret"
 )
@@ -120,7 +121,7 @@ func (c *Client) Recall(ctx context.Context, ns memory.Namespace, q memory.Query
 		return nil, c.errorFromResponse(resp)
 	}
 
-	data, err := readBounded(resp.Body, c.maxBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("alexandria: reading response: %s", c.scrub(err.Error()))
 	}
@@ -314,17 +315,4 @@ func (c *Client) scrub(s string) string {
 		s = strings.ReplaceAll(s, c.accessClientSecret, "[REDACTED:alexandria-access-secret]")
 	}
 	return secret.Scrub(s)
-}
-
-// readBounded reads at most max bytes, failing rather than truncating when
-// the body is larger.
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > max {
-		return nil, fmt.Errorf("body exceeds %d-byte bound", max)
-	}
-	return data, nil
 }
