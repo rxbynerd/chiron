@@ -313,6 +313,53 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 	}
 }
 
+// TestMissingEndpointErrorNamesFlagAndVariable: a worker run missing any
+// fleet endpoint fails before any secret resolves, and the error names the
+// flag and the environment variable that can supply it.
+func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer()
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	kbSrv := billettest.NewFakeServer(nil)
+	defer kbSrv.Close()
+
+	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
+		t.Run(tt.Flag, func(t *testing.T) {
+			clearEndpointEnv(t)
+			full := workerArgs(modelSrv, searchSrv, "-o", "none",
+				"--fleet-knowledge-provider", "billet",
+				"--fleet-knowledge-endpoint", kbSrv.URL(),
+			)
+			var args []string
+			for i := 0; i < len(full); i++ {
+				if full[i] == "--"+tt.Flag {
+					i++
+					continue
+				}
+				args = append(args, full[i])
+			}
+			resolver := &countingResolver{}
+			var stderr bytes.Buffer
+			_, err := executeWith(t, resolver, strings.NewReader(""), &stderr, args...)
+			if err == nil {
+				t.Fatalf("a worker run without --%s succeeded", tt.Flag)
+			}
+			for _, want := range []string{tt.Field + " is required", "--" + tt.Flag, tt.Env} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q lacks %q", err, want)
+				}
+			}
+			if n := resolver.calls.Load(); n != 0 {
+				t.Errorf("resolver invoked %d times before the missing endpoint was reported", n)
+			}
+		})
+	}
+	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(kbSrv.Requests()) != 0 {
+		t.Error("a worker run missing an endpoint must not dial any endpoint")
+	}
+}
+
 // TestResearchConfigRefusesEndpointFlags: research-config never emits a
 // fleet endpoint, since its output is the next stage's base config; the
 // error points at the final-stage flag and the environment variable.
