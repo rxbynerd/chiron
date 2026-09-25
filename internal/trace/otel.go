@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"net/url"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -54,7 +56,9 @@ func WithHeaders(h map[string]string) OTelOption {
 // shutdown function that flushes pending spans; callers must invoke it
 // before exit or trailing spans are lost. endpointURL is an OTLP base URL
 // with the meaning of OTEL_EXPORTER_OTLP_ENDPOINT: spans are sent to its
-// path plus /v1/traces. An empty endpointURL defers to the standard
+// path plus /v1/traces, redirects are refused, and the
+// OTEL_EXPORTER_OTLP_* certificate, client-certificate and timeout
+// variables do not apply. An empty endpointURL defers to the standard
 // OTEL_EXPORTER_OTLP_* environment variables.
 func NewOTel(ctx context.Context, endpointURL string, opts ...OTelOption) (*OTel, func(context.Context) error, error) {
 	var cfg otelConfig
@@ -67,7 +71,10 @@ func NewOTel(ctx context.Context, endpointURL string, opts ...OTelOption) (*OTel
 		if err != nil {
 			return nil, nil, err
 		}
-		exporterOpts = append(exporterOpts, otlptracehttp.WithEndpointURL(traces))
+		exporterOpts = append(exporterOpts,
+			otlptracehttp.WithEndpointURL(traces),
+			otlptracehttp.WithHTTPClient(noRedirectClient()),
+		)
 	}
 	exporterOpts = append(exporterOpts, cfg.exporter...)
 	exp, err := otlptracehttp.New(ctx, exporterOpts...)
@@ -86,6 +93,23 @@ func NewOTel(ctx context.Context, endpointURL string, opts ...OTelOption) (*OTel
 		sdktrace.WithResource(res),
 	)
 	return &OTel{tr: tp.Tracer(instrumentationName)}, tp.Shutdown, nil
+}
+
+// exportTimeout is the OTLP exporter's default per-request timeout.
+const exportTimeout = 10 * time.Second
+
+// noRedirectClient is the export client for an explicit endpoint.
+// Collectors never redirect; net/http re-sends Authorization to a
+// same-host target and other headers to any target. A 3xx therefore ends
+// the export as a non-retryable status error.
+func noRedirectClient() *http.Client {
+	return &http.Client{
+		Transport: http.DefaultTransport.(*http.Transport).Clone(),
+		Timeout:   exportTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // tracesURL appends the OTLP/HTTP traces path to a base URL. The error
