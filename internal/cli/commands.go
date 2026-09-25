@@ -168,7 +168,8 @@ func resolveConfig(cmd *cobra.Command, args []string) (config.ResearchConfig, er
 
 // loadBase reads the base config from --config (a path, or "-" for
 // stdin), or from stdin when it is piped — the pipeline-composition path.
-// With neither, the defaults are the base.
+// With neither, the defaults are the base. A base naming a fleet endpoint is
+// refused here, before any flag is applied or secret resolved.
 func loadBase(cmd *cobra.Command) (config.ResearchConfig, error) {
 	path, err := cmd.Flags().GetString("config")
 	if err != nil {
@@ -177,16 +178,16 @@ func loadBase(cmd *cobra.Command) (config.ResearchConfig, error) {
 
 	switch {
 	case path == "-":
-		return config.Decode(cmd.InOrStdin())
+		return config.DecodeBase(cmd.InOrStdin())
 	case path != "":
 		f, err := os.Open(path)
 		if err != nil {
 			return config.ResearchConfig{}, fmt.Errorf("open base config: %w", err)
 		}
 		defer f.Close()
-		return config.Decode(f)
+		return config.DecodeBase(f)
 	case stdinIsPiped(cmd.InOrStdin()):
-		return config.Decode(cmd.InOrStdin())
+		return config.DecodeBase(cmd.InOrStdin())
 	default:
 		return config.Default(), nil
 	}
