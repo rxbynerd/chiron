@@ -2,6 +2,7 @@ package search_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -175,6 +176,28 @@ func TestSearchProtocolVersionHeader(t *testing.T) {
 		if reqs[i].ProtocolVersion != "2025-03-26" {
 			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
 		}
+	}
+}
+
+func TestSearchUnsupportedProtocolVersion(t *testing.T) {
+	// A server choosing a revision the client does not implement fails the
+	// search before any billable tools/call.
+	fake := searchtest.NewFakeServer(
+		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
+		searchtest.WithProtocolVersion("2024-11-05"),
+	)
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	_, err := c.Search(context.Background(), "q")
+	if !errors.Is(err, mcpclient.ErrUnsupportedProtocolVersion) {
+		t.Fatalf("error = %v, want ErrUnsupportedProtocolVersion", err)
+	}
+	if !strings.HasPrefix(err.Error(), "search: ") || !strings.Contains(err.Error(), `"2024-11-05"`) {
+		t.Errorf("error = %v, want the refused version under the search: prefix", err)
+	}
+	if n := fake.ToolCallCount(); n != 0 {
+		t.Errorf("tools/call count = %d, want 0", n)
 	}
 }
 

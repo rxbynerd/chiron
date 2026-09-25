@@ -46,9 +46,9 @@ func deref(id *int) int {
 }
 
 // answerHandshake reads one request in full and answers it when it belongs to
-// the MCP handshake, as a minimal stateless server whose initialize result
-// names no protocol version. It returns the decoded request and whether it
-// was answered; the caller answers anything else (tools/call).
+// the MCP handshake, as a minimal stateless server that accepts the client's
+// protocol version. It returns the decoded request and whether it was
+// answered; the caller answers anything else (tools/call).
 func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
 	t.Helper()
 	var req rpcRequest
@@ -64,7 +64,7 @@ func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcR
 	switch req.Method {
 	case "initialize":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID))
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q,"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID), ProtocolVersion)
 		return req, true
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
@@ -124,7 +124,7 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 					mu.Lock()
 					info = req.Params.ClientInfo
 					mu.Unlock()
-					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, deref(req.ID))
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q}}`, deref(req.ID), ProtocolVersion)
 				case "notifications/initialized":
 					w.WriteHeader(http.StatusAccepted)
 				default:
@@ -182,28 +182,6 @@ func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
 	}
 	if n := deletes.Load(); n != 1 {
 		t.Errorf("DELETE count = %d, want 1", n)
-	}
-}
-
-func TestCallToolProtocolVersionDefaultsWhenUnnamed(t *testing.T) {
-	var toolCallVersion atomic.Value
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		req, answered := answerHandshake(t, w, r)
-		if answered {
-			return
-		}
-		toolCallVersion.Store(r.Header.Get(mcpProtocolVersionHeader))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[]}}`, deref(req.ID))
-	}))
-	defer server.Close()
-
-	c := newClient(t, server.URL)
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if got, _ := toolCallVersion.Load().(string); got != ProtocolVersion {
-		t.Errorf("tools/call MCP-Protocol-Version = %q, want the client default %q", got, ProtocolVersion)
 	}
 }
 

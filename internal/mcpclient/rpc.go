@@ -300,16 +300,21 @@ func (c *Client) errorFromResponse(method string, resp *http.Response) error {
 	return fmt.Errorf("mcp: %s failed: HTTP %d: %s", method, resp.StatusCode, c.errorText(detail))
 }
 
-// errorText scrubs server-supplied text, then cuts it to maxErrorTextBytes on
-// a rune boundary with a marker. Scrubbing first means a key straddling the
-// cut is still redacted by exact match.
+// errorText scrubs server-supplied text and cuts it to maxErrorTextBytes.
 func (c *Client) errorText(s string) string {
+	return c.excerpt(s, maxErrorTextBytes)
+}
+
+// excerpt scrubs server-supplied text, then cuts it to limit bytes on a rune
+// boundary with a marker. Scrubbing first means a key straddling the cut is
+// still redacted by exact match.
+func (c *Client) excerpt(s string, limit int) string {
 	s = c.scrub(s)
-	if len(s) <= maxErrorTextBytes {
+	if len(s) <= limit {
 		return s
 	}
 	const marker = " [truncated]"
-	cut := maxErrorTextBytes - len(marker)
+	cut := limit - len(marker)
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
