@@ -1325,19 +1325,24 @@ content non-link text is implausible (a teaser card, a mis-marked `<main>`)
 and falls through to the next step.
 
 **Scoring.** `p` and `pre`, and `div` or `td` without block children, are
-paragraphs when they hold at least 25 bytes of non-space text. As in
-readability, a paragraph scores 1 + its commas + one point per 100 bytes
-(at most 3). Its nearest candidate ancestor (`div`, `section`, `article`,
-`main`, `body`, `table`, `td`, `blockquote`) takes the full score and the
-next candidate up takes half; the walk covers at most eight levels and stops
-at a dropped element. Crediting candidate ancestors rather than the literal
-parent and grandparent keeps credit off `tr`, `tbody`, `span` and similar
-wrappers. A candidate's final score is (credit + tag weight [`div` 5,
-`td` and `blockquote` 3] + 25 for a content word in its id or class) ×
-(1 − link density); the highest wins, the earliest on a tie. A sibling
-joins the winner when it scores at least max(10, a fifth of the winner's
-score), or is a `p` with at least 80 bytes of non-link text and link
-density under 0.25; a heading joins when it introduces a joined sibling.
+paragraphs when they hold at least 25 bytes of non-space text. A paragraph
+scores 1 + its commas + one point per 100 bytes (at most 3), as in
+readability except that commas count at most 10, so comma stuffing cannot
+outscore real prose. Its nearest candidate ancestor (`div`, `section`,
+`article`, `main`, `body`, `table`, `td`, `blockquote`) takes the full score
+and the next candidate up takes half; the walk covers at most eight levels
+and stops at a dropped element. Crediting candidate ancestors rather than
+the literal parent and grandparent keeps credit off `tr`, `tbody`, `span`
+and similar wrappers. A candidate's final score is (credit + tag weight
+[`div` 5, `td` and `blockquote` 3] + 25 for a content word in its id or
+class) × (1 − link density); the highest wins, the earliest on a tie. A
+sibling joins the winner when it scores at least max(10, a fifth of the
+winner's score), or is a `p` with at least 80 bytes of non-link text and
+link density under 0.25; a heading joins when it introduces a joined
+sibling. Accepted risk: third-party text that escapes the boilerplate
+vocabulary, such as a comment marked up as a larger `main` or `article` or
+a longer run of prose, can still displace the real content. Rendering every
+plausible, non-nested landmark would narrow this and is left for later.
 
 **Boilerplate inside the chosen content.** `nav`, `footer`, `aside` and
 `form` are dropped, and so is a `header` unless it sits inside `main`,

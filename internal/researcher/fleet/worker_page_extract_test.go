@@ -261,6 +261,26 @@ func TestExtractSelection(t *testing.T) {
 	}
 }
 
+// TestExtractCommaCreditCapped: a comma-stuffed paragraph earns at most ten
+// points for its commas, so a block of it cannot outscore real prose.
+func TestExtractCommaCreditCapped(t *testing.T) {
+	const story = "The council met on Tuesday evening and, after a long debate, approved the plan " +
+		"to build new cycle lanes across the city centre, starting in January."
+	src := `<div>` + strings.Repeat(`<p>`+story+`</p>`, 4) + `</div>` +
+		`<div id="responses"><p>` + strings.Repeat("Great, ", 200) + `</p></div>`
+	d := parsePage(src)
+	top := d.bestCandidate()
+	if top <= 0 {
+		t.Fatalf("no candidate scored")
+	}
+	if got := d.render([]int32{top}, true); !strings.Contains(got, story) {
+		t.Errorf("the comma-stuffed block outscored the story: top block renders %q", got[:min(len(got), 60)])
+	}
+	if got := extract(src); !strings.Contains(got, story) {
+		t.Errorf("story missing from %q", got[:min(len(got), 60)])
+	}
+}
+
 // TestExtractSafetyNet: when the chosen content renders no letters or
 // digits, the whole document's visible text is returned instead.
 func TestExtractSafetyNet(t *testing.T) {
