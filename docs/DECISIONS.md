@@ -1980,8 +1980,10 @@ fleet reports. It is the workers' summed usage, which already carries their
 searches, recalls and cost, plus the tokens of the lead's decompose,
 synthesis and citation calls. The lead's tokens are priced once, on their
 sum, at the per-million-token prices the workers use: `leadDeps` takes them
-from `Caps`, and `costGBP` is shared with the worker loop. Nothing in the
-fleet emits a metric. As with the single worker, spans carry per-call spend
+from `Caps`, and `costGBP` is shared with the worker loop. The model
+client clamps a negative token count from the provider to zero, so a
+provider's accounting cannot offset the rest of the run's spend. Nothing in
+the fleet emits a metric. As with the single worker, spans carry per-call spend
 as attributes, and the run core records the run-level metrics once from the
 returned `Usage`. A test runs a synthetic fleet end to end and checks that
 the `Usage` equals the delegate spans' totals plus the lead spans' tokens,
