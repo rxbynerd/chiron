@@ -1547,3 +1547,50 @@ cannot skip it but may wait up to `RequestTimeout` for it.
 request without one and 404 to one that has ended. It adds `ExpireSession`,
 `InitializeCount`, `DeleteCount` and `FakeRequest.ID`. `searchtest` and
 `billettest` forward the new methods, and `billettest.WithSessionID` is new.
+
+## 2026-09-25 — SP-A: web-search MCP backend and configurable tool shape
+
+Issue #12. `internal/researcher/fleet/search` (2026-07-01 entry) has always
+assumed a `search` tool taking a `query` argument and returning
+`{"results":[{"title","url","snippet"}]}`, but SP-A (`docs/V2-PLAN.md` §5)
+named no concrete backend, and the tool name and argument key were not
+reachable from `FleetConfig`, so pointing the worker at a server that named
+either differently needed a code change (cycle-3 finding C3-18).
+
+**Chosen backend.** The default web-search MCP server is a self-hosted
+SearXNG instance behind a generic Streamable-HTTP MCP wrapper, exposing a
+tool named `search` that takes a `query` argument and answers with
+`{"results":[{"title","url","snippet"}, ...]}` — exactly the shape
+`internal/researcher/fleet/search` already assumes, so the reference
+deployment needs no configuration beyond `fleet.search_endpoint`. A
+self-hosted SearXNG meta-search instance was chosen over a metered vendor
+search API for the reference deployment because it puts no per-query cost
+on the critical path SP-A is proving out; a priced vendor backend remains a
+drop-in swap behind the same tool shape.
+
+**Tool name and query argument stay configurable.** Vendor MCP search
+servers (Tavily, Exa, Brave and others named in `V2-RESEARCH-AGENT.md` §3)
+do not agree on a tool or argument name, and pinning either to the
+reference backend's choice would force a fork of `internal/researcher/fleet/search`
+for every alternative operators want to reach. `FleetConfig` gains
+`search_tool` and `search_query_arg` (flags `--fleet-search-tool` /
+`--fleet-search-query-arg`), defaulting to `search` / `query` so a bare
+`--agent worker` run needs no override, and threaded into
+`search.Options.ToolName` / `QueryArgKey` at the CLI composition root
+(`buildWorker`), which already default the same way when left empty. The
+result *shape* is not made configurable: `internal/researcher/fleet/search`
+still assumes `{"results":[{"title","url","snippet"}]}` with its documented
+graceful degradation, because a differently-shaped result needs a parser
+change, not a config knob, and no such server is in scope for SP-A.
+
+**Validation.** Both fields are required non-empty identifiers matching
+`^[A-Za-z0-9_.-]+$`, at most 64 bytes — the character set a `tools/call`
+request can safely carry without further escaping. The error names the
+field and the rule but never echoes the value, matching `fleet.*_key_ref`,
+because an operator could paste a credential into the wrong field.
+
+**Test coverage.** `internal/researcher/fleet/search/searchtest.FakeServer`
+gained `WithExpectedTool(tool, queryArg)`, refusing a `tools/call` under any
+other name or missing that argument, so `internal/cli/worker_test.go` can
+prove the worker reaches a differently-named tool once configured and fails
+after three consecutive tool failures when it is not.
