@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/rxbynerd/chiron/internal/secret"
 )
 
 // Target names where the lead routes a brief. The decomposition schema's
@@ -33,13 +35,16 @@ type UnroutableTargetError struct {
 	Routable []Target
 }
 
+// Error scrubs, defangs and bounds its message: Target comes from a model
+// reply, which every other error on that path treats as untrusted.
 func (e *UnroutableTargetError) Error() string {
 	routable := make([]string, len(e.Routable))
 	for i, t := range e.Routable {
 		routable[i] = string(t)
 	}
-	return fmt.Sprintf("fleet: target %q is not routable; routable targets: %s",
+	msg := fmt.Sprintf("fleet: target %q is not routable; routable targets: %s",
 		boundRunes(string(e.Target), maxTargetEchoRunes), strings.Join(routable, ", "))
+	return boundDetail(defang(secret.Scrub(msg)))
 }
 
 // Is reports whether target is ErrUnroutableTarget.
