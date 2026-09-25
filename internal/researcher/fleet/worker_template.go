@@ -76,11 +76,16 @@ func LoadReportTemplate(path string) (*ReportTemplate, error) {
 }
 
 // Render returns the output-format block for query, trimmed of surrounding
-// whitespace. A render error or a blank block is an error.
+// whitespace. A render error, a blank block, or a render past
+// MaxReportTemplateBytes is an error, so a real query that pushes a
+// {{.Query}}-referencing template over the bound fails here too.
 func (t *ReportTemplate) Render(query string) (string, error) {
 	out, err := t.render(query)
 	if err != nil {
 		return "", fmt.Errorf("fleet: report template: %w", err)
+	}
+	if len(out) > MaxReportTemplateBytes {
+		return "", fmt.Errorf("fleet: report template renders %d bytes for this query, over the %d-byte bound", len(out), MaxReportTemplateBytes)
 	}
 	return out, nil
 }

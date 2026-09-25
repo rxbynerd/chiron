@@ -85,6 +85,39 @@ func TestLoadReportTemplate(t *testing.T) {
 	}
 }
 
+// TestRenderOutputBound: Render accepts a rendered block exactly at
+// MaxReportTemplateBytes and rejects one byte over it, checking the real
+// query against the same bound LoadReportTemplate checks at load against the
+// short sample query.
+func TestRenderOutputBound(t *testing.T) {
+	bound := strconv.Itoa(MaxReportTemplateBytes)
+	rt := mustLoadTemplate(t, "{{.Query}}")
+	for _, tt := range []struct {
+		name    string
+		query   string
+		wantErr string
+	}{
+		{"exactly the bound", strings.Repeat("x", MaxReportTemplateBytes), ""},
+		{"one byte over the bound", strings.Repeat("x", MaxReportTemplateBytes+1), "over the " + bound + "-byte bound"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := rt.Render(tt.query)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Render = %v, %v, want an error containing %q", out, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if out != tt.query {
+				t.Errorf("Render = %q, want %q", out, tt.query)
+			}
+		})
+	}
+}
+
 // TestLoadReportTemplateMissingFile: a missing path is a read error that
 // still identifies the not-exist cause.
 func TestLoadReportTemplateMissingFile(t *testing.T) {
@@ -174,6 +207,7 @@ func TestWorkerStartRendersReportTemplate(t *testing.T) {
 // but fails to render for the task's query makes Start return an error with
 // no run registered and no model request.
 func TestWorkerStartReportTemplateRenderFailure(t *testing.T) {
+	bound := strconv.Itoa(MaxReportTemplateBytes)
 	for _, tt := range []struct {
 		name    string
 		body    string
@@ -181,6 +215,7 @@ func TestWorkerStartReportTemplateRenderFailure(t *testing.T) {
 	}{
 		{"unknown field", `{{if eq .Query "` + reportTemplateSampleQuery + `"}}Format.{{else}}{{.Missing}}{{end}}`, "can't evaluate field Missing"},
 		{"blank render", `{{if eq .Query "` + reportTemplateSampleQuery + `"}}Format.{{end}}`, "blank output-format block"},
+		{"render past the bound for the real query", strings.Repeat("{{.Query}}", 500), "over the " + bound + "-byte bound"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			modelSrv := modeltest.NewFakeServer(finalReply("unused"))
