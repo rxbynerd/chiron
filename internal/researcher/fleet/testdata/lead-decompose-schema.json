@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "briefs": {
+      "type": "array",
+      "description": "Three to five worker briefs that together cover the research question without overlapping.",
+      "minItems": 3,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "type": "string",
+            "description": "The self-contained question or subtask this worker answers."
+          },
+          "output_format": {
+            "type": "string",
+            "description": "The shape of the worker's finding, such as a short Markdown synthesis or a comparison table."
+          },
+          "source_guidance": {
+            "type": "string",
+            "description": "Which kinds of sources the worker should prefer or avoid."
+          },
+          "boundaries": {
+            "type": "string",
+            "description": "What is in and out of scope for this worker, naming what the other briefs cover."
+          },
+          "target": {
+            "type": "string",
+            "enum": ["external_web"],
+            "description": "Where the brief is researched: external_web is a worker that searches and reads the public web."
+          }
+        },
+        "required": ["objective", "output_format", "source_guidance", "boundaries", "target"]
+      }
+    }
+  },
+  "required": ["briefs"]
+}
