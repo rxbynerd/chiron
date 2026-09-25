@@ -42,6 +42,8 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-model-key-ref", "", "secret:// reference to the standard-model key (never a literal)")
 	fs.String("fleet-search-endpoint", "", "web-search MCP base URL (absolute https://, http:// loopback only)")
 	fs.String("fleet-search-key-ref", "", "secret:// reference to the search-MCP key (never a literal)")
+	fs.String("fleet-search-tool", d.Fleet.SearchTool, "MCP tool the search client invokes")
+	fs.String("fleet-search-query-arg", d.Fleet.SearchQueryArg, "argument key the search query is passed under")
 	fs.Int("fleet-max-turns", d.Fleet.MaxTurns, "per-worker search->read->synthesise turn cap")
 	fs.Int("fleet-max-tokens", d.Fleet.MaxTokens, "per-worker model token ceiling; 0 means uncapped")
 	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker estimated-cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags)")
@@ -127,6 +129,10 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.SearchEndpoint = mustString(fs, f.Name)
 		case "fleet-search-key-ref":
 			cfg.Fleet.SearchKeyRef = mustString(fs, f.Name)
+		case "fleet-search-tool":
+			cfg.Fleet.SearchTool = mustString(fs, f.Name)
+		case "fleet-search-query-arg":
+			cfg.Fleet.SearchQueryArg = mustString(fs, f.Name)
 		case "fleet-max-turns":
 			cfg.Fleet.MaxTurns, _ = fs.GetInt(f.Name)
 		case "fleet-max-tokens":

@@ -68,6 +68,23 @@ var knowledgeSpace = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 const maxKnowledgeSpaceLen = 64
 
+// DefaultSearchTool and DefaultSearchQueryArg are the reference web-search
+// MCP backend's tool name and query argument key (docs/DECISIONS.md,
+// 2026-09-25 "SP-A"), duplicated from search.Options' own defaults because
+// config does not import the fleet packages.
+const (
+	DefaultSearchTool     = "search"
+	DefaultSearchQueryArg = "query"
+)
+
+// searchIdentifier is the grammar for fleet.search_tool and
+// fleet.search_query_arg: a vendor MCP search server may name its tool and
+// argument differently, so these travel into a tools/call request rather
+// than a fixed pair, and are bounded to what that request can safely carry.
+var searchIdentifier = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+const maxSearchIdentifierLen = 64
+
 // Run output modes, mirroring Stirrup's output surface.
 const (
 	OutputText = "text"
@@ -212,6 +229,15 @@ type FleetConfig struct {
 	// KnowledgeRemember saves each completed finding back to the store
 	// (billet only).
 	KnowledgeRemember bool `json:"knowledge_remember,omitempty" yaml:"knowledge_remember,omitempty"`
+	// SearchTool is the MCP tool the search client invokes in tools/call.
+	// Default DefaultSearchTool; override for a vendor search server that
+	// names its tool differently.
+	SearchTool string `json:"search_tool,omitempty" yaml:"search_tool,omitempty"`
+	// SearchQueryArg is the argument key the search query is passed under
+	// in the tools/call arguments object. Default DefaultSearchQueryArg;
+	// override for a vendor search server that names its argument
+	// differently.
+	SearchQueryArg string `json:"search_query_arg,omitempty" yaml:"search_query_arg,omitempty"`
 }
 
 // Default returns the documented defaults (PROPOSAL §4.3). The Fleet
@@ -244,6 +270,8 @@ func defaultFleet() FleetConfig {
 		Concurrency:    3,
 		Memory:         MemoryNoop,
 		KnowledgeLimit: DefaultKnowledgeLimit,
+		SearchTool:     DefaultSearchTool,
+		SearchQueryArg: DefaultSearchQueryArg,
 	}
 }
 
@@ -371,6 +399,12 @@ func (f FleetConfig) validate(agent string) error {
 	if err := validKeyRef("fleet.search_key_ref", f.SearchKeyRef); err != nil {
 		return err
 	}
+	if err := validIdentifier("fleet.search_tool", f.SearchTool); err != nil {
+		return err
+	}
+	if err := validIdentifier("fleet.search_query_arg", f.SearchQueryArg); err != nil {
+		return err
+	}
 	if f.MaxTurns <= 0 {
 		return fmt.Errorf("fleet.max_turns: %d is not positive — a worker needs at least one turn", f.MaxTurns)
 	}
@@ -489,6 +523,17 @@ func validKeyRef(field, ref string) error {
 	}
 	if !strings.HasPrefix(ref, "secret://") {
 		return fmt.Errorf("%s: is not a secret:// reference — literal keys never live in config", field)
+	}
+	return nil
+}
+
+// validIdentifier requires a non-empty MCP tool name or argument key
+// (fleet.search_tool, fleet.search_query_arg): letters, digits, underscore,
+// dot or hyphen only, at most maxSearchIdentifierLen bytes. The message
+// never echoes value, which may carry a pasted secret (docs/DECISIONS.md "SP-A").
+func validIdentifier(field, value string) error {
+	if value == "" || len(value) > maxSearchIdentifierLen || !searchIdentifier.MatchString(value) {
+		return fmt.Errorf("%s: must be a non-empty identifier of letters, digits, underscore, dot or hyphen, at most %d bytes", field, maxSearchIdentifierLen)
 	}
 	return nil
 }

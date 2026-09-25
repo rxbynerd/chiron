@@ -23,9 +23,11 @@ import (
 // The zero value is not usable; construct with NewFakeServer. Point a Client
 // at it via search.Options{Endpoint: fake.URL(), ...}.
 type FakeServer struct {
-	inner   *mcpclienttest.FakeServer
-	results []search.Result
-	opts    []mcpclienttest.FakeOption
+	inner            *mcpclienttest.FakeServer
+	results          []search.Result
+	opts             []mcpclienttest.FakeOption
+	expectedTool     string
+	expectedQueryArg string
 }
 
 // FakeRequest is one request the fake received, exposed so tests can assert
@@ -59,6 +61,14 @@ func WithSSE() FakeOption {
 // unexpected-shape and oversized-body cases.
 func WithRawToolResult(raw string) FakeOption {
 	return func(f *FakeServer) { f.opts = append(f.opts, mcpclienttest.WithRawResult(raw)) }
+}
+
+// WithExpectedTool makes the fake refuse a tools/call whose name is not
+// tool, or whose arguments lack queryArg: a tool-name mismatch fails as a
+// JSON-RPC unknown-tool error; a present tool under the wrong argument key
+// fails as a tool-level error (docs/DECISIONS.md "SP-A").
+func WithExpectedTool(tool, queryArg string) FakeOption {
+	return func(f *FakeServer) { f.expectedTool, f.expectedQueryArg = tool, queryArg }
 }
 
 // NewFakeServer starts a fake MCP search server that answers tools/call with
@@ -105,8 +115,21 @@ func (f *FakeServer) DeleteCount() int { return f.inner.DeleteCount() }
 func (f *FakeServer) ExpireSession() { f.inner.ExpireSession() }
 
 // answer serialises the scripted results into the assumed tool result shape:
-// a text content block whose text is the results document.
-func (f *FakeServer) answer(string, map[string]any) (mcpclient.ToolResult, error) {
+// a text content block whose text is the results document. When
+// WithExpectedTool is set, a mismatched tool name or missing query argument
+// fails first instead.
+func (f *FakeServer) answer(tool string, args map[string]any) (mcpclient.ToolResult, error) {
+	if f.expectedTool != "" && tool != f.expectedTool {
+		return mcpclient.ToolResult{}, fmt.Errorf("fake: unknown tool %q", tool)
+	}
+	if f.expectedQueryArg != "" {
+		if _, ok := args[f.expectedQueryArg]; !ok {
+			return mcpclient.ToolResult{
+				IsError: true,
+				Content: []mcpclient.ContentBlock{{Type: "text", Text: fmt.Sprintf("missing required argument %q", f.expectedQueryArg)}},
+			}, nil
+		}
+	}
 	doc := resultsDoc{Results: make([]resultItem, 0, len(f.results))}
 	for _, r := range f.results {
 		doc.Results = append(doc.Results, resultItem(r))
