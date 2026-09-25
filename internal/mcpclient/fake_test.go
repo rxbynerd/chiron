@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -55,9 +57,9 @@ func deref(id *int) int {
 }
 
 // answerHandshake reads one request in full and answers it when it belongs to
-// the MCP handshake, as a minimal stateless server whose initialize result
-// names no protocol version. It returns the decoded request and whether it
-// was answered; the caller answers anything else (tools/call).
+// the MCP handshake, as a minimal stateless server that accepts the client's
+// protocol version. It returns the decoded request and whether it was
+// answered; the caller answers anything else (tools/call).
 func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
 	t.Helper()
 	var req rpcRequest
@@ -73,7 +75,7 @@ func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcR
 	switch req.Method {
 	case "initialize":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID))
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q,"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID), mcpclient.ProtocolVersion)
 		return req, true
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
@@ -140,13 +142,19 @@ func TestCallToolNilArgumentsSendsObject(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEchoedAndEnded(t *testing.T) {
+func TestCallToolSessionEchoedAndEndedOnClose(t *testing.T) {
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-abc-123"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	if _, err := call(c); err != nil {
 		t.Fatalf("CallTool with a session server: %v", err)
+	}
+	if n := fake.CallCount(); n != 3 {
+		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call); the session outlives the call", n)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	reqs := fake.Requests()
 	if len(reqs) != 4 {
@@ -172,7 +180,9 @@ func TestCallToolSessionEchoedAndEnded(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEndedAfterToolError(t *testing.T) {
+func TestCallToolSessionSurvivesToolError(t *testing.T) {
+	// A tool-level failure is a successful exchange: the session stays in
+	// use, and is ended only by Close.
 	fake := mcpclienttest.NewFakeServer(nil,
 		mcpclienttest.WithSessionID("sess-err"),
 		mcpclienttest.WithRawResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
@@ -180,12 +190,23 @@ func TestCallToolSessionEndedAfterToolError(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+	for range 2 {
+		got, err := call(c)
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if !got.IsError || mcpclient.FirstText(got.Content) != "upstream quota exceeded" {
+			t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
+		}
 	}
-	if !got.IsError || mcpclient.FirstText(got.Content) != "upstream quota exceeded" {
-		t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
+	if n := fake.InitializeCount(); n != 1 {
+		t.Errorf("initialize count = %d, want 1", n)
+	}
+	if n := fake.DeleteCount(); n != 0 {
+		t.Errorf("DELETE count = %d before Close, want 0", n)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	reqs := fake.Requests()
 	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {
@@ -209,6 +230,81 @@ func TestCallToolProtocolVersionHeader(t *testing.T) {
 		if reqs[i].ProtocolVersion != "2025-03-26" {
 			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
 		}
+	}
+}
+
+func TestCallToolUnsupportedProtocolVersion(t *testing.T) {
+	// A reply naming a version outside the supported set, or none, fails the
+	// call before notifications/initialized or tools/call. A session the
+	// server issued is ended, with no version header since none was agreed.
+	tests := []struct {
+		name        string
+		opts        []mcpclienttest.FakeOption
+		wantVersion string
+		wantDeletes int
+	}{
+		{"older revision, stateful", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("2024-11-05"), mcpclienttest.WithSessionID("sess-v1")}, "2024-11-05", 1},
+		{"newer revision, stateless", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("2099-01-01")}, "2099-01-01", 0},
+		{"missing, stateful", []mcpclienttest.FakeOption{mcpclienttest.WithoutProtocolVersion(), mcpclienttest.WithSessionID("sess-v2")}, "", 1},
+		{"empty, stateless", []mcpclienttest.FakeOption{mcpclienttest.WithProtocolVersion("")}, "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := mcpclienttest.NewFakeServer(textResult("ok"), tt.opts...)
+			defer fake.Close()
+
+			_, err := call(newClient(t, fake.URL()))
+			if !errors.Is(err, mcpclient.ErrUnsupportedProtocolVersion) {
+				t.Fatalf("error = %v, want ErrUnsupportedProtocolVersion", err)
+			}
+			var pvErr *mcpclient.ProtocolVersionError
+			if !errors.As(err, &pvErr) || pvErr.Version != tt.wantVersion {
+				t.Errorf("ProtocolVersionError = %+v, want Version %q", pvErr, tt.wantVersion)
+			}
+			if strings.Contains(err.Error(), "sess-") {
+				t.Errorf("error carries the session id: %v", err)
+			}
+			var posts []string
+			deletes := 0
+			for _, r := range fake.Requests() {
+				if r.HTTPMethod != http.MethodDelete {
+					posts = append(posts, r.Method)
+					continue
+				}
+				deletes++
+				if r.SessionID == "" || r.ProtocolVersion != "" {
+					t.Errorf("DELETE session %q version %q, want the issued session and no version", r.SessionID, r.ProtocolVersion)
+				}
+			}
+			if strings.Join(posts, ",") != "initialize" {
+				t.Errorf("POSTs = %v, want only initialize", posts)
+			}
+			if deletes != tt.wantDeletes {
+				t.Errorf("DELETE count = %d, want %d", deletes, tt.wantDeletes)
+			}
+		})
+	}
+}
+
+func TestCallToolUnsupportedProtocolVersionBounded(t *testing.T) {
+	// The refused version is server-controlled text: it reaches the error
+	// scrubbed, cut to 32 bytes and quoted, so it cannot carry the key, a raw
+	// line break or bulk.
+	hostile := "\n" + testKey + strings.Repeat("A", 4096)
+	fake := mcpclienttest.NewFakeServer(nil, mcpclienttest.WithProtocolVersion(hostile))
+	defer fake.Close()
+
+	_, err := call(newClient(t, fake.URL()))
+	var pvErr *mcpclient.ProtocolVersionError
+	if !errors.As(err, &pvErr) {
+		t.Fatalf("error = %v, want a ProtocolVersionError", err)
+	}
+	if len(pvErr.Version) > 32 || strings.Contains(pvErr.Version, testKey[:12]) {
+		t.Errorf("Version = %q, want at most 32 scrubbed bytes", pvErr.Version)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") || strings.Contains(msg, testKey[:12]) || len(msg) > 200 {
+		t.Errorf("error = %q, want a short quoted excerpt without the key", msg)
 	}
 }
 
@@ -276,6 +372,60 @@ func TestCallToolNotRetried(t *testing.T) {
 	}
 	if n := fake.ToolCallCount(); n != 1 {
 		t.Errorf("tools/call count = %d, want exactly 1; the call must not be retried", n)
+	}
+}
+
+func TestCallToolMalformedHandshakeOrResult(t *testing.T) {
+	// An initialize answered with a JSON-RPC error or a non-object result
+	// fails the call with nothing sent after it; a non-object tools/call
+	// result fails the call too.
+	tests := []struct {
+		name string
+		// initialize is the initialize reply's members after its id; empty
+		// for an ordinary reply.
+		initialize string
+		toolResult string
+		wantErr    string
+		wantPosts  []string
+	}{
+		{"initialize rejected", `"error":{"code":-32602,"message":"unsupported capabilities"}`, "", "mcp: initialize rejected: rpc error -32602: unsupported capabilities", []string{"initialize"}},
+		{"initialize result not an object", `"result":"oops"`, "", "mcp: decoding initialize result:", []string{"initialize"}},
+		{"tool result not an object", "", `"oops"`, "mcp: decoding tool result:", []string{"initialize", "notifications/initialized", "tools/call"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var posts []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				req := decodeRPC(t, r)
+				mu.Lock()
+				posts = append(posts, req.Method)
+				mu.Unlock()
+				switch {
+				case req.Method == "initialize" && tt.initialize != "":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,%s}`, deref(req.ID), tt.initialize)
+				case req.Method == "initialize":
+					writeInitialize(w, deref(req.ID), "")
+				case req.Method == "notifications/initialized":
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), tt.toolResult)
+				}
+			}))
+			defer server.Close()
+
+			_, err := call(newClient(t, server.URL))
+			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(posts, tt.wantPosts) {
+				t.Errorf("requests = %v, want %v", posts, tt.wantPosts)
+			}
+		})
 	}
 }
 

@@ -1,7 +1,9 @@
 // Package billet adapts Billet, the Equestrianism suite's memory sidecar, to
 // the memory.Recaller and memory.Rememberer seams (docs/KNOWLEDGE.md §3.2).
 // Billet exposes search_memory and save_memory over MCP Streamable HTTP; the
-// transport, its bounds and its key handling live in internal/mcpclient.
+// transport, its session, its bounds and its key handling live in
+// internal/mcpclient. A Client holds one session for its lifetime; Close ends
+// it.
 //
 // Billet binds one namespace per process and accepts none per call, so the
 // Namespace argument is only copied into each returned Reference.
@@ -58,7 +60,8 @@ type Options struct {
 	APIKey string
 	// HTTPClient supplies the underlying client; nil builds one.
 	HTTPClient *http.Client
-	// RequestTimeout bounds one Recall or Remember. Default 30s.
+	// RequestTimeout bounds one Recall or Remember, and Close's DELETE.
+	// Default 30s.
 	RequestTimeout time.Duration
 	// DefaultLimit is the hits per recall when Query.Limit <= 0. Default 5,
 	// clamped to MaxLimit.
@@ -206,6 +209,13 @@ func (c *Client) Remember(ctx context.Context, ns memory.Namespace, m memory.Mem
 		return memory.Reference{}, fmt.Errorf("billet: %s: %w", saveTool, err)
 	}
 	return reference(ns, doc.MemoryID), nil
+}
+
+// Close ends the Billet session, when the server issued one, with a
+// best-effort DELETE; a later Recall or Remember fails with an error matching
+// mcpclient.ErrClosed. It is idempotent and always returns nil.
+func (c *Client) Close() error {
+	return c.mcp.Close()
 }
 
 // decodeReply decodes the first of structuredContent or a text block that is

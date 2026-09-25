@@ -35,15 +35,18 @@ type FakeServer struct {
 	server  *httptest.Server
 	handler FakeHandler
 
-	// sessionID, when non-empty, is returned on the initialize reply as the
-	// Mcp-Session-Id header and then required on tools/call and DELETE.
-	sessionID       string
-	protocolVersion string
-	useSSE          bool
-	rawResult       string
+	// sessionID, when non-empty, names the sessions initialize issues; see
+	// WithSessionID.
+	sessionID           string
+	protocolVersion     string
+	omitProtocolVersion bool
+	useSSE              bool
+	rawResult           string
 
 	mu       sync.Mutex
 	requests []FakeRequest
+	issued   int             // sessions issued so far
+	live     map[string]bool // issued sessions not yet ended
 }
 
 // FakeRequest is one request the fake received.
@@ -57,6 +60,8 @@ type FakeRequest struct {
 	Authorization string
 	// SessionID is the Mcp-Session-Id request header value ("" when absent).
 	SessionID string
+	// ID is the JSON-RPC request id (0 for a notification or a DELETE).
+	ID int
 	// ProtocolVersion is the MCP-Protocol-Version request header value (""
 	// when absent).
 	ProtocolVersion string
@@ -69,16 +74,25 @@ type FakeRequest struct {
 // FakeOption configures a FakeServer at construction.
 type FakeOption func(*FakeServer)
 
-// WithSessionID makes the fake assign a session on initialize and require it
-// on tools/call and DELETE, modelling a stateful server.
+// WithSessionID models a stateful server. Each initialize issues a new
+// session, named id the first time and id-2, id-3 and so on after. Every
+// later request must carry a live session: none is answered with HTTP 400,
+// and one that DELETE or ExpireSession ended with HTTP 404.
 func WithSessionID(id string) FakeOption {
 	return func(f *FakeServer) { f.sessionID = id }
 }
 
 // WithProtocolVersion makes the fake's initialize result name version instead
-// of ProtocolVersion, modelling a server that negotiates down.
+// of ProtocolVersion, modelling a server that negotiates down or one choosing
+// a revision the client does not support.
 func WithProtocolVersion(version string) FakeOption {
 	return func(f *FakeServer) { f.protocolVersion = version }
+}
+
+// WithoutProtocolVersion makes the fake's initialize result omit
+// protocolVersion, which the MCP schema requires.
+func WithoutProtocolVersion() FakeOption {
+	return func(f *FakeServer) { f.omitProtocolVersion = true }
 }
 
 // WithSSE makes the fake return tools/call as a text/event-stream reply.
@@ -97,7 +111,7 @@ func WithRawResult(raw string) FakeOption {
 // handler. A nil handler answers every call with an empty result. Call Close
 // when done.
 func NewFakeServer(handler FakeHandler, opts ...FakeOption) *FakeServer {
-	f := &FakeServer{handler: handler, protocolVersion: mcpclient.ProtocolVersion}
+	f := &FakeServer{handler: handler, protocolVersion: mcpclient.ProtocolVersion, live: map[string]bool{}}
 	for _, o := range opts {
 		o(f)
 	}
@@ -121,7 +135,8 @@ func (f *FakeServer) Requests() []FakeRequest {
 }
 
 // CallCount reports every request received: initialize + initialized +
-// tools/call = 3 for one CallTool, plus the DELETE when a session is issued.
+// tools/call = 3 for a Client's first CallTool and 1 for each later one, plus
+// the DELETE on Close when a session was issued.
 func (f *FakeServer) CallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,11 +146,35 @@ func (f *FakeServer) CallCount() int {
 // ToolCallCount reports the tools/call requests received — exactly 1 per
 // CallTool proves the call is not retried.
 func (f *FakeServer) ToolCallCount() int {
+	return f.count(func(r FakeRequest) bool { return r.Method == "tools/call" })
+}
+
+// InitializeCount reports the initialize requests received: 1 per Client
+// lifetime unless a session ended.
+func (f *FakeServer) InitializeCount() int {
+	return f.count(func(r FakeRequest) bool { return r.Method == "initialize" })
+}
+
+// DeleteCount reports the session DELETE requests received.
+func (f *FakeServer) DeleteCount() int {
+	return f.count(func(r FakeRequest) bool { return r.HTTPMethod == http.MethodDelete })
+}
+
+// ExpireSession ends every session the fake has issued, as a server does on
+// restart or idle timeout: a later request bearing one gets HTTP 404, and the
+// next initialize issues a fresh session.
+func (f *FakeServer) ExpireSession() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clear(f.live)
+}
+
+func (f *FakeServer) count(match func(FakeRequest) bool) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, r := range f.requests {
-		if r.Method == "tools/call" {
+		if match(r) {
 			n++
 		}
 	}
@@ -155,7 +194,7 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case f.sessionID == "":
 			w.WriteHeader(http.StatusMethodNotAllowed)
-		case rec.SessionID != f.sessionID:
+		case !f.endSession(rec.SessionID):
 			w.WriteHeader(http.StatusNotFound)
 		default:
 			w.WriteHeader(http.StatusNoContent)
@@ -174,30 +213,42 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	// Decode best-effort: the Client always sends valid JSON-RPC.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	rec.Method = req.Method
+	rec.ID = deref(req.ID)
 	if req.Method == "tools/call" {
 		rec.ToolName = req.Params.Name
 		rec.Arguments = req.Params.Arguments
 	}
 	f.record(rec)
 
-	switch req.Method {
-	case "initialize":
-		if f.sessionID != "" {
-			w.Header().Set(mcpSessionHeader, f.sessionID)
-		}
-		f.writeJSON(w, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), mustJSON(map[string]any{
-			"protocolVersion": f.protocolVersion,
-			"capabilities":    map[string]any{},
-			"serverInfo":      map[string]string{"name": "fake-mcp", "version": "0"},
-		})))
-	case "notifications/initialized":
-		w.WriteHeader(http.StatusAccepted)
-	case "tools/call":
-		if f.sessionID != "" && rec.SessionID != f.sessionID {
+	if req.Method != "initialize" && f.sessionID != "" {
+		switch {
+		case rec.SessionID == "":
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32000,"message":"missing session"}}`))
 			return
+		case !f.sessionLive(rec.SessionID):
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"session not found"}}`))
+			return
 		}
+	}
+
+	switch req.Method {
+	case "initialize":
+		if f.sessionID != "" {
+			w.Header().Set(mcpSessionHeader, f.newSession())
+		}
+		result := map[string]any{
+			"capabilities": map[string]any{},
+			"serverInfo":   map[string]string{"name": "fake-mcp", "version": "0"},
+		}
+		if !f.omitProtocolVersion {
+			result["protocolVersion"] = f.protocolVersion
+		}
+		f.writeJSON(w, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), mustJSON(result)))
+	case "notifications/initialized":
+		w.WriteHeader(http.StatusAccepted)
+	case "tools/call":
 		f.writeToolResult(w, deref(req.ID), rec.ToolName, rec.Arguments)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
@@ -209,6 +260,35 @@ func (f *FakeServer) record(rec FakeRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, rec)
+}
+
+func (f *FakeServer) newSession() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issued++
+	id := f.sessionID
+	if f.issued > 1 {
+		id = fmt.Sprintf("%s-%d", f.sessionID, f.issued)
+	}
+	f.live[id] = true
+	return id
+}
+
+func (f *FakeServer) sessionLive(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.live[id]
+}
+
+// endSession ends a live session, reporting whether it was live.
+func (f *FakeServer) endSession(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.live[id] {
+		return false
+	}
+	delete(f.live, id)
+	return true
 }
 
 // writeToolResult writes the tools/call reply as plain JSON or one SSE frame.

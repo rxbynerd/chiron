@@ -746,6 +746,10 @@ decision. `initialize`/`initialized`/`tools/call` are each single-attempt:
 handshake calls are not retried either, keeping the flow's cost ceiling
 obvious.
 
+**Superseded in part by the 2026-09-25 "MCP client: supported protocol
+versions" entry below**: a session now serves the client's lifetime, and a
+`tools/call` refused with a session 404 is re-sent once.
+
 **Two reply framings, both bounded.** A Streamable-HTTP `tools/call` POST may
 return `application/json` (one JSON-RPC message) or `text/event-stream` (SSE
 frames carrying JSON-RPC messages). Both are handled: the JSON path is the
@@ -1089,6 +1093,10 @@ for one `Search`: reusing one across searches would save two round trips per
 query but needs re-initialisation on a 404 and concurrency control, and is
 deferred. The tool name and query argument key stay configurable through
 `Options.ToolName` and `Options.QueryArgKey` (defaults `search` and `query`).
+
+**Superseded by the 2026-09-25 "MCP client: supported protocol versions"
+entry below**: an unsupported or missing version now fails the call, and one
+session serves the client's lifetime.
 
 ## 2026-09-23 — Cycle-3 remediation: worker loop, spend levers, CLI surface and wave order
 
@@ -1447,3 +1455,95 @@ site already wraps transport errors with one.
 - The rune-safe truncation loops the issue's comment counts as string
   handling, not HTTP, and stay where they are.
 - `internal/researcher/gemini/input.go` bounds a file read, not an HTTP body.
+
+## 2026-09-25 — MCP client: supported protocol versions and one session per client
+
+Issue #16. `internal/mcpclient` accepted whatever `protocolVersion` the
+server named, fell back to its own revision when the reply named none, and
+opened and ended a session on every `CallTool`: four round-trips per search
+or recall, three of them overhead. The 2026-09-23 entry deferred both. No new
+dependency.
+
+**A supported set, strictly enforced.** `initialize` still advertises
+`2025-06-18`. The reply must name `2025-06-18` or `2025-03-26`, the two
+revisions that define the Streamable-HTTP transport the client implements
+(`2024-11-05` used the older HTTP+SSE transport). Any other version fails the
+call with `*ProtocolVersionError`, which matches `ErrUnsupportedProtocolVersion`
+through `errors.Is`, before `notifications/initialized` or any `tools/call`.
+A session id the server issued is ended with the best-effort `DELETE`, sent
+without `MCP-Protocol-Version` because no version was agreed. The refused
+version is server-controlled text, so the error carries it scrubbed, cut to
+32 bytes and quoted.
+
+**A reply with no version is refused too.** The MCP schema makes
+`InitializeResult.protocolVersion` required in every revision. A server that
+omits it is non-conformant and its transport rules cannot be assumed, so
+falling back to the client's own revision was a guess. Only the package's
+own test helpers relied on the fallback; the shared fakes always name a
+version, and `mcpclienttest.WithoutProtocolVersion` now models the omission.
+A result that is not a JSON object is a decode error.
+
+**One session per client.** The first `CallTool` runs `initialize` and
+`notifications/initialized`; later calls reuse the session id and the
+negotiated version. JSON-RPC ids come from a per-client counter, because MCP
+forbids reusing an id within a session. `Close() error` ends the session with
+the best-effort `DELETE` on a fresh context bounded by `RequestTimeout`. It is
+idempotent and safe alongside `CallTool`, and later calls fail with
+`ErrClosed`. The search client and the Billet adapter expose `Close`. The CLI
+composition root closes both when the command exits, and `buildWorker`
+closes whatever it built when a later step fails. `memory.Recaller` and
+`memory.Rememberer` gain no lifecycle method: only Billet holds a session, and
+`buildKnowledge` returns its closer beside the two halves.
+
+**Re-initialise once on a session 404.** Under the Streamable-HTTP transport,
+a server that no longer holds a session answers any request bearing its id
+with HTTP 404, and the client must start a new session. On exactly that, a
+404 to a `tools/call` sent with a session id, the client discards the
+session, re-initialises once and re-sends the `tools/call` once. A second 404
+fails the call and drops the session, so the next call starts afresh under
+the same bound. A 404 on a request without a session id is an ordinary
+failure. Nothing else is retried.
+
+**Why the re-send is money-safe.** The rule against auto-retrying paid POSTs
+guards ambiguous failures: a 5xx, a timeout or a dropped connection may
+follow work the server already did and billed. A session 404 is not
+ambiguous. The transport rejects the request before it reaches any tool, so
+nothing ran. The residual risk is a server that runs the tool and then
+answers 404, which breaks the transport contract; it is bounded at one extra
+call per `CallTool`. The alternative, failing this call and re-initialising
+only for the next, was rejected. Every session expiry would reach the worker
+as a failed search and cost one of its three strikes, for a call the server
+never processed.
+
+**Concurrency.** A mutex guards the session state and is never held across a
+request. Establishing a session is single-flight. Callers that find none wait
+on the one handshake in flight, each under its own context. A failed
+handshake is shared with its waiters but not kept, so the next call tries
+again. A failure caused by the leading caller's own context ending is not
+shared: a waiter with time left runs the handshake itself. A caller holding a
+stale session drops it only if it is still the current one, compared by
+pointer, so it never discards a fresh session another caller established. A
+handshake that completes after `Close` ends its new session at once.
+
+**The session id is handled like the key.** Within a stateful server it
+works as a bearer, so no error carries it. It is redacted by exact match from
+server-supplied error bodies, JSON-RPC error messages, tool-error text and
+the quoted protocol version. An issued id over 1024 bytes, or with any
+character outside visible ASCII (the only range MCP permits), fails the
+handshake at `initialize` as a protocol error and is never stored, echoed or
+ended.
+
+**Close's bound at the CLI.** There `RequestTimeout` is
+`fleet.worker_timeout`, five minutes by default. A server that accepts the
+`DELETE` and never answers can therefore delay exit by up to that per store.
+This is accepted for now: the `DELETE` goes to a server that answered every
+earlier request, and a tighter bound would need a `Close` that takes a
+context. The `DELETE` that ends a session left by a failed handshake, or
+issued after `Close`, runs under the same fresh bound, so a cancelled caller
+cannot skip it but may wait up to `RequestTimeout` for it.
+
+**Fake.** `mcpclienttest.FakeServer` issues a fresh session per `initialize`
+(`id`, then `id-2`, `id-3`), tracks which are live, and answers 400 to a
+request without one and 404 to one that has ended. It adds `ExpireSession`,
+`InitializeCount`, `DeleteCount` and `FakeRequest.ID`. `searchtest` and
+`billettest` forward the new methods, and `billettest.WithSessionID` is new.
