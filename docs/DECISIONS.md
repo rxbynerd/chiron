@@ -1647,11 +1647,14 @@ query over 32 KiB (`maxLeadQueryBytes`) is refused before this call runs,
 so an oversized query is never billed.
 
 **A brief cannot add capabilities.** Neither the schema nor `Brief` has a
-field that names tools or actions, and the strict decode rejects unknown
-properties. A decomposition that carries `tools`, `allowed_actions` or
-any other extra property is therefore refused before any worker spends.
-The worker's action schema is unchanged, so its closed vocabulary is the
-only thing that decides what a worker can do.
+field that names tools or actions, and the strict decode refuses any
+property name that does not match one of the five declared fields. A
+decomposition that carries `tools`, `allowed_actions` or any other extra
+property is therefore refused before any worker spends. (`encoding/json`'s
+case-insensitive field matching still accepts a case-folded or duplicate
+variant of a declared name; that maps to the same field, so it opens no new
+one.) The worker's action schema is unchanged, so its closed vocabulary is
+the only thing that decides what a worker can do.
 
 **Validation before dispatch.** Every check runs before `decompose`
 returns, so a caller has nothing to dispatch when one fails. The reply is
