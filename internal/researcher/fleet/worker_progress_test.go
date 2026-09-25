@@ -286,6 +286,7 @@ func TestProgressDetail(t *testing.T) {
 		{"bearer scrubbed", action{Kind: actionRecall, Query: "Bearer abc.def-ghi"}, "Bearer [REDACTED:bearer-token]"},
 		{"fetch drops userinfo, path, query and fragment", action{Kind: actionFetch, URL: "https://user:pass@example.org:8443/a/b?token=x#frag"}, "https://example.org:8443"},
 		{"fetch without port", action{Kind: actionFetch, URL: " https://example.org/path?q=1 "}, "https://example.org"},
+		{"fetch lowercases scheme and host", action{Kind: actionFetch, URL: "HTTPS://EXAMPLE.COM/Path"}, "https://example.com"},
 		{"fetch unparsable", action{Kind: actionFetch, URL: "http://[::1/path"}, ""},
 		{"fetch relative", action{Kind: actionFetch, URL: "/just/a/path?q=1"}, ""},
 		{"fetch opaque", action{Kind: actionFetch, URL: "mailto:someone@example.org"}, ""},

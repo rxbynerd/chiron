@@ -564,15 +564,15 @@ func progressDetail(act action) string {
 	return strings.TrimSpace(boundRunes(secret.Scrub(printableOneLine(s)), maxProgressDetailRunes))
 }
 
-// urlOrigin reduces a URL to scheme://host, keeping a port but dropping
-// userinfo, path, query and fragment. A URL without both a scheme and a host
-// yields "".
+// urlOrigin reduces a URL to scheme://host, lowercased, keeping a port but
+// dropping userinfo, path, query and fragment. A URL without both a scheme
+// and a host yields "".
 func urlOrigin(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return ""
 	}
-	return u.Scheme + "://" + u.Host
+	return strings.ToLower(u.Scheme + "://" + u.Host)
 }
 
 // printableOneLine flattens s to one line of printable text, dropping control
