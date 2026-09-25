@@ -19,6 +19,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/planner"
+	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -75,7 +76,7 @@ func (e *ExitError) Unwrap() error { return e.Err }
 // researcher for the chosen agent, gate the budget, optionally review the
 // plan (--plan), then hand off to the run core. The deep-research tiers
 // bind the Gemini adapter; --agent worker binds Chiron's in-process worker
-// (runWorkerResearch); --agent fleet has no researcher yet.
+// (runInProcessResearch); --agent fleet has no researcher yet.
 func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
 	if cfg.Query == "" {
 		return errors.New("research: a query is required (--query or the positional argument)")
@@ -86,7 +87,7 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 		return err
 	}
 	if cfg.Agent == config.AgentWorker {
-		return runWorkerResearch(cmd, cfg, resolver)
+		return runInProcessResearch(cmd, cfg, resolver, buildWorker)
 	}
 
 	return withRunSeams(cmd, cfg, resolver, func(ctx context.Context, apiKey string, deps run.Deps) error {
@@ -123,19 +124,20 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 	})
 }
 
-// runWorkerResearch runs `chiron research --agent worker`: fill unset fleet
-// endpoints from the environment, build the worker from cfg.Fleet, name its
-// destinations on the event stream, then drive the unchanged run core. The
-// deep-research levers are rejected by config validation for this agent
-// rather than ignored; the worker's spend bounds are the fleet caps. Per-turn
+// runInProcessResearch runs `chiron research` for an in-process agent: fill
+// unset fleet endpoints from the environment, bind its researcher from
+// cfg.Fleet with build, name its destinations on the event stream, then drive
+// the unchanged run core. The deep-research levers (--plan, --budget and the
+// Gemini tool flags) are rejected by config validation for these agents
+// rather than ignored; their spend bounds are the fleet caps. Per-turn
 // progress reaches the transport as worker_turn deltas unless --quiet.
-func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
+func runInProcessResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver, build inProcessBuilder) error {
 	if err := applyEndpointEnv(&cfg.Fleet, cmd.Flags()); err != nil {
 		return err
 	}
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
 		progress := bindWorkerProgress(cfg.Stream, deps.Transport)
-		res, sessions, err := buildWorker(ctx, cfg, resolver, deps.Tracer, stderr, progress)
+		res, sessions, err := build(ctx, cfg, resolver, deps.Tracer, stderr, progress)
 		if err != nil {
 			return err
 		}
@@ -158,45 +160,68 @@ const fetchRequestTimeout = 30 * time.Second
 // reduces it to text (fleet.max_page_bytes bounds the text).
 const fetchMaxContentBytes = 1 << 20
 
-// buildWorker constructs the in-process worker researcher from the resolved
-// config. It resolves the model, search and knowledge key references here, at
-// the composition root, and fails before any request if a required endpoint
-// or key is missing or unresolvable, so a misconfigured worker never emits a
-// resume handle for a run that cannot proceed. A --template is loaded and
-// validated here for the same reason. WorkerTimeout bounds the whole run and
-// each model, search and knowledge call; fetch has its own tighter per-call
-// bound. The returned closer ends the MCP sessions the search and knowledge
-// clients hold; when buildWorker fails, nothing is left open. progress, when
-// non-nil, receives the per-turn reports.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ *fleet.Worker, _ io.Closer, err error) {
+// inProcessBuilder binds an in-process agent's researcher from the resolved
+// config. progress, when non-nil, receives every worker's per-turn reports.
+// The returned closer ends the MCP sessions the researcher's clients hold;
+// when the builder fails, nothing is left open.
+type inProcessBuilder func(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error)
+
+// buildWorker binds the single in-process worker over the shared worker
+// deps.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error) {
+	wd, sessions, err := buildWorkerDeps(ctx, cfg, resolver, tracer, stderr, progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	w, err := fleet.NewWorker(wd)
+	if err != nil {
+		_ = sessions.Close()
+		return nil, nil, err
+	}
+	return w, sessions, nil
+}
+
+// buildWorkerDeps builds the clients and caps every in-process agent's
+// workers share from the resolved config. It resolves the model, search and
+// knowledge key references here, at the composition root, and fails before
+// any request if a required endpoint or key is missing or unresolvable, so a
+// misconfigured agent never emits a resume handle for a run that cannot
+// proceed. A --template is loaded and validated here for the same reason.
+// WorkerTimeout bounds each worker's run and each model, search and
+// knowledge call; fetch has its own tighter per-call bound. The returned
+// closer ends the MCP sessions the search and knowledge clients hold; when
+// buildWorkerDeps fails, nothing is left open.
+func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ fleet.WorkerDeps, _ io.Closer, err error) {
 	fc := cfg.Fleet
-	if fc.ModelEndpoint == "" {
-		return nil, nil, fmt.Errorf("research --agent worker: fleet.model_endpoint is required; pass --fleet-model-endpoint or set %s", config.EnvFleetModelEndpoint)
-	}
-	if fc.ModelName == "" {
-		return nil, nil, errors.New("research --agent worker: fleet.model_name is required")
-	}
-	if fc.ModelKeyRef == "" {
-		return nil, nil, errors.New("research --agent worker: fleet.model_key_ref is required")
-	}
-	if fc.SearchEndpoint == "" {
-		return nil, nil, fmt.Errorf("research --agent worker: fleet.search_endpoint is required; pass --fleet-search-endpoint or set %s", config.EnvFleetSearchEndpoint)
+	for _, required := range []struct {
+		field string
+		set   bool
+		hint  string
+	}{
+		{"fleet.model_endpoint", fc.ModelEndpoint != "", "; pass --fleet-model-endpoint or set " + config.EnvFleetModelEndpoint},
+		{"fleet.model_name", fc.ModelName != "", ""},
+		{"fleet.model_key_ref", fc.ModelKeyRef != "", ""},
+		{"fleet.search_endpoint", fc.SearchEndpoint != "", "; pass --fleet-search-endpoint or set " + config.EnvFleetSearchEndpoint},
+	} {
+		if !required.set {
+			return fleet.WorkerDeps{}, nil, fmt.Errorf("research --agent %s: %s is required%s", cfg.Agent, required.field, required.hint)
+		}
 	}
 	if err := requireKnowledge(fc); err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	var reportTemplate *fleet.ReportTemplate
 	if cfg.Template != "" {
 		rt, err := fleet.LoadReportTemplate(cfg.Template)
 		if err != nil {
-			return nil, nil, err
+			return fleet.WorkerDeps{}, nil, err
 		}
 		reportTemplate = rt
 	}
 
 	modelKey, err := resolver.Resolve(ctx, fc.ModelKeyRef)
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	// The search MCP may be keyless; resolve only when a reference is set, so
 	// an empty ref sends no Authorization header rather than failing.
@@ -204,13 +229,13 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 	if fc.SearchKeyRef != "" {
 		searchKey, err = resolver.Resolve(ctx, fc.SearchKeyRef)
 		if err != nil {
-			return nil, nil, err
+			return fleet.WorkerDeps{}, nil, err
 		}
 	}
 
 	allowLoopback, err := fetchAllowLoopbackFromEnv()
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 
 	var sessions closers
@@ -233,7 +258,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		RequestTimeout: callTimeout,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	searchClient, err := search.New(search.Options{
 		Endpoint:       fc.SearchEndpoint,
@@ -243,12 +268,12 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		QueryArgKey:    fc.SearchQueryArg,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	sessions = append(sessions, searchClient)
 	recaller, rememberer, knowledgeSession, err := buildKnowledge(ctx, fc, resolver, callTimeout)
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	if knowledgeSession != nil {
 		sessions = append(sessions, knowledgeSession)
@@ -262,10 +287,10 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		AllowLoopback:   allowLoopback,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 
-	worker, err := fleet.NewWorker(fleet.WorkerDeps{
+	return fleet.WorkerDeps{
 		Model:              modelClient,
 		Search:             searchClient,
 		Fetch:              fetchClient,
@@ -286,11 +311,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 			MaxPageBytes:     fc.MaxPageBytes,
 			RecallLimit:      fc.KnowledgeLimit,
 		},
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return worker, sessions, nil
+	}, sessions, nil
 }
 
 // closers closes each member, last first, and joins their errors.
