@@ -162,11 +162,12 @@ const fetchMaxContentBytes = 1 << 20
 // config. It resolves the model, search and knowledge key references here, at
 // the composition root, and fails before any request if a required endpoint
 // or key is missing or unresolvable, so a misconfigured worker never emits a
-// resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
-// run and each model, search and knowledge call; fetch has its own tighter
-// per-call bound. The returned closer ends the MCP sessions the search and
-// knowledge clients hold; when buildWorker fails, nothing is left open.
-// progress, when non-nil, receives the per-turn reports.
+// resume handle for a run that cannot proceed. A --template is loaded and
+// validated here for the same reason. WorkerTimeout bounds the whole run and
+// each model, search and knowledge call; fetch has its own tighter per-call
+// bound. The returned closer ends the MCP sessions the search and knowledge
+// clients hold; when buildWorker fails, nothing is left open. progress, when
+// non-nil, receives the per-turn reports.
 func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ *fleet.Worker, _ io.Closer, err error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
@@ -183,6 +184,14 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 	}
 	if err := requireKnowledge(fc); err != nil {
 		return nil, nil, err
+	}
+	var reportTemplate *fleet.ReportTemplate
+	if cfg.Template != "" {
+		rt, err := fleet.LoadReportTemplate(cfg.Template)
+		if err != nil {
+			return nil, nil, err
+		}
+		reportTemplate = rt
 	}
 
 	modelKey, err := resolver.Resolve(ctx, fc.ModelKeyRef)
@@ -262,6 +271,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		Fetch:              fetchClient,
 		Knowledge:          recaller,
 		Remember:           rememberer,
+		ReportTemplate:     reportTemplate,
 		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
 		Tracer:             tracer,
 		Logger:             slog.New(secret.NewScrubHandler(slog.NewTextHandler(stderr, nil))),
