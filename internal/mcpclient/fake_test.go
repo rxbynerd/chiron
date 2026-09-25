@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -370,6 +372,60 @@ func TestCallToolNotRetried(t *testing.T) {
 	}
 	if n := fake.ToolCallCount(); n != 1 {
 		t.Errorf("tools/call count = %d, want exactly 1; the call must not be retried", n)
+	}
+}
+
+func TestCallToolMalformedHandshakeOrResult(t *testing.T) {
+	// An initialize answered with a JSON-RPC error or a non-object result
+	// fails the call with nothing sent after it; a non-object tools/call
+	// result fails the call too.
+	tests := []struct {
+		name string
+		// initialize is the initialize reply's members after its id; empty
+		// for an ordinary reply.
+		initialize string
+		toolResult string
+		wantErr    string
+		wantPosts  []string
+	}{
+		{"initialize rejected", `"error":{"code":-32602,"message":"unsupported capabilities"}`, "", "mcp: initialize rejected: rpc error -32602: unsupported capabilities", []string{"initialize"}},
+		{"initialize result not an object", `"result":"oops"`, "", "mcp: decoding initialize result:", []string{"initialize"}},
+		{"tool result not an object", "", `"oops"`, "mcp: decoding tool result:", []string{"initialize", "notifications/initialized", "tools/call"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var posts []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				req := decodeRPC(t, r)
+				mu.Lock()
+				posts = append(posts, req.Method)
+				mu.Unlock()
+				switch {
+				case req.Method == "initialize" && tt.initialize != "":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,%s}`, deref(req.ID), tt.initialize)
+				case req.Method == "initialize":
+					writeInitialize(w, deref(req.ID), "")
+				case req.Method == "notifications/initialized":
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, deref(req.ID), tt.toolResult)
+				}
+			}))
+			defer server.Close()
+
+			_, err := call(newClient(t, server.URL))
+			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(posts, tt.wantPosts) {
+				t.Errorf("requests = %v, want %v", posts, tt.wantPosts)
+			}
+		})
 	}
 }
 

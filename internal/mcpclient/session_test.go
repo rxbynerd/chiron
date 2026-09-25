@@ -333,6 +333,89 @@ func TestCallToolRepeatedSessionExpiryFails(t *testing.T) {
 	}
 }
 
+func TestCallToolFailedReinitialisationAfterSessionExpiry(t *testing.T) {
+	// When the handshake after a session 404 fails, CallTool returns that
+	// failure rather than the 404, does not re-send the call, and ends any
+	// session the failed handshake was issued. The next call starts afresh.
+	tests := []struct {
+		name        string
+		retryInit   func(w http.ResponseWriter, id int)
+		wantErr     string
+		wantDeletes []string
+	}{
+		{
+			name:      "HTTP 500",
+			retryInit: func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusInternalServerError) },
+			wantErr:   "initialize failed: HTTP 500",
+		},
+		{
+			name: "unsupported version",
+			retryInit: func(w http.ResponseWriter, id int) {
+				w.Header().Set("Mcp-Session-Id", "sess-2")
+				fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":"2024-11-05"}}`, id)
+			},
+			wantErr:     "unsupported protocol version",
+			wantDeletes: []string{"sess-2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deletes deleteLog
+			var inits, toolCalls atomic.Int32
+			var expired atomic.Bool
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletes.record(w, r)
+					return
+				}
+				req := decodeRPC(t, r)
+				switch req.Method {
+				case "initialize":
+					n := inits.Add(1)
+					if n == 2 {
+						tt.retryInit(w, deref(req.ID))
+						return
+					}
+					writeInitialize(w, deref(req.ID), fmt.Sprintf("sess-%d", n))
+				case "notifications/initialized":
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					toolCalls.Add(1)
+					if expired.Load() && r.Header.Get("Mcp-Session-Id") == "sess-1" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					writeToolText(w, deref(req.ID), "ok")
+				}
+			}))
+			defer server.Close()
+
+			c := newClient(t, server.URL)
+			if _, err := call(c); err != nil {
+				t.Fatalf("first CallTool: %v", err)
+			}
+			expired.Store(true)
+			_, err := call(c)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || strings.Contains(err.Error(), "HTTP 404") {
+				t.Fatalf("CallTool after expiry error = %v, want the re-initialisation's %q", err, tt.wantErr)
+			}
+			if n := toolCalls.Load(); n != 2 {
+				t.Errorf("tools/call count = %d, want 2; the call is not re-sent after a failed re-initialisation", n)
+			}
+			if got := deletes.sessions(); !slices.Equal(got, tt.wantDeletes) {
+				t.Errorf("DELETEs = %q, want %q", got, tt.wantDeletes)
+			}
+
+			if _, err := call(c); err != nil {
+				t.Fatalf("CallTool after the failed re-initialisation: %v", err)
+			}
+			if n := inits.Load(); n != 3 {
+				t.Errorf("initialize count = %d, want 3", n)
+			}
+		})
+	}
+}
+
 func TestCallToolNotFoundWithoutSessionNotRetried(t *testing.T) {
 	// A 404 on a request that carried no session id is an ordinary failure:
 	// nothing expired, so nothing is re-sent.

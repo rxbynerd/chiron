@@ -357,6 +357,45 @@ func TestCallToolSSEStreamBounded(t *testing.T) {
 	}
 }
 
+func TestCallToolMalformedReply(t *testing.T) {
+	// A tools/call reply body that is not JSON, or an event stream that is
+	// malformed, has a line past the bound, or ends without a response, fails
+	// the call.
+	tests := []struct {
+		name         string
+		contentType  string
+		body         string
+		maxBodyBytes int64
+		wantErr      string
+	}{
+		{"JSON body truncated", "application/json", `{"jsonrpc":"2.0","id":2,`, 0, "mcp: decoding response:"},
+		{"SSE data not JSON", "text/event-stream", "data: {not json}\n\n", 0, "mcp: decoding SSE response:"},
+		// The line must outgrow the scanner's 64 KiB initial buffer to reach
+		// the per-line bound rather than the aggregate one.
+		{"SSE line over the bound", "text/event-stream", "data: " + strings.Repeat("x", 200<<10), 100 << 10, "mcp: SSE event exceeds 102400-byte bound"},
+		{"SSE stream without a response", "text/event-stream", ": keep-alive\n\n" + `data: {"jsonrpc":"2.0","method":"notifications/progress"}` + "\n\n", 0, "mcp: SSE stream carried no JSON-RPC response"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				w.Header().Set("Content-Type", tt.contentType)
+				// The client may stop reading early, so a write error is expected.
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			c := newClient(t, server.URL, func(o *Options) { o.MaxBodyBytes = tt.maxBodyBytes })
+			_, err := call(c)
+			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+				t.Errorf("error = %.200v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestCallToolCrossHostRedirectRefused(t *testing.T) {
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("redirect target was called; the key would have leaked to %s", r.Host)
@@ -443,6 +482,43 @@ func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
 	}
 	if got := conns.Load(); got != 1 {
 		t.Errorf("connections = %d, want 1; the cleartext redirect target must never be dialled", got)
+	}
+}
+
+func TestCloseCrossHostRedirectRefused(t *testing.T) {
+	// Close's session DELETE carries the key and the session id, so it
+	// refuses a cross-host redirect exactly as a POST does.
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target was called with %s; the session DELETE followed a cross-host redirect", r.Method)
+	}))
+	defer elsewhere.Close()
+
+	var deletes atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			http.Redirect(w, r, elsewhere.URL, http.StatusTemporaryRedirect)
+			return
+		}
+		w.Header().Set(mcpSessionHeader, "sess-redirect")
+		req, answered := answerHandshake(t, w, r)
+		if answered {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[]}}`, deref(req.ID))
+	}))
+	defer origin.Close()
+
+	c := newClient(t, origin.URL)
+	if _, err := call(c); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if n := deletes.Load(); n != 1 {
+		t.Errorf("origin DELETE count = %d, want 1", n)
 	}
 }
 
@@ -546,6 +622,49 @@ func TestCallToolErrorNeverLeaksKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mcp: initialize failed: HTTP 401") {
 		t.Errorf("error = %v, want the initialize status surfaced", err)
+	}
+}
+
+func TestCallToolKeylessErrorTextIntact(t *testing.T) {
+	// A keyless client has no key to redact, so server text reaches an error
+	// or a tool error unaltered, not interleaved with redaction markers.
+	tests := []struct {
+		name     string
+		status   int
+		reply    string
+		wantErr  string
+		wantText string
+	}{
+		{"error body", http.StatusBadGateway, "backend unavailable", "mcp: tools/call failed: HTTP 502: backend unavailable", ""},
+		{"JSON-RPC error", http.StatusOK, `{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"backend unavailable"}}`, "mcp: tools/call rejected: rpc error -32000: backend unavailable", ""},
+		{"tool error", http.StatusOK, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"backend unavailable"}],"isError":true}}`, "", "backend unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.reply)
+			}))
+			defer server.Close()
+
+			got, err := call(newClient(t, server.URL, func(o *Options) { o.APIKey = "" }))
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Errorf("error = %v, want exactly %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if text := FirstText(got.Content); !got.IsError || text != tt.wantText {
+				t.Errorf("tool error text = %q (IsError %v), want exactly %q", text, got.IsError, tt.wantText)
+			}
+		})
 	}
 }
 
