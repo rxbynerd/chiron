@@ -208,6 +208,9 @@ func TestBindWorkerProgressPayload(t *testing.T) {
 	if strings.Contains(raw, key) {
 		t.Errorf("payload carries the credential: %s", raw)
 	}
+	if strings.Contains(raw, "worker_id") {
+		t.Errorf("a single worker's payload names a fleet worker: %s", raw)
+	}
 	var p workerTurnPayload
 	if err := json.Unmarshal(rec.events[0].Payload, &p); err != nil {
 		t.Fatalf("payload %s: %v", raw, err)
@@ -263,6 +266,26 @@ func TestBindWorkerProgressPayloadRecall(t *testing.T) {
 	}
 	if p != want {
 		t.Errorf("payload = %+v, want %+v", p, want)
+	}
+}
+
+// TestBindWorkerProgressPayloadNamesFleetWorker: a fleet worker's report
+// carries its worker id in the payload and leads the text with it.
+func TestBindWorkerProgressPayloadNamesFleetWorker(t *testing.T) {
+	rec := &emitRecorder{}
+	bindWorkerProgress(true, rec)(context.Background(), fleet.Progress{
+		Turn: 1, MaxTurns: 8, Action: "search", Detail: "heat pumps",
+		InputTokens: 10, OutputTokens: 5, WorkerID: "worker-2",
+	})
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %+v, want one delta", rec.events)
+	}
+	var p workerTurnPayload
+	if err := json.Unmarshal(rec.events[0].Payload, &p); err != nil {
+		t.Fatalf("payload %s: %v", rec.events[0].Payload, err)
+	}
+	if p.WorkerID != "worker-2" || p.Text != "worker-2 turn 1/8: search heat pumps (15 tokens so far)" {
+		t.Errorf("payload = %+v, want worker-2 named in worker_id and text", p)
 	}
 }
 

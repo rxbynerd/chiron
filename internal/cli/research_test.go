@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -371,26 +370,6 @@ func TestResearchRequiresActionExitCode(t *testing.T) {
 func TestResearchRequiresQuery(t *testing.T) {
 	if _, _, err := execute(t, "research"); err == nil {
 		t.Error("research without a query must fail before any seam is constructed")
-	}
-}
-
-// TestFleetAgentNotImplemented: the fleet orchestrator passes config
-// validation but has no researcher, so the run fails with a clear error at
-// the seam-selection point, before any secret is resolved or request made.
-// It is a usage error, not a research outcome.
-func TestFleetAgentNotImplemented(t *testing.T) {
-	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "--fleet-memory", "inmemory", "-o", "none")
-	if err == nil {
-		t.Fatal("--agent fleet must fail until the researcher exists")
-	}
-	if !errors.Is(err, fleet.ErrNotImplemented) {
-		t.Errorf("err = %v, want fleet.ErrNotImplemented", err)
-	}
-	if !strings.Contains(err.Error(), "--agent worker") {
-		t.Errorf("err = %v, want a pointer to the working agent", err)
-	}
-	if _, ok := errors.AsType[*ExitError](err); ok {
-		t.Errorf("an unimplemented agent is a usage error, not a research outcome: %v", err)
 	}
 }
 
