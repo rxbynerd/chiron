@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -297,5 +298,110 @@ func TestProgressDetailBounded(t *testing.T) {
 	got = progressDetail(action{Kind: actionSearch, Query: straddle})
 	if strings.Contains(got, highEntropyKey[:9]) {
 		t.Errorf("detail %q carries a fragment of the credential", got)
+	}
+}
+
+// waitFor polls cond until it holds, failing the test after a generous bound.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// newProgressWorker builds a Worker whose search returns one sky result and
+// which reports progress to log under the given deadline.
+func newProgressWorker(t *testing.T, modelSrv *modeltest.FakeServer, log *progressLog, deadline time.Duration) *Worker {
+	t.Helper()
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
+	t.Cleanup(searchSrv.Close)
+	w, err := NewWorker(WorkerDeps{
+		Model:                   newModelClient(t, modelSrv),
+		Search:                  newSearchClient(t, searchSrv),
+		Fetch:                   newFetchClient(t),
+		Caps:                    caps(),
+		Progress:                log.hook,
+		progressTimeoutOverride: deadline,
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+	return w
+}
+
+// TestWorkerProgressWaitsForAwait: the Worker holds a run's progress
+// deliveries until Await is entered for it, so none can precede the run
+// core's id event; the held loop takes no further turn meanwhile, and once
+// Await is entered every report arrives in turn order.
+func TestWorkerProgressWaitsForAwait(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`},
+		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
+	)
+	defer modelSrv.Close()
+	var log progressLog
+	w := newProgressWorker(t, modelSrv, &log, 30*time.Second)
+
+	ctx := context.Background()
+	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the first model turn", func() bool { return modelSrv.CallCount() >= 1 })
+	time.Sleep(50 * time.Millisecond)
+	if got := log.snapshot(); len(got) != 0 {
+		t.Fatalf("progress before Await = %+v, want none", got)
+	}
+	if n := modelSrv.CallCount(); n != 1 {
+		t.Fatalf("model calls before Await = %d, want 1: the loop must be held at turn 1's report", n)
+	}
+
+	if err := w.Await(ctx, id); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	got := log.snapshot()
+	if len(got) != 2 || got[0].Turn != 1 || got[0].Action != "search" || got[1].Turn != 2 || got[1].Action != "final" {
+		t.Errorf("progress after Await = %+v, want turn 1 search then turn 2 final", got)
+	}
+	in, err := w.Result(ctx, id)
+	if err != nil || in.Status != types.StatusCompleted {
+		t.Errorf("Result = %+v, %v, want completed", in, err)
+	}
+}
+
+// TestWorkerProgressDroppedWithoutAwait: a delivery whose gate stays shut past
+// the progress deadline is dropped rather than delivered late, and the run
+// completes unaffected.
+func TestWorkerProgressDroppedWithoutAwait(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`},
+		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
+	)
+	defer modelSrv.Close()
+	var log progressLog
+	w := newProgressWorker(t, modelSrv, &log, 20*time.Millisecond)
+
+	ctx := context.Background()
+	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, "the loop to finish", func() bool {
+		in, err := w.Result(ctx, id)
+		return err == nil && in.Status != types.StatusInProgress
+	})
+	if err := w.Await(ctx, id); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if got := log.snapshot(); len(got) != 0 {
+		t.Errorf("progress = %+v, want both reports dropped at the deadline", got)
+	}
+	in, err := w.Result(ctx, id)
+	if err != nil || in.Status != types.StatusCompleted {
+		t.Errorf("Result = %+v, %v, want completed", in, err)
 	}
 }
