@@ -229,6 +229,33 @@ func TestCiteFallsBackToEveryWorkerCitation(t *testing.T) {
 	}
 }
 
+// TestCiteKeepsEveryWorkerCitationWhenTheRunEnds: once the run's context has
+// ended, the citation call is not paid for and the sources are every worker
+// citation, Incomplete, with the run's end named.
+func TestCiteKeepsEveryWorkerCitationWhenTheRunEnds(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer(citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t)))
+	defer modelSrv.Close()
+	var out bytes.Buffer
+	l := citeLead(t, modelSrv, &out)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := l.cite(ctx, "Body.", citeFindings())
+	if n := modelSrv.CallCount(); n > 1 {
+		t.Errorf("model calls = %d, want at most 1", n)
+	}
+	if want := workerCitations(citeFindings()); !reflect.DeepEqual(res.Citations, want) {
+		t.Errorf("citations = %+v, want every worker citation %+v", res.Citations, want)
+	}
+	if res.Status != types.StatusIncomplete || !strings.Contains(res.Detail, "the run ended during the citation call") {
+		t.Errorf("status %s, detail %q; want incomplete with the run's end named", res.Status, res.Detail)
+	}
+	span := onlySpan(t, out.String(), trace.SpanCite)
+	if span.Attrs["status"] != "incomplete" || span.Error == "" {
+		t.Errorf("span status %v, error %q; want an incomplete span with an error", span.Attrs["status"], span.Error)
+	}
+}
+
 // TestCiteWithoutWorkerCitationsMakesNoCall: with no worker citation there
 // is nothing to attribute, so there is no call and no span.
 func TestCiteWithoutWorkerCitationsMakesNoCall(t *testing.T) {
