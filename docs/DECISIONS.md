@@ -1642,7 +1642,9 @@ loses nothing, because the range is enforced in Go regardless. The call
 carries a completion cap of 16,384 tokens by default, which leaves room
 for a reasoning model's reasoning tokens. The prompt restates the fields,
 the range, the per-field bounds and what a worker can do (search, fetch
-and, when configured, recall), and asks for briefs that do not overlap.
+and, when configured, recall), and asks for briefs that do not overlap. A
+query over 32 KiB (`maxLeadQueryBytes`) is refused before this call runs,
+so an oversized query is never billed.
 
 **A brief cannot add capabilities.** Neither the schema nor `Brief` has a
 field that names tools or actions, and the strict decode rejects unknown
@@ -1657,9 +1659,11 @@ decoded with unknown fields and trailing content rejected. A reply cut off
 at the cap (`finish_reason: "length"`), an empty reply, invalid JSON, a
 count outside 3 to 5, a blank field, an unknown field or a target the
 router cannot dispatch is `ErrInvalidPlan`. An unroutable target also
-matches `ErrUnroutableTarget`. A refused reply still returns its usage,
-because it was billed. Briefs take stable ids by position (`brief-1` to
-`brief-5`) for the delegate spans and the pool.
+matches `ErrUnroutableTarget`; its message, like the JSON-decode failure's,
+is scrubbed, defanged and bounded, because both can carry text from the
+model reply. A refused reply still returns its usage, because it was
+billed. Briefs take stable ids by position (`brief-1` to `brief-5`) for the
+delegate spans and the pool.
 
 **Truncation, not refusal, for verbosity.** Each field is trimmed,
 defanged, and then cut to its byte bound at a rune boundary with the
@@ -1685,9 +1689,11 @@ text. The lead now writes `Brief` values from a model reply.
 `buildSystemPrompt` now defangs every field it renders, and the lead also
 defangs each field when it parses the reply, so the persisted plan
 carries no `<<` either. `defang` is idempotent and touches only `<<`, so
-no worker golden changed. The user's query reaches the lead defanged
-between `<<<BEGIN RESEARCH QUESTION>>>` and `<<<END RESEARCH QUESTION>>>`
-markers, which it therefore cannot forge.
+no worker golden changed. `decomposeInSpan` trims and defangs the query
+once, into a single sanitized value it sends both to the model, between
+`<<<BEGIN RESEARCH QUESTION>>>` and `<<<END RESEARCH QUESTION>>>` markers
+it therefore cannot forge, and to `persistPlan`, so the persisted `query`
+carries no `<<` either.
 
 **The router is a table with one live row.** `router` maps a `Target` to
 a dispatch with `RunWorker`'s signature, `(ctx, WorkerDeps, Brief) ->
@@ -1709,9 +1715,12 @@ name `fleet-plan.json` and media type `application/json`. The JSON holds
 the query and the planned briefs, so the artifact describes itself: a
 reader recovering a run from the store needs no other context. Identity
 lives in the body rather than the meta, because `InMemory` coalesces
-identical content and keeps the first write's meta. A `Put`
-failure, such as a closed session or an artifact over the bound, fails
-`decompose` after its one call and before any worker runs. The step runs
-under one `decompose` span carrying `brief_count`, the call's
+identical content and keeps the first write's meta. A `Put` failure, such
+as a closed session or an artifact over the bound, fails `decompose` after
+its one call and before any worker runs, with a scrubbed and bounded
+message; `ContextStore` is a seam a remote implementation could back with
+a large echoed body, so the failure keeps the store's error reachable via
+`errors.Is`/`errors.As` while capping what the message repeats. The step
+runs under one `decompose` span carrying `brief_count`, the call's
 `input_tokens` and `output_tokens`, `truncated_fields` and `status`. A
-failure ends the span with a scrubbed error.
+failure ends the span with a scrubbed, bounded error.

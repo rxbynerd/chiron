@@ -23,6 +23,10 @@ import (
 // reasoning counts against the cap.
 const defaultDecomposeMaxTokens = 16384
 
+// maxLeadQueryBytes bounds the research question before the paid decompose
+// call, so an oversized query is refused rather than billed in full.
+const maxLeadQueryBytes = 32 << 10
+
 // The persisted plan's artifact meta.
 const (
 	planArtifactName = "fleet-plan.json"
@@ -133,7 +137,7 @@ func (l *lead) decompose(ctx context.Context, query string) (leadPlan, types.Usa
 	span.SetAttr("output_tokens", usage.OutputTokens)
 	status, spanErr := types.StatusCompleted, error(nil)
 	if err != nil {
-		status, spanErr = types.StatusFailed, errors.New(secret.Scrub(err.Error()))
+		status, spanErr = types.StatusFailed, errors.New(boundDetail(secret.Scrub(err.Error())))
 	}
 	span.SetAttr("status", string(status))
 	span.End(spanErr)
@@ -141,14 +145,18 @@ func (l *lead) decompose(ctx context.Context, query string) (leadPlan, types.Usa
 }
 
 func (l *lead) decomposeInSpan(ctx context.Context, query string) (leadPlan, types.Usage, error) {
-	if strings.TrimSpace(query) == "" {
+	sanitized := defang(strings.TrimSpace(query))
+	if sanitized == "" {
 		return leadPlan{}, types.Usage{}, errors.New("fleet: the lead's query must not be empty")
+	}
+	if len(sanitized) > maxLeadQueryBytes {
+		return leadPlan{}, types.Usage{}, fmt.Errorf("fleet: the query is %d bytes, over the %d-byte lead limit", len(sanitized), maxLeadQueryBytes)
 	}
 
 	// One attempt only: the model client never retries a POST and the lead
 	// adds no retry either.
 	resp, err := l.deps.Model.Generate(ctx, model.Request{
-		Messages:   leadTranscript(query),
+		Messages:   leadTranscript(sanitized),
 		MaxTokens:  l.deps.MaxTokens,
 		JSONSchema: decomposeSchema,
 		SchemaName: decomposeSchemaName,
@@ -174,12 +182,27 @@ func (l *lead) decomposeInSpan(ctx context.Context, query string) (leadPlan, typ
 		}
 	}
 
-	ref, err := l.persistPlan(ctx, query, briefs)
+	ref, err := l.persistPlan(ctx, sanitized, briefs)
 	if err != nil {
-		return leadPlan{}, usage, fmt.Errorf("fleet: persisting the lead's plan: %w", err)
+		return leadPlan{}, usage, &persistPlanError{detail: boundDetail(secret.Scrub(err.Error())), err: err}
 	}
 	return leadPlan{Briefs: briefs, Ref: ref}, usage, nil
 }
+
+// persistPlanError reports a plan-persist failure with a bounded, scrubbed
+// message while keeping the store's error reachable via errors.Is/errors.As:
+// ContextStore is a seam a remote implementation could back with a large
+// echoed body.
+type persistPlanError struct {
+	detail string
+	err    error
+}
+
+func (e *persistPlanError) Error() string {
+	return "fleet: persisting the lead's plan: " + e.detail
+}
+
+func (e *persistPlanError) Unwrap() error { return e.err }
 
 // persistPlan writes the plan to the run's session and returns its
 // reference.
@@ -221,7 +244,7 @@ func parseDecomposition(raw string, routes router) ([]plannedBrief, error) {
 	dec.DisallowUnknownFields()
 	var d decomposition
 	if err := dec.Decode(&d); err != nil {
-		return nil, fmt.Errorf("%w: the reply does not match the decomposition schema: %s", ErrInvalidPlan, boundDetail(secret.Scrub(err.Error())))
+		return nil, fmt.Errorf("%w: the reply does not match the decomposition schema: %s", ErrInvalidPlan, boundDetail(defang(secret.Scrub(err.Error()))))
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%w: the reply carries content after the JSON object", ErrInvalidPlan)
