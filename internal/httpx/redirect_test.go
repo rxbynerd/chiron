@@ -30,6 +30,8 @@ func TestRefuseUnsafeRedirects(t *testing.T) {
 		{"same-host https path change followed", []string{"https://api.example.com/v1"}, "https://api.example.com/v2", ""},
 		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/v1"}, "http://127.0.0.1:8080/v2", ""},
 		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/v1"}, "https://127.0.0.1:8080/v1", ""},
+		{"implicit https port to explicit default port followed", []string{"https://api.example.com/v1"}, "https://api.example.com:443/v1", ""},
+		{"explicit default port to implicit https port followed", []string{"https://api.example.com:443/v1"}, "https://api.example.com/v2", ""},
 		{"second redirect followed", []string{"https://api.example.com/a", "https://api.example.com/b"}, "https://api.example.com/c", ""},
 		{"cross-host refused", []string{"https://api.example.com/v1"}, "https://evil.example/v1", "cross-origin"},
 		{"subdomain refused", []string{"https://example.com/v1"}, "https://api.example.com/v1", "cross-origin"},

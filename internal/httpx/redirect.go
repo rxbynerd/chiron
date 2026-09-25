@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // maxRedirectChain caps the requests in a followed redirect chain, the
@@ -16,7 +18,7 @@ const maxRedirectChain = 3
 // net/http forwards credential headers to redirect targets (CWE-601, CWE-319).
 func RefuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 	first := via[0].URL
-	if req.URL.Host != first.Host {
+	if !sameOrigin(req.URL, first) {
 		return fmt.Errorf("redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
 	}
 	if first.Scheme == "https" && req.URL.Scheme != "https" {
@@ -26,6 +28,34 @@ func RefuseUnsafeRedirects(req *http.Request, via []*http.Request) error {
 		return errors.New("too many redirects")
 	}
 	return nil
+}
+
+// sameOrigin reports whether a and b name the same host and effective port,
+// comparing hostnames case-insensitively. A URL without an explicit port
+// defaults to original's scheme, not its own, so a same-host scheme
+// downgrade still reaches the downgrade check below rather than being
+// misread here as a port change.
+func sameOrigin(a, b *url.URL) bool {
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return effectivePort(a, a.Scheme) == effectivePort(b, a.Scheme)
+}
+
+// effectivePort returns u's port, or defaultScheme's default port when u
+// carries none.
+func effectivePort(u *url.URL, defaultScheme string) string {
+	if p := u.Port(); p != "" {
+		return p
+	}
+	switch defaultScheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
 }
 
 // RefuseAllRedirects is a CheckRedirect policy that follows no redirect, for
