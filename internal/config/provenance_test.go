@@ -84,30 +84,30 @@ func TestFleetEndpointsMatchFlagsAndKeys(t *testing.T) {
 	if len(endpoints) != 3 {
 		t.Fatalf("FleetEndpoints returned %d entries, want model, search and knowledge", len(endpoints))
 	}
-	for i, e := range endpoints {
-		t.Run(e.Flag, func(t *testing.T) {
+	for i, tt := range endpoints {
+		t.Run(tt.Flag, func(t *testing.T) {
 			cfg := Default()
 			fs := newFlagSet(t)
-			if err := fs.Parse([]string{"--" + e.Flag, "https://flag.example"}); err != nil {
-				t.Fatalf("parse --%s: %v", e.Flag, err)
+			if err := fs.Parse([]string{"--" + tt.Flag, "https://flag.example"}); err != nil {
+				t.Fatalf("parse --%s: %v", tt.Flag, err)
 			}
 			if err := ApplyFlags(&cfg, fs); err != nil {
 				t.Fatalf("ApplyFlags: %v", err)
 			}
 			if got := *FleetEndpoints(&cfg.Fleet)[i].Value; got != "https://flag.example" {
-				t.Errorf("--%s wrote %q to the entry's Value", e.Flag, got)
+				t.Errorf("--%s wrote %q to the entry's Value", tt.Flag, got)
 			}
 
 			var buf bytes.Buffer
 			if err := cfg.EncodeJSON(&buf); err != nil {
 				t.Fatalf("EncodeJSON: %v", err)
 			}
-			key := `"` + strings.TrimPrefix(e.Field, "fleet.") + `": "https://flag.example"`
+			key := `"` + strings.TrimPrefix(tt.Field, "fleet.") + `": "https://flag.example"`
 			if !strings.Contains(buf.String(), key) {
 				t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
 			}
-			if !strings.HasPrefix(e.Env, "CHIRON_FLEET_") {
-				t.Errorf("Env = %q, want the CHIRON_FLEET_ namespace", e.Env)
+			if !strings.HasPrefix(tt.Env, "CHIRON_FLEET_") {
+				t.Errorf("Env = %q, want the CHIRON_FLEET_ namespace", tt.Env)
 			}
 		})
 	}

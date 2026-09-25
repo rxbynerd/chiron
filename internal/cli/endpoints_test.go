@@ -61,6 +61,34 @@ func clearEndpointEnv(t *testing.T) {
 	}
 }
 
+// The ways a command can receive its base config.
+const (
+	baseFromFile       = "config file"
+	baseFromConfigDash = "config dash"
+	baseFromPipedStdin = "piped stdin"
+)
+
+// supplyBase returns the stdin and arguments that deliver base to a command
+// the way source names.
+func supplyBase(t *testing.T, source, base string) (io.Reader, []string) {
+	t.Helper()
+	switch source {
+	case baseFromFile:
+		path := filepath.Join(t.TempDir(), "base.yaml")
+		if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return strings.NewReader(""), []string{"--config", path}
+	case baseFromConfigDash:
+		return strings.NewReader(base), []string{"--config", "-"}
+	case baseFromPipedStdin:
+		return pipedStdin(t, base), nil
+	default:
+		t.Fatalf("unknown base source %q", source)
+		return nil, nil
+	}
+}
+
 // TestBaseConfigEndpointRefusedBeforeAnySecretResolves: a base naming a fleet
 // endpoint and its key reference is refused however it arrives, even with the
 // same endpoint on a flag, before the resolver runs or anything is dialled.
@@ -74,7 +102,7 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 	defer kbSrv.Close()
 	clearEndpointEnv(t)
 
-	endpoints := []struct {
+	for _, tt := range []struct {
 		name  string
 		base  string
 		field string
@@ -86,41 +114,21 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 			"fleet.search_endpoint", config.EnvFleetSearchEndpoint},
 		{"knowledge", "agent: worker\nfleet:\n  knowledge_provider: billet\n  knowledge_endpoint: " + kbSrv.URL() + "\n  knowledge_key_ref: secret://KB_KEY\n",
 			"fleet.knowledge_endpoint", config.EnvFleetKnowledgeEndpoint},
-	}
-	sources := []struct {
-		name  string
-		stdin func(t *testing.T, base string) io.Reader
-		args  func(t *testing.T, base string) []string
-	}{
-		{"config file",
-			func(*testing.T, string) io.Reader { return strings.NewReader("") },
-			func(t *testing.T, base string) []string {
-				path := filepath.Join(t.TempDir(), "base.yaml")
-				if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				return []string{"--config", path}
-			}},
-		{"config dash", func(_ *testing.T, base string) io.Reader { return strings.NewReader(base) },
-			func(*testing.T, string) []string { return []string{"--config", "-"} }},
-		{"piped stdin", func(t *testing.T, base string) io.Reader { return pipedStdin(t, base) },
-			func(*testing.T, string) []string { return nil }},
-	}
-
-	for _, ep := range endpoints {
-		for _, src := range sources {
-			t.Run(ep.name+"/"+src.name, func(t *testing.T) {
+	} {
+		for _, source := range []string{baseFromFile, baseFromConfigDash, baseFromPipedStdin} {
+			t.Run(tt.name+"/"+source, func(t *testing.T) {
+				stdin, baseArgs := supplyBase(t, source, tt.base)
 				resolver := &countingResolver{}
 				args := append(workerArgs(modelSrv, searchSrv, "-o", "none",
 					"--fleet-knowledge-provider", "billet",
 					"--fleet-knowledge-endpoint", kbSrv.URL(),
-				), src.args(t, ep.base)...)
+				), baseArgs...)
 				var stderr bytes.Buffer
-				_, err := executeWith(t, resolver, src.stdin(t, ep.base), &stderr, args...)
+				_, err := executeWith(t, resolver, stdin, &stderr, args...)
 				if err == nil {
 					t.Fatal("a base config naming an endpoint was accepted")
 				}
-				for _, want := range []string{ep.field + ":", "credentials are sent", ep.env} {
+				for _, want := range []string{tt.field + ":", "credentials are sent", tt.env} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q lacks %q", err, want)
 					}
@@ -418,13 +426,13 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 // fleet endpoint, since its output is the next stage's base config; the
 // error points at the final-stage flag and the environment variable.
 func TestResearchConfigRefusesEndpointFlags(t *testing.T) {
-	for _, e := range config.FleetEndpoints(&config.FleetConfig{}) {
-		t.Run(e.Flag, func(t *testing.T) {
-			stdout, _, err := execute(t, "research-config", "--agent", "worker", "--"+e.Flag, "https://gateway.example/v1")
+	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
+		t.Run(tt.Flag, func(t *testing.T) {
+			stdout, _, err := execute(t, "research-config", "--agent", "worker", "--"+tt.Flag, "https://gateway.example/v1")
 			if err == nil {
 				t.Fatalf("research-config emitted an endpoint:\n%s", stdout)
 			}
-			for _, want := range []string{"--" + e.Flag, e.Env, "final chiron research stage"} {
+			for _, want := range []string{"--" + tt.Flag, tt.Env, "final chiron research stage"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q lacks %q", err, want)
 				}
