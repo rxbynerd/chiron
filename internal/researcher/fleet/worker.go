@@ -181,7 +181,9 @@ type WorkerDeps struct {
 	// Progress, when non-nil, receives one Progress per turn whose action
 	// parsed. Delivery is best effort within progressTimeout: a panic is
 	// recovered, a hook still running at the deadline is abandoned, and
-	// nothing the hook does affects the Finding.
+	// nothing the hook does affects the Finding. The fleet worker pool calls
+	// it concurrently from every worker's own goroutine, so a hook must be
+	// safe for concurrent use.
 	Progress func(ctx context.Context, p Progress)
 
 	// progressTimeoutOverride replaces progressTimeout when positive, so
