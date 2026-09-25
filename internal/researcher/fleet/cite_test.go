@@ -229,6 +229,22 @@ func TestCiteFallsBackToEveryWorkerCitation(t *testing.T) {
 	}
 }
 
+// TestCiteFallbackDetailIsBounded: a fallback reason far over the bound is
+// cut so the whole detail, the fallback note included, fits maxDetailBytes
+// and still ends in the note.
+func TestCiteFallbackDetailIsBounded(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer(longErrorReply())
+	defer modelSrv.Close()
+	var out bytes.Buffer
+	l := citeLead(t, modelSrv, &out)
+
+	res := l.cite(context.Background(), "Body.", citeFindings())
+	if len(res.Detail) > maxDetailBytes || !strings.Contains(res.Detail, truncatedMarker) ||
+		!strings.HasSuffix(res.Detail, "; the sources are every worker citation") {
+		t.Errorf("detail is %d bytes, want the reason cut to fit %d with the note kept: %q", len(res.Detail), maxDetailBytes, res.Detail)
+	}
+}
+
 // TestCiteKeepsEveryWorkerCitationWhenTheRunEnds: once the run's context has
 // ended, the citation call is not paid for and the sources are every worker
 // citation, Incomplete, with the run's end named.

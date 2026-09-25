@@ -138,7 +138,7 @@ func (l *lead) citeInSpan(ctx context.Context, body string, findings []collected
 	fallback := func(reason string) citeResult {
 		res.Citations = candidates
 		res.Status = types.StatusIncomplete
-		res.Detail = boundDetail(secret.Scrub(reason)) + "; the sources are every worker citation"
+		res.Detail = fallbackDetail(reason, "; the sources are every worker citation")
 		return res
 	}
 

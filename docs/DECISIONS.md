@@ -1953,8 +1953,11 @@ Failed when no worker produced a finding with text. Everything between is
 Incomplete: a dropped, not-started, failed or stopped worker, or a degraded
 lead pass. The detail names each degraded pass, then each brief that
 yielded no finding (`<id> produced no finding: <reason>`) or only a partial
-one (`<id> is partial: the worker ended <status>: <detail>`). The joined
-detail is scrubbed and bounded like every other status detail.
+one (`<id> is partial: the worker ended <status>: <detail>`). A degraded
+pass's own detail, as its span records it, is its scrubbed reason followed
+by a note of what it fell back to. The reason is cut so the whole fits the
+2 KiB detail bound with the note kept whole. The joined detail is scrubbed
+and bounded like every other status detail.
 
 **One Usage per run, recorded once.** `runUsage` gives the only spend the
 fleet reports. It is the workers' summed usage, which already carries their

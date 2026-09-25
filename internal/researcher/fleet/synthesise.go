@@ -115,7 +115,7 @@ func (l *lead) synthesiseInSpan(ctx context.Context, query string, set findingSe
 	fallback := func(reason string) synthesisResult {
 		res.Body = stitchFindings(res.Set.Findings)
 		res.Status = types.StatusFailed
-		res.Detail = boundDetail(secret.Scrub(reason)) + "; the report is the worker findings, stitched unedited"
+		res.Detail = fallbackDetail(reason, "; the report is the worker findings, stitched unedited")
 		return res
 	}
 
@@ -231,6 +231,13 @@ func (l *lead) readFindingSafely(ctx context.Context, ref memory.Reference) (sf 
 		}
 	}()
 	return readFinding(ctx, l.deps.Store, ref)
+}
+
+// fallbackDetail is a degraded pass's detail: reason, scrubbed, then note,
+// which says what the pass fell back to. The whole is bounded to
+// maxDetailBytes by cutting the reason, so the note always survives.
+func fallbackDetail(reason, note string) string {
+	return boundBytes(secret.Scrub(reason), maxDetailBytes-len(note)) + note
 }
 
 // gapReason makes a reason safe for a lead prompt and the run's detail: one
