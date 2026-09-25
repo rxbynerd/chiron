@@ -435,7 +435,7 @@ func adversarialPages() []struct {
 			},
 		},
 		{
-			// Past both caps with the overflow names saturated, the inner
+			// Past the depth cap with the overflow names saturated, the inner
 			// <section> is uncounted; its close must not pop the pushed one.
 			name: "close tag of an uncounted overflow name",
 			src:  "<section>" + strings.Repeat("<div>", maxPageDepth) + distinct.String() + "<section>inner</section>tail",

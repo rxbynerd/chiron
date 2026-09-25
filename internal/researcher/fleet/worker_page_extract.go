@@ -547,10 +547,11 @@ func (p *pageParser) credit(idx int32) {
 // contentRoots chooses the elements whose subtrees are the page's main
 // content: the main landmark, else the largest article, else the
 // best-scoring block and its qualifying siblings, else the body (or the
-// whole document for a fragment). A main landmark is chosen inside a wrapper
-// dropped by its attributes but never inside a furniture tag; an article is
-// never chosen inside furniture. A landmark holding under a quarter of the
-// page's content text falls through to the next rule.
+// whole document for a fragment). Neither landmark is chosen when it is
+// dropped itself or sits inside a furniture tag; a main landmark may still
+// sit inside a wrapper dropped by its attributes, an article may not. A
+// landmark holding under a quarter of the page's content text falls through
+// to the next rule.
 func (d *pageDoc) contentRoots() []int32 {
 	total := d.nonLink(0)
 	plausible := func(e int32) bool {
