@@ -192,9 +192,12 @@ the deep-research template, and `{{.Query}}` is available but optional,
 because the query already has its own section of the prompt. The file is
 limited to 8 KiB because the block is re-sent on every turn. It is
 checked at startup: a file that is too large, not UTF-8, unparsable,
-names an unknown field or renders blank fails before any request. Any
-`<<<` in the rendered block is spaced out, as in retrieved text, so it
-cannot mimic the tool-result fence.
+names an unknown field or renders blank fails before any request. The
+same 8 KiB bound is re-checked against the real query when a run starts,
+so a template that only exceeds it once the query is substituted still
+fails before any request, not partway through the run. Any `<<<` in the
+rendered block is spaced out, as in retrieved text, so it cannot mimic the
+tool-result fence.
 Each turn emits a `delta` event (`type: worker_turn`, with the turn, action,
 a scrubbed target and tokens so far) on stderr between `interaction_created`
 and `run_completed`, unless `--quiet`.

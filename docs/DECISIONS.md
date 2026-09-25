@@ -1452,10 +1452,12 @@ It then renders the template once against a short sample query. An
 unknown field, a blank render, or a render longer than the same bound
 (`printf` padding, for example) therefore fails at the composition root,
 before any interaction id or paid call. The sample is shorter than
-`{{.Query}}`, so the render bound measures the template's own text. The
-real query is not bounded again at `Start`, because it already appears in
-full as the objective. `buildWorker` loads the template before resolving
-any secret. A failure is a setup error with the usage exit code.
+`{{.Query}}`, so the render bound measures the template's own text.
+`Render` re-checks the same bound against the real query at `Start`, so a
+template that only exceeds it once a long or repeated `{{.Query}}` is
+substituted fails there, as a pre-id, no-spend error, instead of shipping
+an oversized block on every turn. `buildWorker` loads the template before
+resolving any secret. A failure is a setup error with the usage exit code.
 
 **`WorkerDeps` carries it, not `Brief`.** The `Worker` adapter builds the
 `Brief` from the task inside `Start`. A template loaded at construction
