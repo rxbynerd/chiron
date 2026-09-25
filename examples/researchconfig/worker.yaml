@@ -2,22 +2,29 @@
 # Use as a base for a pipeline or with --config:
 #
 #   export MODEL_KEY=... SEARCH_KEY=...
+#   export CHIRON_FLEET_MODEL_ENDPOINT=https://api.openai.com/v1
+#   export CHIRON_FLEET_SEARCH_ENDPOINT=https://search.example.com/mcp
 #   chiron research --config examples/researchconfig/worker.yaml \
 #     --query "Competitive landscape of 10BASE-T1L PHY vendors"
 #
 # Keys mirror internal/config.ResearchConfig. The Gemini-only levers
 # (budget, plan, model, visualise, tools, mcp, file_search, inputs,
 # template) are rejected for this agent; spend is bounded by the fleet
-# block instead. Endpoints must be absolute https:// (http:// for
-# loopback only) because the keys travel to whatever they name.
+# block instead.
+#
+# The endpoints the keys are sent to never come from a config file: a
+# base config naming model_endpoint, search_endpoint or knowledge_endpoint
+# is refused. Supply each with its flag (--fleet-model-endpoint,
+# --fleet-search-endpoint, --fleet-knowledge-endpoint) or environment
+# variable (CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT,
+# CHIRON_FLEET_KNOWLEDGE_ENDPOINT); a set flag wins. Endpoints must be
+# absolute https:// (http:// for loopback only).
 agent: worker
 output: text
 timeout: 30m
 fleet:
-  model_endpoint: https://api.openai.com/v1
   model_name: gpt-5.5
   model_key_ref: secret://MODEL_KEY
-  search_endpoint: https://search.example.com/mcp
   search_key_ref: secret://SEARCH_KEY
   # search_tool and search_query_arg default to the reference backend's
   # search/query; set them only for a vendor search server that names its
@@ -34,10 +41,10 @@ fleet:
   price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5
   # Organisational knowledge (docs/KNOWLEDGE.md). Uncomment to let the
-  # worker recall from a knowledge store; the endpoint follows the same
-  # scheme rule, and its key (if any) travels to it.
+  # worker recall from a knowledge store, and supply its endpoint with
+  # --fleet-knowledge-endpoint or CHIRON_FLEET_KNOWLEDGE_ENDPOINT; its key
+  # (if any) travels to that endpoint.
   # knowledge_provider: billet        # or alexandria
-  # knowledge_endpoint: http://127.0.0.1:8140/
   # knowledge_key_ref: secret://KNOWLEDGE_KEY   # required for alexandria
   # knowledge_space: team-notes       # alexandria only: space slug
   # knowledge_limit: 5                # hits per recall, 1..20

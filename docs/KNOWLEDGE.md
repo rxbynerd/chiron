@@ -55,7 +55,8 @@ This document defines:
   search pair. This design adds the pair under the same mitigations already in
   place (absolute https, loopback-only http, no userinfo/query/fragment,
   `secret://` only, values never echoed) and notes the pair in #28 rather than
-  resolving #28 here.
+  resolving #28 here. Resolved by the 2026-09-25 DECISIONS entry "Fleet
+  endpoints come only from flags or the environment".
 
 ## 2. The seam: `internal/memory`
 

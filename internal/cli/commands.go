@@ -41,6 +41,14 @@ with the fleet-price flags, --fleet-worker-timeout), and the
 deep-research levers are rejected rather than ignored. fleet, the
 multi-worker orchestrator, is not implemented yet.
 
+The worker's endpoints come only from --fleet-model-endpoint,
+--fleet-search-endpoint and --fleet-knowledge-endpoint, or from
+CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
+CHIRON_FLEET_KNOWLEDGE_ENDPOINT when the flag is unset. A base config
+naming one is refused, because a shared config must not choose where
+credentials are sent. The endpoint hosts are emitted on stderr as one
+delta event before the first model call.
+
 Exit codes:
 
   0  the research completed and the report was emitted
