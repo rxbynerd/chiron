@@ -51,11 +51,9 @@ const validationNamespace memory.Namespace = "fleet-validation"
 
 // FleetDeps are the fleet researcher's collaborators and fan-out caps.
 type FleetDeps struct {
-	// Worker is shared by every worker and by the lead. Its Model, Tracer
-	// and Logger serve the lead as well; its Caps bound each worker and
-	// price the lead's calls; its ReportTemplate shapes the synthesis, never
-	// a worker's brief. Remember must be nil: a fleet never saves to the
-	// knowledge store.
+	// Worker is shared by the lead and every worker: its Caps bound each
+	// worker and price the lead's calls, its ReportTemplate shapes only the
+	// synthesis, and Remember must be nil.
 	Worker WorkerDeps
 	// Store holds each run's session: the plan and every finding pass
 	// through it by reference. A run opens its own session at Start and
@@ -80,22 +78,10 @@ func (d FleetDeps) unwindGrace() time.Duration {
 	return cancelUnwindGrace
 }
 
-// Fleet is the multi-worker binding of the Researcher seam. One run is a
-// lead that decomposes the query into briefs, a bounded pool that runs each
-// brief as an in-process worker and stores its finding in the run's session
-// by reference, then the lead's synthesis and citation passes over the
-// findings read back. The run's Interaction carries the one rolled-up Usage.
-//
-// Start mints an opaque local id, opens the run's session and launches the
-// lead in a goroutine, returning the id immediately so the run core can
-// emit it before awaiting. Await blocks on the run; if Await's context ends
-// before the lead has concluded, the run is cancelled and Await waits, up to
-// cancelUnwindGrace, for every worker and lead pass to return, so no paid
-// call outlives it. Result maps the concluded outcome. As with Worker, the id
-// is a local handle, not a durable resume token.
-//
-// Every worker's Progress deliveries are held until Await is first entered
-// for the run, as Worker holds its own.
+// Fleet is the multi-worker Researcher: a lead decomposes the query, a
+// bounded pool runs each brief as an in-process worker, and the lead
+// synthesises and cites the findings read back by reference. Its flt_ ids
+// are local handles, not resume tokens.
 type Fleet struct {
 	deps FleetDeps
 	// routes is the one routing table a run's lead validates its plan
@@ -106,11 +92,9 @@ type Fleet struct {
 	runs map[string]*fleetState
 }
 
-// fleetState is the per-run record keyed by interaction id. concluded is
-// closed once outcome and completed are stored, after the lead's last paid
-// call; done is closed once the session is closed as well. outcome and
-// completed are written only before concluded closes. cancel stops the run
-// early. awaiting is the progress gate, closed once by the first Await.
+// fleetState is one run's record. outcome and completed are written only
+// before concluded closes, after the lead's last paid call; done closes once
+// the session is closed too. awaiting is the progress gate.
 type fleetState struct {
 	query   string
 	started time.Time
@@ -182,16 +166,10 @@ func (f *Fleet) components(ns memory.Namespace) (*lead, *pool, error) {
 	return l, p, nil
 }
 
-// Start implements researcher.Researcher. It refuses an empty query, a
-// follow-up (the fleet has no stored interaction chain) and a report
-// template that fails to render for the query, then mints an opaque local
-// id, opens the run's session under it and launches the run in a goroutine,
-// returning the id immediately. Every refusal, a failed session open
-// included, happens before an id is returned or anything is spent.
-//
-// The run is detached from the Start context's cancellation (the run core
-// scopes that context to the start phase) and given its own cancel, which
-// Await triggers when its caller stops waiting.
+// Start implements researcher.Researcher. Every refusal, a failed session
+// open included, happens before an id is returned or anything is spent. The
+// run is detached from ctx, which the run core scopes to the start phase, and
+// has its own cancel for Await to trigger.
 func (f *Fleet) Start(ctx context.Context, task researcher.Task) (string, error) {
 	if strings.TrimSpace(task.Query) == "" {
 		return "", errors.New("fleet: the query must not be empty")
@@ -286,15 +264,10 @@ func (f *Fleet) closeSession(ctx context.Context, id string, sess memory.Session
 	}
 }
 
-// Await implements researcher.Researcher: block until the run for id
-// finishes, its session closed. Entering Await releases the run's held
-// progress deliveries. If ctx ends after the lead has concluded, Await
-// returns nil: the paid work is complete, and only the session close
-// remains. If ctx ends before then, Await cancels the run, waits up to
-// cancelUnwindGrace for it to unwind, and returns the context error; a run
-// that unwound within the grace has concluded, so Result then reports the
-// cancelled run's outcome and usage. An unknown id is a programming fault,
-// not a user condition.
+// Await implements researcher.Researcher and releases the run's held
+// progress. If ctx ends after the lead has concluded it returns nil; before
+// then it cancels the run, waits up to cancelUnwindGrace so no paid call
+// outlives it, and returns the context error.
 func (f *Fleet) Await(ctx context.Context, id string) error {
 	st, err := f.state(id)
 	if err != nil {

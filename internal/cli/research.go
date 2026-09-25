@@ -185,10 +185,8 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 }
 
 // buildFleet binds the fleet over the shared worker deps, so one model
-// client serves its lead and every worker. Each run's plan and findings pass
-// through an in-process session store (fleet.memory: inmemory, which config
-// validation requires for this agent); the fan-out caps are
-// fleet.max_workers and fleet.concurrency.
+// client serves its lead and every worker, with an in-process session store
+// and fleet.max_workers and fleet.concurrency as its fan-out caps.
 func buildFleet(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error) {
 	wd, sessions, err := buildWorkerDeps(ctx, cfg, resolver, tracer, stderr, progress)
 	if err != nil {
@@ -207,16 +205,11 @@ func buildFleet(ctx context.Context, cfg config.ResearchConfig, resolver secret.
 	return f, sessions, nil
 }
 
-// buildWorkerDeps builds the clients and caps every in-process agent's
-// workers share from the resolved config. It resolves the model, search and
-// knowledge key references here, at the composition root, and fails before
-// any request if a required endpoint or key is missing or unresolvable, so a
-// misconfigured agent never emits a resume handle for a run that cannot
-// proceed. A --template is loaded and validated here for the same reason.
-// WorkerTimeout bounds each worker's run and each model, search and
-// knowledge call; fetch has its own tighter per-call bound. The returned
-// closer ends the MCP sessions the search and knowledge clients hold; when
-// buildWorkerDeps fails, nothing is left open.
+// buildWorkerDeps builds the clients and caps every in-process agent shares.
+// It resolves every key reference and loads any --template before any
+// request, so a misconfigured agent never emits a resume handle. WorkerTimeout
+// bounds each worker and each model, search and knowledge call. The returned
+// closer ends the clients' MCP sessions; on failure nothing is left open.
 func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ fleet.WorkerDeps, _ io.Closer, err error) {
 	fc := cfg.Fleet
 	for _, required := range []struct {

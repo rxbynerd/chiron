@@ -115,12 +115,10 @@ func runState(t *testing.T, f *Fleet, id string) *fleetState {
 	return st
 }
 
-// TestFleetStartAwaitResult drives a whole fleet run through the Researcher
-// seam: Start returns a flt_ id with the run's session open under it, Await
-// blocks until the run has concluded and closed that session, and Result
-// maps the synthesised report, the citation pass's sources from both
-// workers and the one rolled-up Usage, the lead's calls priced at the
-// workers' rates.
+// TestFleetStartAwaitResult: a fleet run through the Researcher seam opens
+// and closes a session under its flt_ id, and Result carries the synthesised
+// report, sources from both workers and one Usage with the lead's calls
+// priced at the workers' rates.
 func TestFleetStartAwaitResult(t *testing.T) {
 	fm := syntheticFleetModel(t)
 	modelSrv := httptest.NewServer(fm)
@@ -287,10 +285,8 @@ func TestFleetRefusesBeforeStarting(t *testing.T) {
 }
 
 // TestFleetAwaitCancellationStopsEveryPaidCall: when Await's context ends
-// mid-run, the run is cancelled and Await returns only once it has unwound,
-// so no model request follows Await's return and the lead makes no
-// synthesis or citation call. The run has concluded by then, so Result
-// reports the cancelled run's outcome and the decomposition it paid for.
+// mid-run, Await returns only once the run has unwound, so no model request
+// follows it, and Result reports the failed run and the decomposition spend.
 func TestFleetAwaitCancellationStopsEveryPaidCall(t *testing.T) {
 	var inFlight atomic.Int32
 	release := make(chan struct{})
