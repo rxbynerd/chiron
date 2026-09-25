@@ -662,8 +662,13 @@ func citationTitle(s string) string {
 func (w *workerRun) accumulateModelUsage(u model.Usage) {
 	w.usage.InputTokens += u.InputTokens
 	w.usage.OutputTokens += u.OutputTokens
-	w.usage.EstimatedCostGBP += float64(u.InputTokens)*w.deps.Caps.InputGBPPerMTok/1e6 +
-		float64(u.OutputTokens)*w.deps.Caps.OutputGBPPerMTok/1e6
+	w.usage.EstimatedCostGBP += costGBP(u.InputTokens, u.OutputTokens, w.deps.Caps.InputGBPPerMTok, w.deps.Caps.OutputGBPPerMTok)
+}
+
+// costGBP estimates the spend of a model call's tokens at per-million-token
+// prices. The worker and the lead both price with it.
+func costGBP(inputTokens, outputTokens int, inputGBPPerMTok, outputGBPPerMTok float64) float64 {
+	return float64(inputTokens)*inputGBPPerMTok/1e6 + float64(outputTokens)*outputGBPPerMTok/1e6
 }
 
 // turnCompletionCap is the completion cap for one model turn: the fixed
