@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/memory"
@@ -201,6 +204,85 @@ func TestCollectFindingsGapsEveryUnusableBrief(t *testing.T) {
 		if strings.Contains(g.Reason, key) {
 			t.Errorf("gap %s reason carries the credential: %q", g.BriefID, g.Reason)
 		}
+	}
+}
+
+// slowReadStore blocks every Get of a slow reference until its context
+// ends, standing in for an unresponsive remote store, and records each
+// Get's deadline.
+type slowReadStore struct {
+	memory.ContextStore
+	slow map[memory.Reference]bool
+
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (s *slowReadStore) Get(ctx context.Context, ref memory.Reference) (io.ReadCloser, memory.ArtifactMeta, error) {
+	deadline, _ := ctx.Deadline()
+	s.mu.Lock()
+	s.deadlines = append(s.deadlines, deadline)
+	s.mu.Unlock()
+	if s.slow[ref] {
+		<-ctx.Done()
+		return nil, memory.ArtifactMeta{}, ctx.Err()
+	}
+	return s.ContextStore.Get(ctx, ref)
+}
+
+// TestSlowStoreHoldsSynthesisOnlyToTheReadDeadline: every read-back shares
+// one deadline, so a store that stalls on four of five findings holds the
+// run for one read bound, not four, no read starts once it has passed, and
+// synthesis still runs over the finding that did read back.
+func TestSlowStoreHoldsSynthesisOnlyToTheReadDeadline(t *testing.T) {
+	const bound = 250 * time.Millisecond
+	modelSrv := modeltest.NewFakeServer(synthesisReply("# Report"), citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t)))
+	defer modelSrv.Close()
+	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+	var findings []Finding
+	for n := 1; n <= 5; n++ {
+		findings = append(findings, completedFinding(n, citeURLA))
+	}
+	plan, pooled := storedRun(t, store, ns, findings...)
+	slow := &slowReadStore{ContextStore: store, slow: map[memory.Reference]bool{}}
+	for _, r := range pooled.Briefs[1:] {
+		slow.slow[r.Ref] = true
+	}
+	l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: slow, Namespace: ns, findingsReadTimeoutOverride: bound})
+
+	start := time.Now()
+	out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
+	end := time.Now()
+	elapsed := end.Sub(start)
+
+	// Four stalled reads under a per-read bound would take at least 4*bound.
+	if elapsed < bound || elapsed >= 3*bound {
+		t.Errorf("conclude took %v, want one read bound of %v and well under %v", elapsed, bound, 3*bound)
+	}
+	if n := modelSrv.CallCount(); n != 2 {
+		t.Errorf("model calls = %d, want synthesis and the citation pass", n)
+	}
+	if out.Status != types.StatusIncomplete || out.Body != "# Report" {
+		t.Errorf("outcome = %s %q, want the synthesised body, incomplete", out.Status, out.Body)
+	}
+	for _, want := range []string{
+		"brief-2 produced no finding: the finding could not be read back",
+		"brief-3 produced no finding: the read-back deadline passed before the finding was read",
+		"brief-5 produced no finding: the read-back deadline passed",
+	} {
+		if !strings.Contains(out.Detail, want) {
+			t.Errorf("detail = %q, want %q", out.Detail, want)
+		}
+	}
+
+	slow.mu.Lock()
+	defer slow.mu.Unlock()
+	if len(slow.deadlines) != 2 {
+		t.Fatalf("store reads = %d, want brief-1's and the one stalled read; none after the deadline", len(slow.deadlines))
+	}
+	first := slow.deadlines[0]
+	if first.Before(start.Add(bound)) || first.After(end) || !slow.deadlines[1].Equal(first) {
+		t.Errorf("read deadlines = %v, want one shared deadline %v after the reads began", slow.deadlines, bound)
 	}
 }
 

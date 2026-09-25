@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -69,6 +70,18 @@ type leadDeps struct {
 	// alike; zero leaves the lead's share of the estimate at 0.
 	InputGBPPerMTok  float64
 	OutputGBPPerMTok float64
+
+	// findingsReadTimeoutOverride replaces findingsReadTimeout when
+	// positive, so tests can shorten it.
+	findingsReadTimeoutOverride time.Duration
+}
+
+// findingsReadDeadline is the bound on reading every finding back.
+func (d leadDeps) findingsReadDeadline() time.Duration {
+	if d.findingsReadTimeoutOverride > 0 {
+		return d.findingsReadTimeoutOverride
+	}
+	return findingsReadTimeout
 }
 
 // lead is the fleet's orchestrator for one run.

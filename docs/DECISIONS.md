@@ -1866,10 +1866,15 @@ finding is used only when its reference lies in the run's own session, its
 stored worker and brief ids match the brief that produced it, it did not
 fail, and it has text. Every other planned brief becomes a gap with one
 reason: dropped, not started, not stored, unreadable, mismatched, failed or
-empty. The reason is scrubbed, defanged and bounded to 512 bytes. The read
-is detached from the run's cancellation under its own ten-second bound, as
-the pool's write is, because a cancelled run's findings are already paid
-for and the fallback body needs them.
+empty. The reason is scrubbed, defanged and bounded to 512 bytes. The reads
+are detached from the run's cancellation, as the pool's writes are, because
+a cancelled run's findings are already paid for and the fallback body needs
+them. They run one after another under a single ten-second deadline for all
+of them, not one per read, so a slow store holds synthesis for at most ten
+seconds however many briefs there are. No read starts once the deadline has
+passed; each brief left unread is a gap. The reads stay sequential rather
+than parallel because five reads from the in-process store take
+microseconds, and one deadline bounds a networked store just as well.
 
 **Each finding has a fixed budget in the prompt.** The synthesis user
 message carries the question between the question markers, then each
