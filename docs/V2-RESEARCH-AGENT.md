@@ -205,7 +205,9 @@ For each worker run:
 3. If the action is search, call the search MCP and feed structured results back
    into the model.
 4. If the action is fetch, call `web_fetch` for known URLs and feed bounded page
-   content back into the model.
+   content back into the model. An HTML page is first reduced to its main
+   content, with navigation, banners, sidebars and footers dropped, and the
+   bound applies to that text (DECISIONS 2026-09-25).
 5. Stop when the model emits a final finding, or when turn/token/cost/time caps
    stop the loop.
 6. Return a finding containing concise prose, cited URLs, usage, and status.

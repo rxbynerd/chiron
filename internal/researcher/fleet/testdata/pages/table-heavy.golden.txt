@@ -1,0 +1,15 @@
+Tide times for September 2026
+
+Times are given in British Summer Time for the harbour entrance. Heights are in metres above chart datum, and may vary with atmospheric pressure.
+
+Date High water Height Low water Height
+
+Thu 24 06:12 4.8 12:31 0.9
+
+Fri 25 06:55 4.6 13:14 1.1
+
+Sat 26 07:41 4.3 14:02 1.4
+
+Sun 27 08:30 4.0 14:55 1.7
+
+Predictions are provided for guidance only, and must not be used for navigation. Always consult the official Admiralty tables before putting to sea.
