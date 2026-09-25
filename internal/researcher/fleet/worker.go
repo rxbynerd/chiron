@@ -61,6 +61,9 @@ type Finding struct {
 	// Detail is a human-readable reason accompanying an Incomplete or Failed
 	// outcome, empty on success. It is scrubbed and bounded in length.
 	Detail string
+	// Turns is the number of model turns the loop started, counting a turn
+	// whose model call failed.
+	Turns int
 }
 
 // Progress is one best-effort report from a worker turn, made after the
@@ -496,6 +499,7 @@ func (w *workerRun) finalise(act action) Finding {
 		Citations: w.citations,
 		Usage:     w.usage,
 		Status:    types.StatusCompleted,
+		Turns:     w.turns,
 	}
 }
 
@@ -598,6 +602,7 @@ func (w *workerRun) incomplete(detail string) Finding {
 		Usage:     w.usage,
 		Status:    types.StatusIncomplete,
 		Detail:    boundDetail(detail),
+		Turns:     w.turns,
 	}
 }
 
@@ -609,6 +614,7 @@ func (w *workerRun) failed(detail string) Finding {
 		Usage:     w.usage,
 		Status:    types.StatusFailed,
 		Detail:    boundDetail(detail),
+		Turns:     w.turns,
 	}
 }
 
