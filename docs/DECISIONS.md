@@ -1133,6 +1133,7 @@ are rejected for `worker`/`fleet` so a caller never believes a cap applied
 when the loop ignores it. `fleet.memory: inmemory` is rejected until the
 store exists. Fleet endpoints must not carry userinfo, a query string or a
 fragment, and validation errors describe them by scheme and host only.
+Superseded for `template` by the 2026-09-25 entry "Worker report-format template": the worker honours it.
 
 **Per-worker spend lives on the span.** The worker records search count,
 tokens and estimated cost as attributes on its own span and emits no
@@ -1414,3 +1415,72 @@ stripping is tracked separately in #39.
 **`--quiet` suppresses them.** The hook is bound only when `cfg.Stream` is
 true, as `bindThoughtDisplay` is: `--quiet` turns the delta display surface
 off. Exit codes, the report and every existing event are unchanged.
+
+## 2026-09-25 — Worker report-format template
+
+Issues #19 and #37. `--template` shaped only the Gemini Deep Research
+prompt. The 2026-09-23 entry ("Spend levers are real or rejected")
+rejected it for `worker`/`fleet` because the worker prompt did not use it.
+The worker now honours it, and every other Gemini-only lever stays
+rejected. `text/template` is in the standard library, so there is no new
+dependency.
+
+**The template replaces the output-format block only.** The worker's
+system prompt already had a "Required output format:" slot, filled from
+`Brief.OutputFormat` with a built-in default. That slot
+(`outputFormatBlock`) is the only part a template can replace. The
+objective, the action contract, the source guidance, the boundaries and
+the recall wording stay Chiron's. A template can ask for sections, tables
+or tone, but it cannot redefine the actions, the fence protocol or the
+citation rules. The recall prompt edits are applied to the built-in prompt
+before the brief is substituted, so they never rewrite operator text.
+
+**Data contract.** Templates use the Gemini loader's `text/template`
+grammar, parsed with `missingkey=error`, and render against one field.
+`{{.Query}}` is the research question, the same name
+`internal/researcher/gemini/template.go` uses. Gemini rejects a template
+that drops the query, because the task would research its own
+boilerplate. Here `{{.Query}}` is optional, because the objective already
+has its own section of the prompt. The rendered block is trimmed.
+
+**Bounded and validated at load.** `fleet.LoadReportTemplate` reads at
+most `MaxReportTemplateBytes` (8 KiB) plus one byte. A larger file is
+rejected with an error naming the bound and is never truncated. The
+system prompt is re-sent on every turn, so the block's cost multiplies by
+the turn count. The loader also rejects invalid UTF-8 and a blank file.
+It then renders the template once against a short sample query. An
+unknown field, a blank render, or a render longer than the same bound
+(`printf` padding, for example) therefore fails at the composition root,
+before any interaction id or paid call. The sample is shorter than
+`{{.Query}}`, so the render bound measures the template's own text. The
+real query is not bounded again at `Start`, because it already appears in
+full as the objective. `buildWorker` loads the template before resolving
+any secret. A failure is a setup error with the usage exit code.
+
+**`WorkerDeps` carries it, not `Brief`.** The `Worker` adapter builds the
+`Brief` from the task inside `Start`. A template loaded at construction
+can therefore reach it only through `WorkerDeps`, which also leaves
+`RunWorker`'s signature unchanged. `Start` renders the template with the
+task's query before it allocates an id or registers a run. A render
+failure returns an error with nothing started and nothing spent.
+`RunWorker` ignores `WorkerDeps.ReportTemplate`. Direct callers, including
+a future fleet lead writing per-worker briefs, set `Brief.OutputFormat`
+themselves.
+
+**Operator text, still defanged.** Template text comes from the
+operator's own config, not from an untrusted page, so it is prompt text
+rather than fenced data. It still goes through the same `defang` as
+retrieved text, whatever the block's source. A template, or a query
+substituted into it, therefore cannot form a `<<<BEGIN/END TOOL RESULT>>>`
+fence and blur where untrusted data starts and ends.
+
+**`defang` spaces every `<<`.** `defang` made one non-overlapping
+`ReplaceAll("<<<", "< < <")` pass. A run of five `<` left a live `<<<`
+behind, and so did any run of length 3k+2 for k of at least one:
+`<<<<<END TOOL RESULT>>>` became `< < <<<END TOOL RESULT>>>`, so retrieved
+text could close the fence early. The fix is one left-to-right pass that
+writes a space after every `<` immediately followed by another `<`. No
+`<<` survives, and `defang` is idempotent. The output for exactly `<<<` is
+still `< < <`, so no golden changed. Every caller still uses this one
+function: search titles, snippets and URLs, fetched text, recall hits,
+tool-failure details and the output-format block.

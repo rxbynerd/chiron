@@ -180,9 +180,21 @@ destination, a binary page) are fed back to the model so it can choose
 another source; three consecutive failures end the run `failed`. The
 `wkr_` handle is not a resume token: `chiron get` and `chiron follow-up`
 refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
-`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
-`--template`) are rejected for the worker rather than silently ignored.
+`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`) are
+rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+
+`--template <path>` is honoured by the worker, but it replaces only the
+"Required output format" block of the worker's system prompt: it can ask
+for sections, tables or tone, while the actions, source rules and
+citation rules stay Chiron's. It uses the same `text/template` grammar as
+the deep-research template, and `{{.Query}}` is available but optional,
+because the query already has its own section of the prompt. The file is
+limited to 8 KiB because the block is re-sent on every turn. It is
+checked at startup: a file that is too large, not UTF-8, unparsable,
+names an unknown field or renders blank fails before any request. Any
+`<<<` in the rendered block is spaced out, as in retrieved text, so it
+cannot mimic the tool-result fence.
 Each turn emits a `delta` event (`type: worker_turn`, with the turn, action,
 a scrubbed target and tokens so far) on stderr between `interaction_created`
 and `run_completed`, unless `--quiet`.
