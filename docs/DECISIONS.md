@@ -1846,3 +1846,91 @@ unchanged. `Finding` likewise gains `Turns` at its end: the number of model
 turns the loop started, including one whose call failed. The delegate span
 and the pool's result can then carry the turn count without the worker's
 own span.
+
+## 2026-09-25 — Fleet synthesis, citation pass and spend rollup
+
+Issues #22 and #24. The pool leaves each finding in the run's session by
+reference, but nothing turned the findings into a report. The lead now closes
+a run with two passes over the pool's results (V2-RESEARCH-AGENT §6, lead
+flow steps 6 to 8). Synthesis (`internal/researcher/fleet/synthesise.go`)
+writes the report body, and the citation pass (`cite.go`) attributes it to
+the workers' sources. `conclude.go` composes the run's body, citations,
+status, detail and single `Usage` from both passes. None of it is wired to
+`--agent fleet` yet: `Fleet` still returns `ErrNotImplemented` until the
+researcher that calls it lands. No new dependency was introduced.
+
+**Findings are read back by reference.** Synthesis reads each finding from
+the store through `readFinding`, never from the pool's in-memory result, so
+a report is written from the same record a recovered run would see. A
+finding is used only when its reference lies in the run's own session, its
+stored worker and brief ids match the brief that produced it, it did not
+fail, and it has text. Every other planned brief becomes a gap with one
+reason: dropped, not started, not stored, unreadable, mismatched, failed or
+empty. The reason is scrubbed, defanged and bounded to 512 bytes. The read
+is detached from the run's cancellation under its own ten-second bound, as
+the pool's write is, because a cancelled run's findings are already paid
+for and the fallback body needs them.
+
+**Each finding has a fixed budget in the prompt.** The synthesis user
+message carries the question between the question markers, then each
+finding labelled with its brief id and objective. The finding's status,
+sources and text sit inside the untrusted-data fence, and the gap list sits
+in a fence of its own. Each text is cut to 12 KiB after defang and marked
+`[truncated]`, so five findings stay near 60 KiB whatever the workers wrote.
+Each source list is bounded to 4 KiB. Every stored field is defanged, and
+source titles pass through `citationTitle` again because they were read back
+from the store. Transcripts and page content never reach the lead. The
+system prompt's output-format block is the built-in format, or the
+`ReportTemplate` rendered for the query and defanged. The pool withholds the
+template from workers, so the lead takes it on `leadDeps`. Synthesis is one
+plain-text call capped at 16,384 completion tokens and never retried, and
+its body passes through `sanitiseAnswer` like a worker's answer. The
+`synthesise` span records the included, truncated and gapped finding counts,
+the tokens and the status.
+
+**Synthesis degrades to the findings, never to nothing.** A reply cut off at
+the completion cap keeps its body, and synthesis is Incomplete. A failed
+call, a filtered or empty reply, or a template that fails to render makes
+synthesis Failed. The body then becomes every collected finding stitched
+together unedited, under a note and one heading per finding, and
+sanitised, so no paid finding is lost to a lead failure. The citation pass
+is skipped, and the sources are the union of the worker citations. With no
+finding collected, no call is made and the run fails.
+
+**Citations are a subset of what the workers cited.** The citation pass is
+one structured call under a `cite` span, never retried. It sees the report
+body, fenced and bounded to 64 KiB, and the rendered findings as evidence.
+Its strict schema, pinned by `ValidateStrictSchema` and a golden, returns
+claims and the URLs that support each, and no title. A returned URL is kept
+only when it exactly equals a URI a worker cited. There is no normalisation,
+so the model cannot introduce a variant of a URL no worker fetched. Every
+other URL is dropped and counted as `dropped_citations` on the span. Kept
+citations are deduplicated in first attribution order and carry the
+worker's title, cleaned by `citationTitle`, never a title from the model.
+The pass falls back to the deduplicated union of every worker citation, and
+is Incomplete, on a failed call, a reply that is cut off, filtered or
+invalid, or a reply that attributes no worker source. Claims are not
+rendered: the report's sources section lists citations only. When no worker
+cited anything there is nothing to attribute, so no call and no span are
+made.
+
+**Status rules.** A run is Completed only when every planned brief yielded a
+completed finding and synthesis and the citation pass both completed. It is
+Failed when no worker produced a finding with text. Everything between is
+Incomplete: a dropped, not-started, failed or stopped worker, or a degraded
+lead pass. The detail names each degraded pass, then each brief that
+yielded no finding (`<id> produced no finding: <reason>`) or only a partial
+one (`<id> is partial: the worker ended <status>: <detail>`). The joined
+detail is scrubbed and bounded like every other status detail.
+
+**One Usage per run, recorded once.** `runUsage` gives the only spend the
+fleet reports. It is the workers' summed usage, which already carries their
+searches, recalls and cost, plus the tokens of the lead's decompose,
+synthesis and citation calls. The lead's tokens are priced once, on their
+sum, at the per-million-token prices the workers use: `leadDeps` takes them
+from `Caps`, and `costGBP` is shared with the worker loop. Nothing in the
+fleet emits a metric. As with the single worker, spans carry per-call spend
+as attributes, and the run core records the run-level metrics once from the
+returned `Usage`. A test runs a synthetic fleet end to end and checks that
+the `Usage` equals the delegate spans' totals plus the lead spans' tokens,
+with no metric line in the trace.
