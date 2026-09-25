@@ -1376,9 +1376,9 @@ token slices are sized once from a markup count and never grow, at most two
 so a 1 MiB body stays under about 20 MB while it is parsed. Adversarial
 tests and benchmarks cover each case.
 
-**Bound and fence unchanged.** After extraction `pageText` still applies
-`strings.ToValidUTF8`, whitespace collapsing and the `fleet.max_page_bytes`
-cut on a rune boundary; non-HTML media types are untouched. The extracted
-text still reaches the transcript through `fetchedPageMessage`, which
-defangs it: entity decoding can produce `<<<` from `&lt;&lt;&lt;`, and a
-test pins that the delimiter is defanged there.
+**Bound and fence.** For every accepted media type, `pageText` applies
+`strings.ToValidUTF8` and whitespace collapsing, spaces out every run of
+three or more `<` (`<<<<<` becomes `< < < < <`), then cuts at
+`fleet.max_page_bytes` on a rune boundary. Its output never contains `<<<`
+however the page spells the run (raw, `&lt;`, `&#60;`), independently of
+`fetchedPageMessage`'s defang; `<<` (a shift operator, a heredoc) is kept.

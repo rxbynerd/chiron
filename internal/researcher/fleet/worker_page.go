@@ -17,8 +17,9 @@ type renderedPage struct {
 // HTML is reduced to the visible text of its main content; other textual
 // media types are passed through; anything else (images, PDFs, archives) is
 // reported as unusable so the loop feeds that back to the model instead of
-// inlining bytes. The result is valid UTF-8, whitespace-collapsed, and cut at
-// maxBytes on a rune boundary after extraction.
+// inlining bytes. The result is valid UTF-8, whitespace-collapsed, never
+// contains "<<<" (see spaceAngleRuns), and is cut at maxBytes on a rune
+// boundary after extraction.
 func pageText(page fetchedPage, maxBytes int) (renderedPage, bool) {
 	mediaType, _, _ := mime.ParseMediaType(page.ContentType)
 	if mediaType == "" {
@@ -37,6 +38,7 @@ func pageText(page fetchedPage, maxBytes int) (renderedPage, bool) {
 
 	text = strings.ToValidUTF8(text, "�")
 	text = collapseWhitespace(text)
+	text = spaceAngleRuns(text)
 
 	truncated := false
 	if len(text) > maxBytes {
@@ -208,6 +210,35 @@ func asciiLowerString(s string) string {
 		}
 	}
 	return s
+}
+
+// spaceAngleRuns separates the characters of every run of three or more '<'
+// with single spaces, so the text never contains "<<<", the opening of the
+// transcript's fence delimiters. Runs of one or two, such as a shift
+// operator or a heredoc's "<<", are kept. Text without "<<<" is returned
+// without allocating.
+func spaceAngleRuns(s string) string {
+	i := strings.Index(s, "<<<")
+	if i < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i >= 0 {
+		j := i + 3
+		for j < len(s) && s[j] == '<' {
+			j++
+		}
+		b.WriteString(s[:i])
+		b.WriteByte('<')
+		for range j - i - 1 {
+			b.WriteString(" <")
+		}
+		s = s[j:]
+		i = strings.Index(s, "<<<")
+	}
+	b.WriteString(s)
+	return b.String()
 }
 
 // collapseWhitespace trims trailing spaces from every line, squeezes runs of
