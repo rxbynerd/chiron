@@ -528,16 +528,18 @@ func allowedBaseScheme(u *url.URL) bool {
 }
 
 // gateBudget enforces --budget before any create. The estimate is the
-// tier's planning figure (the cost table in researcher/gemini); a
-// blocked run exits ExitBlocked with both figures, so the caller can
-// raise the cap or pick the cheaper tier knowingly.
+// tier's planning figure (the cost table in researcher/gemini) — the
+// only cost figure that exists before the spend; what the finished run
+// reports is priced from its actual usage instead. A blocked run exits
+// ExitBlocked with both figures, so the caller can raise the cap or
+// pick the cheaper tier knowingly.
 func gateBudget(cfg config.ResearchConfig, estimateGBP float64) error {
 	if cfg.BudgetGBP <= 0 || estimateGBP <= cfg.BudgetGBP {
 		return nil
 	}
 	return &ExitError{
 		Code: ExitBlocked,
-		Err: fmt.Errorf("research blocked before any spend: estimated cost £%.2f (%s) exceeds the £%.2f budget cap — raise --budget or choose a cheaper tier",
+		Err: fmt.Errorf("research blocked before any spend: planning estimate £%.2f (%s) exceeds the £%.2f budget cap — raise --budget or choose a cheaper tier",
 			estimateGBP, cfg.Agent, cfg.BudgetGBP),
 	}
 }

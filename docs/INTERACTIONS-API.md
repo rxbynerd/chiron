@@ -165,6 +165,31 @@ with backoff on 429/5xx/transport errors; never retry 4xx other than 408/429.
 | deep-research | $1.00–$3.00 | ~80 | ~250k (50–70% cached) | ~60k |
 | deep-research-max | $3.00–$7.00 | ~160 | ~900k (50–70% cached) | ~80k |
 
+  Google labels these "estimates based on preview rates and subject to change".
+  Chiron uses the envelope midpoints as its pre-run planning figures only
+  (the `--budget` gate); a finished run is priced from its reported `usage`.
+
+- **List rates** (`last_verified: 2026-08-06` against
+  https://ai.google.dev/gemini-api/docs/pricing). The agents have no rate card of
+  their own — "all model inference is charged at standard Gemini list rates,
+  including input, output, and intermediate input / reasoning tokens generated
+  during agentic loops", plus tools at their own rates. The applicable standard
+  card is `gemini-3.1-pro-preview` (the same model §3 names for follow-ups), paid
+  tier, per 1M tokens:
+
+| Component | ≤ 200k prompt | > 200k prompt |
+| --- | --- | --- |
+| Input | $2.00 | $4.00 |
+| Cached input | $0.20 | $0.40 |
+| Output (including thinking) | $12.00 | $18.00 |
+| Grounding with Google Search | \$14 per 1,000 requests (after 5,000 free/month, shared across Gemini 3.x) | — |
+
+  The two columns are selected **per request**, which a client cannot reconstruct
+  from a run's `usage` totals; pricing the totals at the standard column
+  reproduces both per-tier envelopes above, pricing them at the higher column does
+  not. `usage.total_cached_tokens` is a subset of `total_input_tokens`, not an
+  addition to it.
+
 - Collaborative planning (3 steps): create with `collaborative_planning: true` →
   returns a plan; refine by creating again with `previous_interaction_id` +
   `collaborative_planning: true`; approve by creating with `previous_interaction_id`

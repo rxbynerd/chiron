@@ -97,7 +97,9 @@ type Citation struct {
 
 // Usage records per-run cost signals: the token and search counts the
 // API reports (mapped by the adapter) plus Chiron-side run telemetry.
-// Chiron tracks the signals and enforces budget caps; pricing tables and
+// EstimatedCostGBP prices those counts — at published list rates for the
+// deep-research tiers, at the configured fleet rates for the worker — an
+// estimate of what the run consumed, not a bill: invoicing, live FX and
 // attribution are deferred to Stint (a suite concern, not Chiron's).
 type Usage struct {
 	InputTokens      int     `json:"input_tokens,omitempty"`

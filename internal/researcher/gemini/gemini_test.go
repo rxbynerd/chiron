@@ -239,18 +239,22 @@ func TestEndToEndCompletedMapsWireToDomain(t *testing.T) {
 	if u.PollCount != 2 {
 		t.Errorf("poll count = %d, want 2", u.PollCount)
 	}
-	if want := 2.00 * 0.79; u.EstimatedCostGBP != want {
-		t.Errorf("estimated cost = %v, want %v", u.EstimatedCostGBP, want)
+	// The cost is priced from those counters, not from the tier: the
+	// tier's planning figure for this run would be £1.58 regardless of
+	// what it consumed.
+	if want := derivedCostGBP(u); u.EstimatedCostGBP != want || want == estimatedCostGBP(TierDeepResearch) {
+		t.Errorf("estimated cost = %v, want %v derived from the reported usage", u.EstimatedCostGBP, want)
 	}
 }
 
-func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
+func TestResultWithoutStartRecordsNoToolsAndClaimsNoUnreportedCost(t *testing.T) {
 	// chiron get resumes an interaction this adapter never started: the
 	// query and tool set of the original create are unknowable (the API
 	// does not echo them), so the domain model must not claim them —
-	// the recorded set must be the used set. The estimate falls back to
-	// the wire agent id, here the max tier despite the adapter being
-	// configured for the default tier.
+	// the recorded set must be the used set. The same restraint applies
+	// to cost: this resource carries no usage block, so the run reports
+	// no cost rather than inheriting the max tier's planning figure
+	// from the wire agent id.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Write([]byte(`{
 			"id": "v1_resumed",
@@ -272,8 +276,8 @@ func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
 	if in.Query != "" {
 		t.Errorf("query = %q, want empty for a resumed interaction", in.Query)
 	}
-	if want := estimatedCostGBP(TierDeepResearchMax); in.Usage.EstimatedCostGBP != want {
-		t.Errorf("estimate = %v, want %v derived from the wire agent id", in.Usage.EstimatedCostGBP, want)
+	if in.Usage.EstimatedCostGBP != 0 {
+		t.Errorf("estimated cost = %v, want 0 when the resource reports no usage", in.Usage.EstimatedCostGBP)
 	}
 }
 
