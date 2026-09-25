@@ -35,16 +35,16 @@ type callToolParams struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
-// handshake runs initialize and the initialized notification and returns the
-// established session. When the handshake fails after the server issued a
-// session id, that session is ended with a best-effort DELETE.
-func (c *Client) handshake(ctx context.Context) (session, error) {
+// establish runs initialize and the initialized notification and returns the
+// new session. When the handshake fails after the server issued a session id
+// it still holds, that session is ended with a best-effort DELETE.
+func (c *Client) establish(ctx context.Context) (session, error) {
 	sess, err := c.initialize(ctx)
 	if err == nil {
 		err = c.notifyInitialized(ctx, sess)
 	}
 	if err != nil {
-		if sess.id != "" {
+		if sess.id != "" && !sessionGone(err, sess) {
 			c.endSession(ctx, sess)
 		}
 		return session{}, err
@@ -58,7 +58,7 @@ func (c *Client) handshake(ctx context.Context) (session, error) {
 // supported one. On failure the returned session still carries any issued id,
 // with no protocol version, so the caller can end it.
 func (c *Client) initialize(ctx context.Context) (session, error) {
-	id := 1
+	id := c.nextID()
 	rpc, sessionID, err := c.doRequest(ctx, session{}, rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		ID:      &id,
@@ -74,14 +74,14 @@ func (c *Client) initialize(ctx context.Context) (session, error) {
 	}
 	sess := session{id: sessionID}
 	if rpc.Error != nil {
-		return sess, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error()))
+		return sess, fmt.Errorf("mcp: initialize rejected: %s", c.errorText(rpc.Error.Error(), sess))
 	}
 	var result initializeResult
 	if err := json.Unmarshal(rpc.Result, &result); err != nil {
 		return sess, fmt.Errorf("mcp: decoding initialize result: %s", c.scrub(err.Error()))
 	}
 	if !slices.Contains(supportedProtocolVersions, result.ProtocolVersion) {
-		return sess, &ProtocolVersionError{Version: c.excerpt(result.ProtocolVersion, maxVersionEchoBytes)}
+		return sess, &ProtocolVersionError{Version: c.excerpt(result.ProtocolVersion, maxVersionEchoBytes, sess)}
 	}
 	sess.protocolVersion = result.ProtocolVersion
 	return sess, nil
@@ -103,7 +103,7 @@ func (c *Client) callTool(ctx context.Context, sess session, name string, args m
 	if args == nil {
 		args = map[string]any{}
 	}
-	id := 2
+	id := c.nextID()
 	rpc, _, err := c.doRequest(ctx, sess, rpcRequest{
 		JSONRPC: jsonRPCVersion,
 		ID:      &id,
@@ -114,7 +114,7 @@ func (c *Client) callTool(ctx context.Context, sess session, name string, args m
 		return ToolResult{}, err
 	}
 	if rpc.Error != nil {
-		return ToolResult{}, fmt.Errorf("mcp: tools/call rejected: %s", c.errorText(rpc.Error.Error()))
+		return ToolResult{}, fmt.Errorf("mcp: tools/call rejected: %s", c.errorText(rpc.Error.Error(), sess))
 	}
 
 	var result ToolResult
@@ -123,7 +123,7 @@ func (c *Client) callTool(ctx context.Context, sess session, name string, args m
 	}
 	if result.IsError {
 		for i := range result.Content {
-			result.Content[i].Text = c.errorText(result.Content[i].Text)
+			result.Content[i].Text = c.errorText(result.Content[i].Text, sess)
 		}
 	}
 	return result, nil
