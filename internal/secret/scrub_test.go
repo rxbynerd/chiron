@@ -119,11 +119,35 @@ func TestScrubLeavesProseAlone(t *testing.T) {
 		"wrote report to /tmp/chiron/deep-research-output.md",
 		"basic authorization rules apply: the desk-lf team owns keys",
 		"langfuse keys start pk-lf- or sk-lf- followed by a uuid",
+		"the task-lf-database-name-here config key",
 	}
 	for _, in := range tests {
 		if got := Scrub(in); got != in {
 			t.Errorf("Scrub(%q) = %q; want unchanged", in, got)
 		}
+	}
+}
+
+// TestScrubBasicAuthSplitAcrossKeyAndValue proves the Basic-credential
+// pattern fires on a value scrubbed on its own, with no "authorization"
+// anywhere in the same string — the shape a tracer's SetAttr produces
+// when it scrubs an attribute's key and value as two independent Scrub
+// calls (see TestJSONLScrubsSplitBasicAuthHeader for the same regression
+// through the real tracer).
+func TestScrubBasicAuthSplitAcrossKeyAndValue(t *testing.T) {
+	pair := base64.StdEncoding.EncodeToString([]byte(fakeLangfuseZeroPublic + ":" + fakeLangfuseZeroSecret))
+
+	key := Scrub("http.request.header.authorization")
+	if key != "http.request.header.authorization" {
+		t.Errorf("Scrub(key) = %q; want unchanged, no credential in the key", key)
+	}
+
+	value := Scrub("Basic " + pair)
+	if strings.Contains(value, pair) {
+		t.Fatalf("Scrub(value) = %q; credential survived a value-only call", value)
+	}
+	if !strings.Contains(value, "[REDACTED") {
+		t.Fatalf("Scrub(value) = %q; no redaction marker", value)
 	}
 }
 

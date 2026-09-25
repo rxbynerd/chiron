@@ -107,6 +107,35 @@ func TestJSONLScrubsLangfuseKeys(t *testing.T) {
 	decodeLines(t, out)
 }
 
+// TestJSONLScrubsSplitBasicAuthHeader proves a Basic credential pair is
+// scrubbed even when it arrives as an attribute value with no
+// "authorization" anywhere in the same string — the shape SetAttr
+// produces when it scrubs an attribute's key and value independently
+// (langfusePublic and langfuseSecret sit in the key of a header-shaped
+// attribute; the value carries only "Basic <pair>").
+func TestJSONLScrubsSplitBasicAuthHeader(t *testing.T) {
+	const (
+		langfusePublic = "pk-lf-1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+		langfuseSecret = "sk-lf-9f8e7d6c-5b4a-4321-8fed-cba987654321"
+	)
+	pair := base64.StdEncoding.EncodeToString([]byte(langfusePublic + ":" + langfuseSecret))
+
+	var buf bytes.Buffer
+	tr := NewJSONL(&buf)
+	_, span := tr.StartSpan(context.Background(), SpanControlPlane)
+	span.SetAttr("http.request.header.authorization", "Basic "+pair)
+	span.End(nil)
+
+	out := buf.String()
+	if strings.Contains(out, pair) {
+		t.Fatalf("Basic credential pair transited the jsonl tracer:\n%s", out)
+	}
+	if !strings.Contains(out, "[REDACTED") {
+		t.Fatalf("no redaction marker in output:\n%s", out)
+	}
+	decodeLines(t, out)
+}
+
 func TestJSONLDoubleEndWritesOnce(t *testing.T) {
 	var buf bytes.Buffer
 	tr := NewJSONL(&buf)
