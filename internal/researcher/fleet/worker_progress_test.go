@@ -1,7 +1,9 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -181,9 +183,10 @@ func TestRunWorkerProgressNothingBeforeParsedAction(t *testing.T) {
 }
 
 // searchFinalRun runs a two-turn search-then-final worker with the given
-// progress hook and deadline, over fakes whose output is identical on every
-// call, so two runs' Findings are comparable.
-func searchFinalRun(t *testing.T, hook func(context.Context, Progress), deadline time.Duration) Finding {
+// progress hook, deadline and logger, over fakes whose output is identical on
+// every call, so two runs' Findings are comparable. A nil logger discards
+// output, as WorkerDeps.Logger does.
+func searchFinalRun(t *testing.T, hook func(context.Context, Progress), deadline time.Duration, logger *slog.Logger) Finding {
 	t.Helper()
 	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 	defer searchSrv.Close()
@@ -199,29 +202,44 @@ func searchFinalRun(t *testing.T, hook func(context.Context, Progress), deadline
 		Fetch:                   newFetchClient(t),
 		Caps:                    caps(),
 		Progress:                hook,
+		Logger:                  logger,
 		progressTimeoutOverride: deadline,
 	}, Brief{Objective: "why is the sky blue"})
 }
 
-// TestRunWorkerProgressHookPanicIsRecovered: a hook that panics on every
-// turn is recovered, and the run ends with the Finding it produces without a
-// hook.
+// TestRunWorkerProgressHookPanicIsRecovered: a hook that panics on every turn
+// is recovered, the run ends with the Finding it produces without a hook, and
+// the recovered value is logged at Debug with any credential scrubbed.
 func TestRunWorkerProgressHookPanicIsRecovered(t *testing.T) {
-	want := searchFinalRun(t, nil, 0)
+	want := searchFinalRun(t, nil, 0, nil)
 	if want.Status != types.StatusCompleted {
 		t.Fatalf("baseline status = %s (%s), want completed", want.Status, want.Detail)
 	}
 
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
 	var calls atomic.Int32
 	got := searchFinalRun(t, func(context.Context, Progress) {
 		calls.Add(1)
-		panic("progress hook failure")
-	}, 0)
+		panic("progress hook failure: " + highEntropyKey)
+	}, 0, logger)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("finding with a panicking hook = %+v, want %+v", got, want)
 	}
 	if n := calls.Load(); n != 2 {
 		t.Errorf("hook calls = %d, want 2: a panic on one turn must not stop later reports", n)
+	}
+
+	log := logged.String()
+	if !strings.Contains(log, "progress hook panicked") {
+		t.Errorf("log = %q, want a record of the recovered panic", log)
+	}
+	if strings.Contains(log, highEntropyKey) {
+		t.Errorf("log = %q, leaked the raw credential from the panic value", log)
+	}
+	if !strings.Contains(log, "REDACTED") {
+		t.Errorf("log = %q, want the scrubbed placeholder in place of the credential", log)
 	}
 }
 
@@ -229,7 +247,7 @@ func TestRunWorkerProgressHookPanicIsRecovered(t *testing.T) {
 // context is abandoned at the progress deadline on each turn, so the run
 // completes with an unchanged Finding in time bounded by that deadline.
 func TestRunWorkerProgressBlockingHookIsAbandoned(t *testing.T) {
-	want := searchFinalRun(t, nil, 0)
+	want := searchFinalRun(t, nil, 0, nil)
 
 	release := make(chan struct{})
 	defer close(release)
@@ -238,7 +256,7 @@ func TestRunWorkerProgressBlockingHookIsAbandoned(t *testing.T) {
 	got := searchFinalRun(t, func(context.Context, Progress) {
 		calls.Add(1)
 		<-release
-	}, 50*time.Millisecond)
+	}, 50*time.Millisecond, nil)
 	elapsed := time.Since(start)
 
 	if !reflect.DeepEqual(got, want) {

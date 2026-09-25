@@ -524,23 +524,28 @@ func (w *workerRun) reportProgress(ctx context.Context, act action) {
 	if ctx.Err() != nil {
 		return
 	}
-	callProgress(ctx, hook, p)
+	if r := callProgress(ctx, hook, p); r != nil {
+		w.deps.logger().Debug("worker: progress hook panicked", "recover", w.scrub(fmt.Sprint(r)))
+	}
 }
 
 // callProgress runs hook in its own goroutine and waits until it returns or
 // ctx ends, so a hook that ignores ctx cannot hold the loop past the
-// deadline. A panic in the hook is recovered and discarded: progress is
-// observability, never a reason to fail a paid run.
-func callProgress(ctx context.Context, hook func(context.Context, Progress), p Progress) {
-	done := make(chan struct{})
+// deadline. A panic in the hook is recovered and returned, never re-raised:
+// progress is observability, never a reason to fail a paid run. The recovered
+// value travels over a buffered channel rather than a named return, because
+// the goroutine can still be writing after the ctx.Done branch returns.
+func callProgress(ctx context.Context, hook func(context.Context, Progress), p Progress) any {
+	recovered := make(chan any, 1)
 	go func() {
-		defer close(done)
-		defer func() { _ = recover() }()
+		defer func() { recovered <- recover() }()
 		hook(ctx, p)
 	}()
 	select {
-	case <-done:
+	case r := <-recovered:
+		return r
 	case <-ctx.Done():
+		return nil
 	}
 }
 
