@@ -133,7 +133,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	}
 	go func() {
 		defer cancel()
-		runWorker(runCtx, w.deps, brief, after)
+		runWorker(runCtx, w.deps, brief, nil, after)
 		close(st.done)
 	}()
 

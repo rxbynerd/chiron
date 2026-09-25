@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
@@ -58,6 +61,23 @@ type Finding struct {
 	// Detail is a human-readable reason accompanying an Incomplete or Failed
 	// outcome, empty on success. It is scrubbed and bounded in length.
 	Detail string
+}
+
+// Progress is one best-effort report from a worker turn, made after the
+// model's action has parsed and before it is dispatched. The token and cost
+// fields are the run's accumulated usage including this turn's model call.
+type Progress struct {
+	// Turn is the 1-based turn number; MaxTurns is Caps.MaxTurns.
+	Turn, MaxTurns int
+	// Action is the parsed action kind: search, fetch, recall or final.
+	Action string
+	// Detail names the action's target without its content: the query for
+	// search and recall, the URL reduced to scheme://host for fetch, empty
+	// for final. It is one line of printable text, scrubbed and bounded to
+	// maxProgressDetailRunes.
+	Detail                    string
+	InputTokens, OutputTokens int
+	EstimatedCostGBP          float64
 }
 
 // Caps bound one worker run deterministically. Exceeding a cap ends the loop
@@ -115,6 +135,13 @@ const turnCompletionTokens = 8192
 // so this is a spend bound as much as a robustness one.
 const maxConsecutiveToolFailures = 3
 
+// progressTimeout bounds one Progress delivery, including any wait for the
+// Worker's delivery gate. The loop never waits on a hook for longer.
+const progressTimeout = 2 * time.Second
+
+// maxProgressDetailRunes bounds Progress.Detail.
+const maxProgressDetailRunes = 200
+
 // maxDetailBytes bounds Finding.Detail; a provider error body can be large
 // and the detail is copied into the report front matter and traces.
 const maxDetailBytes = 2048
@@ -141,6 +168,16 @@ type WorkerDeps struct {
 	KnowledgeNamespace memory.Namespace
 	Tracer             trace.Tracer
 	Caps               Caps
+	// Progress, when non-nil, receives one Progress per turn whose action
+	// parsed; a turn that ends before that reports nothing. Delivery is best
+	// effort within progressTimeout: a panic is recovered, a hook still
+	// running at the deadline is abandoned, and nothing the hook does
+	// affects the Finding.
+	Progress func(ctx context.Context, p Progress)
+
+	// progressTimeoutOverride replaces progressTimeout when positive, so
+	// tests can shorten it.
+	progressTimeoutOverride time.Duration
 }
 
 // fetchedPage is the loop's view of a fetched document: the subset of
@@ -163,14 +200,17 @@ type fetchedPage struct {
 // no side effect. RunWorker never calls deps.Remember; saving a finding is the
 // Worker's concern.
 func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
-	return runWorker(ctx, deps, brief, nil)
+	return runWorker(ctx, deps, brief, nil, nil)
 }
 
 // afterLoop runs once the loop has produced its Finding, while the worker
 // span is still open; span is nil when no tracer is configured.
 type afterLoop func(ctx context.Context, f Finding, span trace.Span)
 
-func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoop) Finding {
+// runWorker runs the loop. A non-nil progressGate holds each Progress
+// delivery until the gate is closed, dropping it if the progress deadline
+// passes first.
+func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}, after afterLoop) Finding {
 	if deps.Caps.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deps.Caps.Timeout)
@@ -183,7 +223,7 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoo
 		span.SetAttr("objective", boundDetail(brief.Objective))
 	}
 
-	w := &workerRun{deps: deps, brief: brief}
+	w := &workerRun{deps: deps, brief: brief, progressGate: progressGate}
 	finding := w.loop(ctx)
 	if after != nil {
 		after(ctx, finding, span)
@@ -217,8 +257,9 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoo
 // permitted to fetch and cite (only URLs it has actually seen in a search
 // result or fetched).
 type workerRun struct {
-	deps  WorkerDeps
-	brief Brief
+	deps         WorkerDeps
+	brief        Brief
+	progressGate <-chan struct{}
 
 	transcript []model.Message
 	usage      types.Usage
@@ -305,6 +346,7 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 		// guarantee.
 		return true, w.failed("invalid model action: " + w.scrub(err.Error()))
 	}
+	w.reportProgress(ctx, act)
 
 	switch act.Kind {
 	case actionSearch:
@@ -454,6 +496,92 @@ func (w *workerRun) finalise(act action) Finding {
 	}
 }
 
+// reportProgress delivers this turn's Progress to deps.Progress within one
+// progress deadline. With a gate, delivery first waits for it to open; a
+// delivery whose deadline passes first, or whose run has ended, is dropped.
+func (w *workerRun) reportProgress(ctx context.Context, act action) {
+	hook := w.deps.Progress
+	if hook == nil {
+		return
+	}
+	p := Progress{
+		Turn:             w.turns,
+		MaxTurns:         w.deps.Caps.MaxTurns,
+		Action:           string(act.Kind),
+		Detail:           progressDetail(act),
+		InputTokens:      w.usage.InputTokens,
+		OutputTokens:     w.usage.OutputTokens,
+		EstimatedCostGBP: w.usage.EstimatedCostGBP,
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, w.deps.progressDeadline())
+	defer cancel()
+	if w.progressGate != nil {
+		select {
+		case <-w.progressGate:
+		case <-ctx.Done():
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	callProgress(ctx, hook, p)
+}
+
+// callProgress runs hook in its own goroutine and waits until it returns or
+// ctx ends, so a hook that ignores ctx cannot hold the loop past the
+// deadline. A panic in the hook is recovered and discarded: progress is
+// observability, never a reason to fail a paid run.
+func callProgress(ctx context.Context, hook func(context.Context, Progress), p Progress) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = recover() }()
+		hook(ctx, p)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// progressDetail names an action's target for a Progress report: the query
+// for search and recall, the URL's origin for fetch, nothing for final. The
+// text is flattened, scrubbed, then bounded, in that order, so the bound
+// cannot split a credential into fragments too short for the scrubber.
+func progressDetail(act action) string {
+	var s string
+	switch act.Kind {
+	case actionSearch, actionRecall:
+		s = act.Query
+	case actionFetch:
+		s = urlOrigin(act.URL)
+	}
+	return strings.TrimSpace(boundRunes(secret.Scrub(printableOneLine(s)), maxProgressDetailRunes))
+}
+
+// urlOrigin reduces a URL to scheme://host, keeping a port but dropping
+// userinfo, path, query and fragment. A URL without both a scheme and a host
+// yields "".
+func urlOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// printableOneLine flattens s to one line of printable text, dropping control
+// and format characters such as terminal escapes and bidirectional overrides.
+func printableOneLine(s string) string {
+	return oneLine(strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, s))
+}
+
 // incomplete builds a bounded-stop Finding: a cap, the context, or a truncated
 // reply ended the loop before a final answer.
 func (w *workerRun) incomplete(detail string) Finding {
@@ -581,6 +709,14 @@ func boundDetail(s string) string { return boundBytes(s, maxDetailBytes) }
 
 // errWorkerNoModel is returned by NewWorker when the model client is nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
+
+// progressDeadline is the bound on one Progress delivery.
+func (d WorkerDeps) progressDeadline() time.Duration {
+	if d.progressTimeoutOverride > 0 {
+		return d.progressTimeoutOverride
+	}
+	return progressTimeout
+}
 
 // logger returns the injected logger, or one that discards every record.
 func (d WorkerDeps) logger() *slog.Logger {
