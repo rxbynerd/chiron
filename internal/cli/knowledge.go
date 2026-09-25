@@ -21,10 +21,10 @@ func requireKnowledge(fc config.FleetConfig) error {
 		return nil
 	}
 	if fc.KnowledgeEndpoint == "" {
-		return errors.New("research --agent worker: fleet.knowledge_endpoint is required when fleet.knowledge_provider is set")
+		return errors.New("research: fleet.knowledge_endpoint is required when fleet.knowledge_provider is set")
 	}
 	if fc.KnowledgeProvider == config.KnowledgeAlexandria && fc.KnowledgeKeyRef == "" {
-		return errors.New("research --agent worker: fleet.knowledge_key_ref is required for the alexandria provider")
+		return errors.New("research: fleet.knowledge_key_ref is required for the alexandria provider")
 	}
 	return nil
 }
@@ -92,6 +92,6 @@ func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recalle
 		}
 		return c, nil, nil
 	default:
-		return nil, nil, fmt.Errorf("research --agent worker: unknown fleet.knowledge_provider %q", provider)
+		return nil, nil, fmt.Errorf("research: unknown fleet.knowledge_provider %q", provider)
 	}
 }
