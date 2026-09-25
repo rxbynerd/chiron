@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -467,11 +469,55 @@ func endpointsEvents(t *testing.T, stderr string) []string {
 	return payloads
 }
 
-// TestWorkerEndpointsEventPrecedesFirstModelCall: a worker run emits exactly
-// one delta event naming its model, search and (with a provider) knowledge
-// destinations by scheme and host, before the first model call reaches the
-// wire; a token in an endpoint path never reaches stderr.
-func TestWorkerEndpointsEventPrecedesFirstModelCall(t *testing.T) {
+// firstRequestProbe forwards every request to a fake and records stderr as
+// it stood when the first request arrived.
+type firstRequestProbe struct {
+	name     string
+	server   *httptest.Server
+	mu       sync.Mutex
+	snapshot *string
+}
+
+func newFirstRequestProbe(t *testing.T, name string, stderr *syncBuffer, target string) *firstRequestProbe {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatalf("parse %s fake URL: %v", name, err)
+	}
+	p := &firstRequestProbe{name: name}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		if p.snapshot == nil {
+			s := stderr.String()
+			p.snapshot = &s
+		}
+		p.mu.Unlock()
+		proxy.ServeHTTP(w, r)
+	}))
+	return p
+}
+
+func (p *firstRequestProbe) URL() string { return p.server.URL }
+
+func (p *firstRequestProbe) Close() { p.server.Close() }
+
+// stderrAtFirstRequest returns stderr as it stood when the first request
+// arrived, and false when none has.
+func (p *firstRequestProbe) stderrAtFirstRequest() (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshot == nil {
+		return "", false
+	}
+	return *p.snapshot, true
+}
+
+// TestWorkerEndpointsEventPrecedesEveryEndpointRequest: a worker run emits
+// exactly one delta event naming its model, search and (with a provider)
+// knowledge destinations by scheme and host, before the first request
+// reaches any of them; a token in an endpoint path never reaches stderr.
+func TestWorkerEndpointsEventPrecedesEveryEndpointRequest(t *testing.T) {
 	const token = "sk-live-0123456789abcdefghijklmn"
 	for _, tt := range []struct {
 		name      string
@@ -481,44 +527,39 @@ func TestWorkerEndpointsEventPrecedesFirstModelCall(t *testing.T) {
 		{"without a knowledge provider", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			stderr := &syncBuffer{}
-			var mu sync.Mutex
-			var atFirstCall *string
-			modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				if atFirstCall == nil {
-					snapshot := stderr.String()
-					atFirstCall = &snapshot
-				}
-				mu.Unlock()
-				body, _ := json.Marshal(map[string]any{
-					"choices": []map[string]any{{
-						"message":       map[string]string{"content": `{"action":"final","answer":"Rayleigh scattering.","citations":[]}`},
-						"finish_reason": "stop",
-					}},
-				})
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write(body)
-			}))
+			replies := []modeltest.FakeReply{{Content: `{"action":"search","query":"sky colour"}`, FinishReason: "stop"}}
+			if tt.knowledge {
+				replies = append(replies, modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"})
+			}
+			modelSrv := modeltest.NewFakeServer(append(replies, finalReply)...)
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
 			kbSrv := billettest.NewFakeServer(nil)
 			defer kbSrv.Close()
+			stderr := &syncBuffer{}
+			modelProbe := newFirstRequestProbe(t, "model", stderr, modelSrv.URL())
+			defer modelProbe.Close()
+			searchProbe := newFirstRequestProbe(t, "search", stderr, searchSrv.URL())
+			defer searchProbe.Close()
+			kbProbe := newFirstRequestProbe(t, "knowledge", stderr, kbSrv.URL())
+			defer kbProbe.Close()
 			clearEndpointEnv(t)
 
 			args := []string{
 				"research", "--query", "why is the sky blue", "--agent", "worker", "-o", "none",
-				"--fleet-model-endpoint", modelSrv.URL + "/" + token + "/v1",
+				"--fleet-model-endpoint", modelProbe.URL() + "/" + token + "/v1",
 				"--fleet-model-name", "test-model",
 				"--fleet-model-key-ref", "secret://MODEL_KEY",
-				"--fleet-search-endpoint", searchSrv.URL() + "/" + token,
+				"--fleet-search-endpoint", searchProbe.URL() + "/" + token,
 			}
-			want := `{"endpoints":{"model":"` + modelSrv.URL + `","search":"` + searchSrv.URL() + `"}}`
+			want := `{"endpoints":{"model":"` + modelProbe.URL() + `","search":"` + searchProbe.URL() + `"}}`
+			probes := []*firstRequestProbe{modelProbe, searchProbe}
 			if tt.knowledge {
 				args = append(args, "--fleet-knowledge-provider", "billet",
-					"--fleet-knowledge-endpoint", kbSrv.URL()+"/"+token+"/")
-				want = `{"endpoints":{"model":"` + modelSrv.URL + `","search":"` + searchSrv.URL() + `","knowledge":"` + kbSrv.URL() + `"}}`
+					"--fleet-knowledge-endpoint", kbProbe.URL()+"/"+token+"/")
+				want = `{"endpoints":{"model":"` + modelProbe.URL() + `","search":"` + searchProbe.URL() + `","knowledge":"` + kbProbe.URL() + `"}}`
+				probes = append(probes, kbProbe)
 			}
 
 			if _, err := executeWith(t, &countingResolver{}, strings.NewReader(""), stderr, args...); err != nil {
@@ -528,13 +569,15 @@ func TestWorkerEndpointsEventPrecedesFirstModelCall(t *testing.T) {
 			if len(got) != 1 || got[0] != want {
 				t.Fatalf("endpoints events = %q, want exactly [%s]", got, want)
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			if atFirstCall == nil {
-				t.Fatal("the model was never called")
-			}
-			if len(endpointsEvents(t, *atFirstCall)) != 1 {
-				t.Errorf("the endpoints event was not on stderr when the first model call arrived:\n%s", *atFirstCall)
+			for _, p := range probes {
+				at, ok := p.stderrAtFirstRequest()
+				if !ok {
+					t.Errorf("the %s endpoint was never called", p.name)
+					continue
+				}
+				if len(endpointsEvents(t, at)) != 1 {
+					t.Errorf("the endpoints event was not on stderr when the first %s request arrived:\n%s", p.name, at)
+				}
 			}
 			if strings.Contains(stderr.String(), token) {
 				t.Errorf("an endpoint path reached stderr:\n%s", stderr.String())
