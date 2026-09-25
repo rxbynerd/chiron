@@ -273,6 +273,17 @@ finding (a decomposition the lead cannot use fails before any worker
 runs), `incomplete` when a brief yielded no finding or only a partial one,
 or when synthesis or citation degraded, and `completed` otherwise.
 
+When `--timeout` ends a fleet run, no report is emitted and the command
+exits 1, because the report is written on the run's context, which has
+ended. If the lead has recorded its outcome by then, the fleet logs that
+outcome's spend to stderr instead, as one warning line. That includes an
+outcome stitched from the findings because the deadline cut off synthesis
+or citation. The line carries the `flt_` id, status, tokens, search count
+and estimated cost, never report or finding text. `--agent worker` also
+emits no report when `--timeout` ends it, and it logs no spend. An
+interrupt (Ctrl-C) ends either agent at once, with neither a report nor a
+spend line.
+
 The interaction id is a local `flt_` handle, emitted before the first
 call; like `wkr_`, it is not a resume token, so `chiron get` and
 `chiron follow-up` refuse it. Each worker turn emits the `worker_turn`

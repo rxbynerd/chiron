@@ -2010,14 +2010,23 @@ worker's `Await`. It releases the progress gate and returns nil once the
 run has concluded, even when its own context ends in the same instant.
 Otherwise, when its context ends, it cancels the run and waits for the
 unwind, bounded by the finding write, the findings read-back and the
-session close, the three steps detached from cancellation. `Result`
-reports the run in progress until the lead concludes, and a cancelled
-run's recorded outcome and spend afterwards. `get` and `follow-up` refuse
-`flt_` ids as they refuse `wkr_` ids, because a fleet run holds no
-server-side state. The composition root builds the fleet from the same
-`buildWorkerDeps` helper as `--agent worker`, so one model client serves
-the lead and every worker. Each `worker_turn` progress delta names its
-worker in a `worker_id` field and in its text.
+session close, the three steps detached from cancellation. It then returns
+the context error. `Result` reports the run in progress until the lead
+concludes. When the run's `--timeout` deadline ends `Await`, no report is
+emitted, because the run core writes the report on the ended context. If
+the run has recorded its outcome by then, `Await` logs that outcome's
+spend to stderr instead, once, at Warn. The line carries the interaction
+id, status, tokens, search count and estimated cost, never report or
+finding text. The worker agent shares the no-report limitation, and it
+logs no spend. An interrupt such as Ctrl-C ends the process at once,
+because the CLI installs no signal handler, so it neither emits a report
+nor logs spend. Emitting the report after the deadline is a deferred
+follow-up for both agents. `get` and `follow-up` refuse `flt_` ids as they
+refuse `wkr_` ids, because a fleet run holds no server-side state. The
+composition root builds the fleet from the same `buildWorkerDeps` helper
+as `--agent worker`, so one model client serves the lead and every worker.
+Each `worker_turn` progress delta names its worker in a `worker_id` field
+and in its text.
 
 **The store and long-term memory.** The CLI binds a fresh `memory.InMemory`
 for each fleet run and for no other agent. The store's shape, and the
