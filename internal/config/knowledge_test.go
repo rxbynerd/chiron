@@ -106,7 +106,7 @@ func TestValidateKnowledge(t *testing.T) {
 			t.Run(tt.name+"/"+agent, func(t *testing.T) {
 				cfg := validWorker()
 				tt.mutate(&cfg)
-				cfg.Agent = agent
+				cfg = withAgent(cfg, agent)
 				err := cfg.Validate()
 				if tt.wantErr == "" {
 					if err != nil {

@@ -379,7 +379,7 @@ func TestResearchRequiresQuery(t *testing.T) {
 // the seam-selection point, before any secret is resolved or request made.
 // It is a usage error, not a research outcome.
 func TestFleetAgentNotImplemented(t *testing.T) {
-	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "-o", "none")
+	_, _, err := execute(t, "research", "--query", "q", "--agent", "fleet", "--fleet-memory", "inmemory", "-o", "none")
 	if err == nil {
 		t.Fatal("--agent fleet must fail until the researcher exists")
 	}

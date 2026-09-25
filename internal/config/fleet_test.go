@@ -26,11 +26,20 @@ func validWorker() ResearchConfig {
 	return cfg
 }
 
-// validFleet is validWorker plus the fan-out agent selection; the caps it
-// enforces (MaxWorkers/Concurrency) already carry defaults.
+// validFleet is validWorker plus the fan-out agent selection and the
+// inmemory binding it requires; the caps it enforces
+// (MaxWorkers/Concurrency) already carry defaults.
 func validFleet() ResearchConfig {
-	cfg := validWorker()
-	cfg.Agent = AgentFleet
+	return withAgent(validWorker(), AgentFleet)
+}
+
+// withAgent selects agent on cfg, adding the inmemory binding the fleet
+// requires, so one baseline serves both in-process agents.
+func withAgent(cfg ResearchConfig, agent string) ResearchConfig {
+	cfg.Agent = agent
+	if agent == AgentFleet {
+		cfg.Fleet.Memory = MemoryInMemory
+	}
 	return cfg
 }
 
@@ -46,9 +55,10 @@ func TestValidateAcceptsWorkerAndFleet(t *testing.T) {
 			cfg.Agent = AgentWorker
 			return cfg
 		}()},
-		{"fleet with default fleet", func() ResearchConfig {
+		{"fleet with default fleet and inmemory", func() ResearchConfig {
 			cfg := Default()
 			cfg.Agent = AgentFleet
+			cfg.Fleet.Memory = MemoryInMemory
 			return cfg
 		}()},
 	} {
@@ -115,7 +125,6 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"worker timeout zero", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = 0 }},
 		{"worker timeout negative", func(c *ResearchConfig) { c.Fleet.WorkerTimeout = Duration(-time.Second) }},
 		{"bad memory enum", func(c *ResearchConfig) { c.Fleet.Memory = "redis" }},
-		{"inmemory not implemented", func(c *ResearchConfig) { c.Fleet.Memory = MemoryInMemory }},
 		{"model endpoint userinfo", func(c *ResearchConfig) {
 			c.Fleet.ModelEndpoint = "https://user:hunter2@model.example/v1"
 		}},
@@ -133,6 +142,62 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 				t.Errorf("%s: validated", tt.name)
 			}
 		})
+	}
+}
+
+// TestValidateMemoryBinding: the fleet passes findings by reference, so it
+// requires inmemory and rejects noop with an error naming the fix; the
+// worker has no session plane and accepts either; unknown values are
+// rejected for both.
+func TestValidateMemoryBinding(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		agent   string
+		memory  string
+		wantErr []string // substrings; empty means valid
+	}{
+		{"worker noop", AgentWorker, MemoryNoop, nil},
+		{"worker inmemory", AgentWorker, MemoryInMemory, nil},
+		{"fleet inmemory", AgentFleet, MemoryInMemory, nil},
+		{"fleet noop", AgentFleet, MemoryNoop, []string{"fleet.memory:", `"inmemory"`, "--fleet-memory inmemory"}},
+		{"worker unknown", AgentWorker, "redis", []string{"fleet.memory:", `"redis"`}},
+		{"fleet unknown", AgentFleet, "redis", []string{"fleet.memory:", `"redis"`}},
+		{"worker empty", AgentWorker, "", []string{"fleet.memory:"}},
+		{"fleet empty", AgentFleet, "", []string{"fleet.memory:"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validWorker()
+			cfg.Agent = tt.agent
+			cfg.Fleet.Memory = tt.memory
+			err := cfg.Validate()
+			if len(tt.wantErr) == 0 {
+				if err != nil {
+					t.Errorf("Validate: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("validated")
+			}
+			for _, want := range tt.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Validate = %v, want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateFleetRejectsDefaultMemory: noop stays the default, so a bare
+// fleet config is rejected until inmemory is chosen.
+func TestValidateFleetRejectsDefaultMemory(t *testing.T) {
+	if Default().Fleet.Memory != MemoryNoop {
+		t.Fatalf("default fleet.memory = %q, want %q", Default().Fleet.Memory, MemoryNoop)
+	}
+	cfg := Default()
+	cfg.Agent = AgentFleet
+	if err := cfg.Validate(); err == nil || !strings.HasPrefix(err.Error(), "fleet.memory:") {
+		t.Errorf("fleet with the default memory binding: err = %v, want a fleet.memory error", err)
 	}
 }
 
@@ -253,8 +318,7 @@ func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
 	} {
 		for _, agent := range []string{AgentWorker, AgentFleet} {
 			t.Run(tt.name+"/"+agent, func(t *testing.T) {
-				cfg := validWorker()
-				cfg.Agent = agent
+				cfg := withAgent(validWorker(), agent)
 				tt.mutate(&cfg)
 				err := cfg.Validate()
 				if err == nil || !strings.HasPrefix(err.Error(), tt.want) {
@@ -275,8 +339,7 @@ func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
 // output-format block, so it is valid for worker and fleet.
 func TestValidateAcceptsTemplateForInProcessAgents(t *testing.T) {
 	for _, agent := range []string{AgentWorker, AgentFleet} {
-		cfg := validWorker()
-		cfg.Agent = agent
+		cfg := withAgent(validWorker(), agent)
 		cfg.Template = "t.md"
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("%s with template: %v", agent, err)

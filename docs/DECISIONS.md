@@ -12,8 +12,9 @@ place with a note rather than deleting them.
 
 > **Partially superseded** by "Knowledge recall and remember via the memory
 > seam" (2026-09-23): the recall and remember halves are now bound to
-> external stores (Billet, Alexandria). The local-declaration rule stands,
-> and the session and artifact plane is still unimplemented.
+> external stores (Billet, Alexandria). The local-declaration rule stands.
+> The session and artifact plane is implemented in process by "In-memory
+> ContextStore and the fleet span vocabulary" (2026-09-25).
 
 Chiron's `internal/memory` declares its own `ContextStore` interface and
 supporting types, structurally matching the contract sketched in
@@ -1131,7 +1132,9 @@ none are given. The Gemini-only levers (`budget`, `plan`, `accept_plan`,
 `model`, `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`)
 are rejected for `worker`/`fleet` so a caller never believes a cap applied
 when the loop ignores it. `fleet.memory: inmemory` is rejected until the
-store exists. Fleet endpoints must not carry userinfo, a query string or a
+store exists.
+Superseded for `fleet.memory: inmemory` by the 2026-09-25 entry "In-memory ContextStore and the fleet span vocabulary".
+Fleet endpoints must not carry userinfo, a query string or a
 fragment, and validation errors describe them by scheme and host only.
 Superseded for `template` by the 2026-09-25 entry "Worker report-format template": the worker honours it.
 
@@ -1492,3 +1495,120 @@ tool-failure details and the output-format block.
 unmodified. That is safe today because they are always CLI/operator text
 under `--agent worker`, the only agent that runs; it becomes a gap once a
 fleet lead writes `Brief` values from tool-output-adjacent context.
+
+## 2026-09-25 — In-memory ContextStore and the fleet span vocabulary
+
+Issues #23 and #11. The fleet lead passes findings between itself and its
+workers by reference (V2-RESEARCH-AGENT §6), but the session and artifact
+plane of `memory.ContextStore` was bound only to `Noop`, which stores
+nothing. The fleet's span names were not reserved either. This entry
+records the in-process store, the config rules that select it, the
+reserved fleet vocabulary and the Langfuse scrub coverage. No new
+dependency was introduced.
+
+**The store's shape.** `memory.InMemory` implements `ContextStore` in
+process. `Put` addresses content by SHA-256: `Reference.Digest` is
+`sha256:` followed by the lower-case hex digest. The Billet and Alexandria
+adapters carry store-assigned ids rather than digests, so there was no
+existing convention to follow. Artifacts are immutable. Re-putting
+identical content into a namespace returns the same `Reference` and keeps
+the first write's meta. `OpenSession` derives the namespace
+deterministically from the session ID, as `session/<id>`. It refuses an ID
+that is already live with `ErrSessionExists`, so two runs never share a
+namespace. `Put` refuses a namespace that is not a live session with
+`ErrSessionNotOpen`, before it reads the body. The same content put into
+two sessions is two independent artifacts. A reference naming a namespace
+other than the one its content was stored under is `ErrNotFound`, as is a
+reference into a closed or expired session.
+
+**Absolute TTL, lazy sweep.** A session expires at its open time plus
+`SessionRef.TTL`, or plus the store default of two hours when the TTL is
+zero. The default sits above the 60-minute run cap (`config.MaxTimeout`),
+so a live run's session never expires under it. Activity does not extend
+a session, because a sliding TTL would let a busy session outlive its run.
+Expired sessions and their artifacts are swept at the start of every call.
+That suffices for a per-run CLI process and needs no background goroutine;
+a long-lived control plane may want a periodic sweep. `Close` drops the
+session and its artifacts. It is idempotent and ignores context
+cancellation, so a deferred `Close` after a cancelled run still releases
+the memory. A stale handle cannot close a session reopened under the same
+ID.
+
+**Bounds and copies.** `Put` reads at most the per-artifact bound plus one
+byte. The default bound is 4 MiB, far above a finding or a plan. A larger
+body is `ErrArtifactTooLarge`, and nothing is stored. Session IDs are
+bounded at 256 bytes, the same as the Billet adapter's id bound. There is
+no per-session total: the fleet's fan-out cap bounds how many findings one
+run writes. `Get` returns a reader over a private copy and a deep copy of
+the meta, and `Put` copies the caller's labels, so no caller can mutate
+stored state. The store is safe for concurrent use, because workers write
+their findings in parallel.
+
+**Remember and Recall return `ErrNotImplemented`.** V2-PLAN Wave 4 left
+open whether they would be a simple in-memory index or an explicit stub.
+The stub was chosen. Long-term memory belongs to the knowledge-store
+adapters (Billet and Alexandria; see the 2026-09-23 entry "Knowledge
+recall and remember via the memory seam"), and recall is not load-bearing
+for the fleet until Paddock. An in-process index would forget everything
+when the process exits and could rank by little better than substring
+match, so a caller could mistake it for real recall. The new
+`memory.ErrNotImplemented` sits beside `ErrNotFound`, so any binding can
+report a half of the seam it does not provide, and callers can test for
+it with `errors.Is`.
+
+**The fleet requires `inmemory`; `noop` stays the default.**
+`fleet.memory: inmemory` validates again. `noop` remains the default, so
+`config.Default` and every worker and deep-research configuration are
+unchanged. The worker accepts either value and uses neither, because it
+has no session plane; it accepts and ignores the fleet-only fan-out caps
+in the same way. The fleet rejects `noop` with an error that names
+`inmemory` and `--fleet-memory inmemory`. On `noop` every `Put` is
+discarded and every `Get` misses, so the lead could not read back a
+single finding. Rejecting the value was preferred to silently upgrading
+it, so the configuration a pipeline stage emits is the configuration that
+runs. The composition root does not bind `InMemory` yet. `--agent fleet`
+still returns `fleet.ErrNotImplemented` once validation passes, and the
+binding lands with the fleet itself.
+
+**Reserved fleet span vocabulary.** `internal/trace/names.go` reserves
+`decompose`, `delegate`, `synthesise`, `cite` and `control_plane` beside
+`worker`. Beneath the research root, the lead opens one decompose span,
+then one delegate span per dispatched brief with that worker's `worker`
+span as its child, then synthesise and cite. The control-plane span wraps
+the control plane's scheduling of a run. Three attribute keys are
+reserved, in the snake_case style of the worker's existing attributes:
+`worker_id` and `brief_id` on a delegate span, and `brief_count` on the
+decompose span. The worker's literal attributes, the run-core span names
+and the metric names are unchanged. A table test pins every span,
+attribute and metric name to its wire value, so a rename is a deliberate
+test change. A synthetic single-worker trace through the JSONL tracer
+asserts the topology and the attribute keys.
+
+**Langfuse keys are scrubbed by pattern.** A Langfuse key is `pk-lf-` or
+`sk-lf-` followed by a UUID. A lower-case UUID has no upper-case letter,
+so the high-entropy backstop never fired, and `secret.Scrub` passed the
+keys through whole. Two patterns were added. The first matches the whole
+key, case-insensitively and word-boundary anchored, so no UUID group
+survives and a trailing identifier that merely contains the shape is left
+alone. The second scrubs Basic credentials wherever a "Basic" scheme
+token appears, which is how Langfuse's OTLP ingestion sends the key pair.
+That base64 value was caught only by the entropy backstop, and a
+low-entropy key pair encodes below its 4.0-bit bar. The pattern is not
+anchored on an `Authorization` header name: every call site — both
+tracers' `SetAttr`, the scrub handler — scrubs an attribute's key and its
+value as two independent `Scrub` calls, so a header-shaped attribute puts
+"authorization" in the key and "Basic ..." in the value, and an anchor
+spanning both would never fire on the value alone. Instead a
+"Basic"-prefixed candidate is only redacted once it structurally
+base64-decodes to bytes containing `:` (RFC 7617), so ordinary prose such
+as "basic authorization rules apply" still survives. It also covers the
+percent-encoded form of an `OTEL_EXPORTER_OTLP_HEADERS` value; a raw,
+unencoded `user:pass` pair is caught by the Langfuse key pattern instead,
+since each half still starts with `pk-lf-`/`sk-lf-`. The table test
+asserts that neither half of any credential survives, including a
+key/value pair scrubbed as two separate `Scrub` calls with no
+"authorization" in either string. Both tracers already route attribute
+values through `secret.Scrub`, so no tracer changed; a JSONL test proves
+a Langfuse key pair set as span attributes never reaches the trace file,
+and a second JSONL test proves the same for a Basic pair set as a
+header-shaped attribute's value alone.
