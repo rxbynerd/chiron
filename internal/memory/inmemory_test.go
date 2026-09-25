@@ -239,6 +239,26 @@ func TestInMemoryOversizedArtifact(t *testing.T) {
 	}
 }
 
+// errReader's Read always fails, simulating a body that errors mid-read.
+type errReader struct{ err error }
+
+func (e errReader) Read([]byte) (int, error) { return 0, e.err }
+
+// TestInMemoryPutBodyReadError: a body read failure is wrapped, not
+// swallowed, and nothing is stored.
+func TestInMemoryPutBodyReadError(t *testing.T) {
+	s, _ := newTestStore(InMemoryOptions{})
+	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
+
+	wantErr := errors.New("body read boom")
+	if _, err := s.Put(context.Background(), ns, errReader{err: wantErr}, ArtifactMeta{}); !errors.Is(err, wantErr) {
+		t.Fatalf("Put err = %v, want it wrapping %v", err, wantErr)
+	}
+	if n := len(s.sessions[ns].artifacts); n != 0 {
+		t.Errorf("session holds %d artifacts after a failed read, want 0", n)
+	}
+}
+
 // TestInMemoryPutRequiresLiveSession: a namespace that is not an open
 // session is rejected before the body is read.
 func TestInMemoryPutRequiresLiveSession(t *testing.T) {
@@ -269,6 +289,40 @@ func TestInMemoryPutRequiresLiveSession(t *testing.T) {
 
 	if _, err := s.Put(context.Background(), "session/x", nil, ArtifactMeta{}); err == nil {
 		t.Error("Put accepted a nil body")
+	}
+}
+
+// closingReader closes sess on its first Read, simulating a session
+// closed while a Put targeting it has already passed the initial
+// liveSession check and is mid-way through reading its body.
+type closingReader struct {
+	r    io.Reader
+	sess Session
+}
+
+func (c *closingReader) Read(p []byte) (int, error) {
+	if c.sess != nil {
+		sess := c.sess
+		c.sess = nil
+		if err := sess.Close(context.Background()); err != nil {
+			return 0, err
+		}
+	}
+	return c.r.Read(p)
+}
+
+// TestInMemoryPutRaceWithSessionClose: a session closed while Put's body
+// read is in flight is caught by Put's re-check under the lock, so the
+// write lands ErrSessionNotOpen instead of writing into (or panicking on)
+// the now-nil artifacts map.
+func TestInMemoryPutRaceWithSessionClose(t *testing.T) {
+	s, _ := newTestStore(InMemoryOptions{})
+	sess := mustOpen(t, s, SessionRef{ID: "run-1"})
+	ns := sess.Namespace()
+
+	src := &closingReader{r: strings.NewReader("body"), sess: sess}
+	if _, err := s.Put(context.Background(), ns, src, ArtifactMeta{}); !errors.Is(err, ErrSessionNotOpen) {
+		t.Fatalf("Put err = %v, want ErrSessionNotOpen", err)
 	}
 }
 
