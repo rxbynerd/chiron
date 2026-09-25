@@ -34,10 +34,12 @@ const maxGapDetailBytes = 512
 // maxStitchedHeadingRunes bounds a heading in the stitched fallback body.
 const maxStitchedHeadingRunes = 200
 
-// findingReadTimeout bounds reading one finding back. The read is detached
-// from the run's cancellation, because a finding is paid for whether or not
-// the run is still wanted, and the fallback body needs it.
-const findingReadTimeout = 10 * time.Second
+// findingsReadTimeout bounds reading every brief's finding back, all reads
+// together, so a slow store holds synthesis for at most this long however
+// many briefs there are. The reads are detached from the run's
+// cancellation, because a finding is paid for whether or not the run is
+// still wanted, and the fallback body needs it.
+const findingsReadTimeout = 10 * time.Second
 
 // collectedFinding is a finding the lead read back for synthesis: it has
 // text, did not fail, and its stored identity matches the brief that
@@ -162,10 +164,13 @@ func (l *lead) synthesiseInSpan(ctx context.Context, query string, plan leadPlan
 }
 
 // collectFindings reads every brief's finding back by reference, never from
-// an in-process copy. A brief whose finding reads back from the run's
-// session, names the worker and brief the pool reported for it, did not fail
-// and has text is collected; every other brief is a gap with its reason.
+// an in-process copy, under one findingsReadTimeout deadline shared by all
+// the reads. A brief whose finding reads back from the run's session, names
+// the worker and brief the pool reported for it, did not fail and has text
+// is collected; every other brief is a gap with its reason.
 func (l *lead) collectFindings(ctx context.Context, plan leadPlan, pooled poolResult) findingSet {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.deps.findingsReadDeadline())
+	defer cancel()
 	objectives := make(map[string]string, len(plan.Briefs))
 	for _, pb := range plan.Briefs {
 		objectives[pb.ID] = pb.Brief.Objective
@@ -182,7 +187,8 @@ func (l *lead) collectFindings(ctx context.Context, plan leadPlan, pooled poolRe
 	return set
 }
 
-// readBack returns r's stored finding, or the reason it yields none.
+// readBack returns r's stored finding, or the reason it yields none. No read
+// starts once ctx has ended.
 func (l *lead) readBack(ctx context.Context, r briefResult) (Finding, string) {
 	switch {
 	case r.Disposition != dispositionRan:
@@ -191,9 +197,9 @@ func (l *lead) readBack(ctx context.Context, r briefResult) (Finding, string) {
 		return Finding{}, orDefault(r.Detail, "the finding was not stored")
 	case r.Ref.Namespace != l.deps.Namespace:
 		return Finding{}, "the finding's reference is outside the run's session"
+	case ctx.Err() != nil:
+		return Finding{}, "the read-back deadline passed before the finding was read"
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), findingReadTimeout)
-	defer cancel()
 	sf, err := readFinding(ctx, l.deps.Store, r.Ref)
 	if err != nil {
 		return Finding{}, "the finding could not be read back: " + err.Error()
