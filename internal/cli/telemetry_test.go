@@ -649,3 +649,110 @@ func TestMalformedOTLPHeaderEnvStaysOffProcessStderr(t *testing.T) {
 		})
 	}
 }
+
+// operatorHeaders is a deployment's OTLP header variable: a credential for
+// the collector the environment names.
+const operatorHeaders = "x-honeycomb-team=operator-team-key"
+
+// TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector: the environment's
+// headers reach the collector the environment names and are replaced on
+// the Langfuse path; beside an explicit OTLP endpoint, newTracer refuses
+// to bind rather than send them there.
+func TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector(t *testing.T) {
+	for _, name := range otlpHeaderEnv {
+		t.Run("explicit endpoint refused/"+name, func(t *testing.T) {
+			collector := &otlpCollector{}
+			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
+			defer srv.Close()
+			isolateOTLPEnv(t)
+			t.Setenv(name, operatorHeaders)
+
+			_, shutdown, err := newTracer(context.Background(), config.TelemetryConfig{OTLPEndpoint: srv.URL}, io.Discard)
+			if err == nil {
+				_ = shutdown(context.Background())
+				t.Fatal("newTracer bound an explicit endpoint beside an OTLP header variable")
+			}
+			if !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), "operator-team-key") {
+				t.Errorf("err = %v, want it to name %s without its value", err, name)
+			}
+			if n := len(collector.recorded()); n != 0 {
+				t.Errorf("the explicit endpoint received %d requests", n)
+			}
+		})
+
+		t.Run("environment collector receives them/"+name, func(t *testing.T) {
+			collector := &otlpCollector{}
+			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
+			defer srv.Close()
+			isolateOTLPEnv(t)
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", srv.URL)
+			t.Setenv(name, operatorHeaders)
+
+			exportOneSpan(t, config.TelemetryConfig{})
+
+			got := collector.recorded()
+			if len(got) == 0 {
+				t.Fatal("no span reached the environment's collector")
+			}
+			for _, r := range got {
+				if v := r.header.Get("X-Honeycomb-Team"); v != "operator-team-key" {
+					t.Errorf("x-honeycomb-team = %q, want the environment's value", v)
+				}
+			}
+		})
+
+		t.Run("langfuse replaces them/"+name, func(t *testing.T) {
+			langfuse := &otlpCollector{}
+			srv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
+			defer srv.Close()
+			t.Setenv("LANGFUSE_PUBLIC_KEY", testLangfusePublic)
+			t.Setenv("LANGFUSE_SECRET_KEY", testLangfuseSecret)
+			isolateOTLPEnv(t)
+			t.Setenv(name, operatorHeaders)
+
+			exportOneSpan(t, langfuseTelemetry(srv.URL+"/api/public/otel"))
+
+			got := langfuse.recorded()
+			if len(got) == 0 {
+				t.Fatal("no span reached the Langfuse collector")
+			}
+			basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
+			for _, r := range got {
+				if v := r.header.Get("Authorization"); v != "Basic "+basic {
+					t.Errorf("Authorization = %q, want Basic base64(public:secret)", v)
+				}
+				if v := r.header.Get("X-Honeycomb-Team"); v != "" {
+					t.Errorf("x-honeycomb-team = %q reached Langfuse", v)
+				}
+			}
+		})
+	}
+}
+
+// TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend: through the command
+// path, --otlp-endpoint beside an OTLP header variable stops the run
+// before any model, search or collector request, without echoing the
+// header.
+func TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend(t *testing.T) {
+	collector := &otlpCollector{}
+	collectorSrv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
+	defer collectorSrv.Close()
+	searchSrv := search.NewFakeServer(nil)
+	defer searchSrv.Close()
+	modelSrv := model.NewFakeServer()
+	defer modelSrv.Close()
+	t.Setenv("MODEL_KEY", testModelKey)
+	isolateOTLPEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", operatorHeaders)
+
+	_, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "none", "--otlp-endpoint", collectorSrv.URL)...)
+	if err == nil || !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_HEADERS") {
+		t.Fatalf("err = %v, want a refusal naming OTEL_EXPORTER_OTLP_HEADERS", err)
+	}
+	if strings.Contains(err.Error(), "operator-team-key") || strings.Contains(stderr, "operator-team-key") {
+		t.Error("the header value leaked")
+	}
+	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(collector.recorded()) != 0 {
+		t.Error("a refused run must not dial any endpoint")
+	}
+}

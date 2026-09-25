@@ -47,6 +47,18 @@ func otlpEnv(name string) string {
 	return strings.TrimSpace(os.Getenv(name))
 }
 
+// checkNoOTLPHeaderEnv refuses an explicit OTLP endpoint while a header
+// variable is set: those headers are credentials for the collector the
+// environment names, and the exporter would send them to any endpoint.
+func checkNoOTLPHeaderEnv() error {
+	for _, name := range otlpHeaderEnv {
+		if otlpEnv(name) != "" {
+			return fmt.Errorf("telemetry.otlp_endpoint: %s is set; environment headers go only to the collector the environment names (unset it, or name that collector with OTEL_EXPORTER_OTLP_ENDPOINT instead)", name)
+		}
+	}
+	return nil
+}
+
 // checkOTLPHeaderEnv refuses a header variable the OTLP exporter cannot
 // parse, applying the exporter's grammar: comma-separated name=value
 // entries with a token name and a URL-escaped value. The exporter logs a
