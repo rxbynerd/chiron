@@ -128,10 +128,12 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 // in-process worker researcher from cfg.Fleet, then drive the unchanged run
 // core. The deep-research levers (--plan, --budget and the Gemini tool
 // flags) are rejected by config validation for this agent rather than
-// ignored; the worker's spend bounds are the fleet caps.
+// ignored; the worker's spend bounds are the fleet caps. Per-turn progress
+// reaches the transport as worker_turn deltas unless --quiet.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig) error {
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
-		res, err := buildWorker(ctx, cfg, deps.Tracer, stderr)
+		progress := bindWorkerProgress(cfg.Stream, deps.Transport)
+		res, err := buildWorker(ctx, cfg, deps.Tracer, stderr, progress)
 		if err != nil {
 			return err
 		}
@@ -158,8 +160,8 @@ const fetchMaxContentBytes = 1 << 20
 // or key is missing or unresolvable, so a misconfigured worker never emits a
 // resume handle for a run that cannot proceed. WorkerTimeout bounds the whole
 // run and each model, search and knowledge call; fetch has its own tighter
-// per-call bound.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer) (*fleet.Worker, error) {
+// per-call bound. progress, when non-nil, receives the per-turn reports.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (*fleet.Worker, error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
 		return nil, errors.New("research --agent worker: fleet.model_endpoint is required")
@@ -244,6 +246,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, tracer trace.Tr
 		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
 		Tracer:             tracer,
 		Logger:             slog.New(secret.NewScrubHandler(slog.NewTextHandler(stderr, nil))),
+		Progress:           progress,
 		Caps: fleet.Caps{
 			MaxTurns:         fc.MaxTurns,
 			MaxTokens:        fc.MaxTokens,
@@ -483,6 +486,55 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 		// degraded to polling — without it, an operator watching the
 		// event stream cannot tell a connectivity failure from --quiet.
 		payload, err := json.Marshal(deltaPayload{Type: "stream_degraded", Text: "streaming failed repeatedly; awaiting by polling"})
+		if err != nil {
+			return
+		}
+		_ = tr.Emit(ctx, transport.Event{Kind: transport.KindDelta, Payload: payload})
+	}
+}
+
+// workerTurnPayload is the delta payload for one worker progress report: the
+// type and text every delta carries, plus the report's fields.
+type workerTurnPayload struct {
+	Type             string  `json:"type"`
+	Text             string  `json:"text"`
+	Turn             int     `json:"turn"`
+	MaxTurns         int     `json:"max_turns"`
+	Action           string  `json:"action"`
+	Detail           string  `json:"detail"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	EstimatedCostGBP float64 `json:"estimated_cost_gbp"`
+}
+
+// bindWorkerProgress routes the worker's per-turn progress onto the run's
+// transport as delta events typed worker_turn: the worker's counterpart of
+// bindThoughtDisplay, switched off with it by --quiet (nil when !stream).
+// text is a self-contained line because the proto Delta carries only text.
+// Emission is best effort: a marshal or emit failure is dropped.
+func bindWorkerProgress(stream bool, tr transport.Transport) func(context.Context, fleet.Progress) {
+	if !stream {
+		return nil
+	}
+	return func(ctx context.Context, p fleet.Progress) {
+		// The worker scrubs Detail; every output path scrubs again.
+		detail := secret.Scrub(p.Detail)
+		text := fmt.Sprintf("turn %d/%d: %s", p.Turn, p.MaxTurns, p.Action)
+		if detail != "" {
+			text += " " + detail
+		}
+		text += fmt.Sprintf(" (%d tokens so far)", p.InputTokens+p.OutputTokens)
+		payload, err := json.Marshal(workerTurnPayload{
+			Type:             "worker_turn",
+			Text:             secret.Scrub(text),
+			Turn:             p.Turn,
+			MaxTurns:         p.MaxTurns,
+			Action:           p.Action,
+			Detail:           detail,
+			InputTokens:      p.InputTokens,
+			OutputTokens:     p.OutputTokens,
+			EstimatedCostGBP: p.EstimatedCostGBP,
+		})
 		if err != nil {
 			return
 		}
