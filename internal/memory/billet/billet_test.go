@@ -2,6 +2,7 @@ package billet_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -533,6 +534,39 @@ func TestNewValidatesEndpoint(t *testing.T) {
 				t.Errorf("error echoed the credentials: %v", err)
 			}
 		})
+	}
+}
+
+func TestSessionReusedAndClosed(t *testing.T) {
+	// Recall and Remember share the client's one session, which Close ends.
+	fake := billettest.NewFakeServer([]billettest.Record{{MemoryID: "m-1", Content: "x"}}, billettest.WithSessionID("sess-billet"))
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	if _, err := c.Recall(context.Background(), "", memory.Query{Text: "q"}); err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if _, err := c.Remember(context.Background(), "", memory.Memory{Text: "x"}); err != nil {
+		t.Fatalf("Remember: %v", err)
+	}
+	if n := fake.InitializeCount(); n != 1 {
+		t.Errorf("initialize count = %d, want 1", n)
+	}
+	for range 2 {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}
+	if n := fake.DeleteCount(); n != 1 {
+		t.Fatalf("DELETE count = %d, want 1", n)
+	}
+	reqs := fake.Requests()
+	if end := reqs[len(reqs)-1]; end.HTTPMethod != http.MethodDelete || end.SessionID != "sess-billet" {
+		t.Errorf("last request = %s on %q, want the session DELETE", end.HTTPMethod, end.SessionID)
+	}
+	_, err := c.Recall(context.Background(), "", memory.Query{Text: "q"})
+	if !errors.Is(err, mcpclient.ErrClosed) || !strings.HasPrefix(err.Error(), "billet: search_memory: ") {
+		t.Errorf("Recall after Close = %v, want ErrClosed under the billet prefix", err)
 	}
 }
 

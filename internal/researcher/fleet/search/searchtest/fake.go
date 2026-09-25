@@ -83,14 +83,26 @@ func (f *FakeServer) Close() { f.inner.Close() }
 func (f *FakeServer) Requests() []FakeRequest { return f.inner.Requests() }
 
 // CallCount reports how many requests the fake has received across the whole
-// flow: initialize + initialized + tools/call = 3 for one successful Search,
-// plus the closing DELETE when the fake issues a session.
+// flow: initialize + initialized + tools/call = 3 for a Client's first Search
+// and 1 for each later one, plus the DELETE on Close when the fake issues a
+// session.
 func (f *FakeServer) CallCount() int { return f.inner.CallCount() }
 
 // ToolCallCount reports how many tools/call requests the fake has received —
 // the count that must be exactly 1 per Search to prove the billable call is
 // not retried.
 func (f *FakeServer) ToolCallCount() int { return f.inner.ToolCallCount() }
+
+// InitializeCount reports the initialize requests received: 1 per Client
+// lifetime unless a session ended.
+func (f *FakeServer) InitializeCount() int { return f.inner.InitializeCount() }
+
+// DeleteCount reports the session DELETE requests received.
+func (f *FakeServer) DeleteCount() int { return f.inner.DeleteCount() }
+
+// ExpireSession ends every session the fake has issued, so the next request
+// bearing one gets HTTP 404.
+func (f *FakeServer) ExpireSession() { f.inner.ExpireSession() }
 
 // answer serialises the scripted results into the assumed tool result shape:
 // a text content block whose text is the results document.
