@@ -507,6 +507,9 @@ func TestPoolCancellationStopsEveryWorker(t *testing.T) {
 	go func() { done <- p.run(ctx, poolBriefs(5), nil) }()
 
 	waitFor(t, "two workers in flight", func() bool { return requests.Load() == 2 })
+	if n := poolGoroutines(); n == 0 {
+		t.Fatal("no pool goroutine is running before cancellation; the later zero-goroutine check would be vacuous")
+	}
 	cancel()
 	var res poolResult
 	select {
