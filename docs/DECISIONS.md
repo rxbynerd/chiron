@@ -1862,20 +1862,20 @@ researcher that calls it lands. No new dependency was introduced.
 **Findings are read back by reference.** Before synthesis, the lead reads
 each finding from the store through `readFinding`, never from the pool's
 in-memory result, so a report is written from the same record a recovered
-run would see. A
-finding is used only when its reference lies in the run's own session, its
-stored worker and brief ids match the brief that produced it, it did not
-fail, and it has text. Every other planned brief becomes a gap with one
-reason: dropped, not started, not stored, unreadable, mismatched, failed or
-empty. The reason is scrubbed, defanged and bounded to 512 bytes. The reads
-are detached from the run's cancellation, as the pool's writes are, because
-a cancelled run's findings are already paid for and the fallback body needs
-them. They run one after another under a single ten-second deadline for all
-of them, not one per read, so a slow store holds synthesis for at most ten
-seconds however many briefs there are. No read starts once the deadline has
-passed; each brief left unread is a gap. The reads stay sequential rather
-than parallel because five reads from the in-process store take
-microseconds, and one deadline bounds a networked store just as well.
+run would see. A finding is used only when its reference lies in the run's
+own session, its stored worker and brief ids match the brief that produced
+it, it did not fail, and it has text. Every other planned brief becomes a
+gap with one reason: dropped, not started, not stored, unreadable,
+mismatched, failed or empty. The reason is scrubbed, defanged and bounded to
+512 bytes. The reads are detached from the run's cancellation, as the
+pool's writes are, because a cancelled run's findings are already paid for
+and the fallback body needs them. They run one after another under a single
+ten-second deadline for all of them, not one per read, so a slow store
+holds synthesis for at most ten seconds however many briefs there are. No
+read starts once the deadline has passed; each brief left unread is a gap.
+The reads stay sequential rather than parallel because five reads from the
+in-process store take microseconds, and one deadline bounds a networked
+store just as well.
 
 **Each finding has a fixed budget in the prompt.** The synthesis user
 message carries the question between the question markers, then each
@@ -1946,6 +1946,12 @@ introduce a variant of a URL no worker fetched. Every other URL is dropped
 and counted as `dropped_citations` on the span. Kept citations are
 deduplicated in first attribution order and carry the worker's title,
 cleaned by `citationTitle`, never a title from the model.
+The pass falls back to the deduplicated union of every worker citation, and
+is Incomplete, on a failed call, a reply that is cut off, filtered or
+invalid, or a reply that attributes no worker source. Claims are not
+rendered: the report's sources section lists citations only. When no worker
+cited anything there is nothing to attribute, so no call and no span are
+made.
 
 **Left-out sources are counted, not policed.** Any non-empty attributed
 subset completes the pass, so an injected finding could steer the model to
@@ -1956,12 +1962,6 @@ worker citation. The count only makes such a shrink visible in the trace.
 It changes no status, and there is no coverage threshold, because a report
 that rests on a few of many consulted sources is ordinary, and a threshold
 would mark it Incomplete.
-The pass falls back to the deduplicated union of every worker citation, and
-is Incomplete, on a failed call, a reply that is cut off, filtered or
-invalid, or a reply that attributes no worker source. Claims are not
-rendered: the report's sources section lists citations only. When no worker
-cited anything there is nothing to attribute, so no call and no span are
-made.
 
 **Status rules.** A run is Completed only when every planned brief yielded a
 completed finding and synthesis and the citation pass both completed. It is
@@ -1980,11 +1980,11 @@ fleet reports. It is the workers' summed usage, which already carries their
 searches, recalls and cost, plus the tokens of the lead's decompose,
 synthesis and citation calls. The lead's tokens are priced once, on their
 sum, at the per-million-token prices the workers use: `leadDeps` takes them
-from `Caps`, and `costGBP` is shared with the worker loop. The model
-client clamps a negative token count from the provider to zero, so a
-provider's accounting cannot offset the rest of the run's spend. Nothing in
-the fleet emits a metric. As with the single worker, spans carry per-call spend
-as attributes, and the run core records the run-level metrics once from the
+from `Caps`, and `costGBP` is shared with the worker loop. The model client
+clamps a negative token count from the provider to zero, so a provider's
+accounting cannot offset the rest of the run's spend. Nothing in the fleet
+emits a metric. As with the single worker, spans carry per-call spend as
+attributes, and the run core records the run-level metrics once from the
 returned `Usage`. A test runs a synthetic fleet end to end and checks that
 the `Usage` equals the delegate spans' totals plus the lead spans' tokens,
 with no metric line in the trace.
