@@ -464,6 +464,31 @@ func TestSynthesiseFailureFallsBackToFindings(t *testing.T) {
 	}
 }
 
+// longErrorReply is a failed call whose error body is far over
+// maxDetailBytes.
+func longErrorReply() modeltest.FakeReply {
+	return modeltest.FakeReply{
+		Status:     http.StatusInternalServerError,
+		StatusBody: `{"error":{"message":"` + strings.Repeat("upstream trouble ", 3*maxDetailBytes/17) + `"}}`,
+	}
+}
+
+// TestSynthesiseFallbackDetailIsBounded: a fallback reason far over the
+// bound is cut so the whole detail, the fallback note included, fits
+// maxDetailBytes and still ends in the note.
+func TestSynthesiseFallbackDetailIsBounded(t *testing.T) {
+	modelSrv := modeltest.NewFakeServer(longErrorReply())
+	defer modelSrv.Close()
+	l, store, ns := synthesisLead(t, modelSrv, nil)
+	plan, pooled := storedRun(t, store, ns, completedFinding(1))
+
+	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
+	if len(res.Detail) > maxDetailBytes || !strings.Contains(res.Detail, truncatedMarker) ||
+		!strings.HasSuffix(res.Detail, "; the report is the worker findings, stitched unedited") {
+		t.Errorf("detail is %d bytes, want the reason cut to fit %d with the note kept: %q", len(res.Detail), maxDetailBytes, res.Detail)
+	}
+}
+
 // TestSynthesiseCutOffKeepsBody: a reply cut off at the completion cap keeps
 // its sanitised body, Incomplete, with the cap in the detail.
 func TestSynthesiseCutOffKeepsBody(t *testing.T) {
