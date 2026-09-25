@@ -59,11 +59,10 @@ func clearEndpointEnv(t *testing.T) {
 	}
 }
 
-// TestBaseConfigEndpointRefusedBeforeAnySecretResolves: a base config naming
-// a fleet endpoint beside its key reference is refused however the base
-// arrives, even when a flag sets the same endpoint, and the resolver is never
-// invoked nor any endpoint dialled. The flags alone would make a complete
-// worker run, so only the provenance check stops it.
+// TestBaseConfigEndpointRefusedBeforeAnySecretResolves: a base naming a fleet
+// endpoint and its key reference is refused however it arrives, even with the
+// same endpoint on a flag, before the resolver runs or anything is dialled.
+// The flags alone make a complete worker run.
 func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 	modelSrv := modeltest.NewFakeServer(finalReply)
 	defer modelSrv.Close()

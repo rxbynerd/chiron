@@ -39,10 +39,9 @@ func FleetEndpoints(f *FleetConfig) []FleetEndpoint {
 }
 
 // DecodeBase decodes a base config (a --config file or piped stdin) like
-// Decode, and refuses one that names any fleet endpoint whatever its agent,
-// since a later flag may select worker or fleet. Flags overlay the base
-// afterwards, so a flag that sets the same endpoint does not make the base
-// acceptable. The error never echoes the value.
+// Decode and refuses one naming any fleet endpoint, whatever its agent. Flags
+// overlay the base afterwards, so a flag setting the same endpoint cannot
+// rescue it. The error never echoes the value.
 func DecodeBase(r io.Reader) (ResearchConfig, error) {
 	cfg, err := Decode(r)
 	if err != nil {

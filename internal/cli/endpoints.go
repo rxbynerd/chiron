@@ -13,13 +13,10 @@ import (
 	"github.com/rxbynerd/chiron/internal/transport"
 )
 
-// applyEndpointEnv fills each fleet endpoint whose flag was not set from its
-// CHIRON_FLEET_*_ENDPOINT variable, validated with httpx.ParseEndpoint; the
-// error names the variable, never its value. An explicitly set flag wins over
-// the variable. The knowledge variable is read only when a knowledge
-// provider is configured, so a deployment may export it for runs that do not
-// recall. A base config cannot carry an endpoint (config.DecodeBase), so
-// afterwards every endpoint came from a flag or the environment.
+// applyEndpointEnv fills each fleet endpoint whose flag is unset from its
+// CHIRON_FLEET_*_ENDPOINT variable; a set flag wins. The knowledge variable
+// is read only with a knowledge provider. Errors name the variable, never
+// the value.
 func applyEndpointEnv(fc *config.FleetConfig, flags *pflag.FlagSet) error {
 	for _, e := range config.FleetEndpoints(fc) {
 		if flags.Changed(e.Flag) {
