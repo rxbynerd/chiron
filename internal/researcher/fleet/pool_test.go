@@ -1184,3 +1184,109 @@ func TestPoolDropsAnUnroutableBrief(t *testing.T) {
 		t.Errorf("model requests = %d, want 2", n)
 	}
 }
+
+// panicTarget is a test-only route whose dispatch panics, used to prove one
+// brief's panic cannot take a sibling brief, or the pool itself, down with
+// it.
+const panicTarget Target = "test-panics"
+
+// TestPoolWorkerPanicIsolatesItsBrief: a panic inside one brief's dispatch is
+// recovered in that brief's own goroutine. The panicking brief becomes
+// Failed with a fixed, bounded detail that never echoes the recovered
+// value, its delegate span ends with an error, and its Failed finding is
+// still stored so the brief is accounted for. A sibling brief already in
+// flight when the panic happens keeps running to completion afterwards, and
+// its own finding is stored intact.
+func TestPoolWorkerPanicIsolatesItsBrief(t *testing.T) {
+	const leaked = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+	siblingStarted := make(chan struct{})
+	releaseSibling := make(chan struct{})
+
+	routes := router{
+		TargetExternalWeb: func(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) Finding {
+			close(siblingStarted)
+			<-releaseSibling
+			return Finding{Status: types.StatusCompleted, Text: "sibling answer"}
+		},
+		panicTarget: func(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}) Finding {
+			<-siblingStarted
+			panic(leaked)
+		},
+	}
+
+	modelSrv := modeltest.NewFakeServer()
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+	panicStored := store.watch("brief-2")
+
+	var out bytes.Buffer
+	deps := poolWorkerDeps(t, newModelClient(t, modelSrv), searchSrv)
+	deps.Tracer = trace.NewJSONL(&out)
+	p := mustPool(t, poolDeps{
+		Worker:      deps,
+		Routes:      routes,
+		Store:       store,
+		Namespace:   ns,
+		MaxWorkers:  2,
+		Concurrency: 2,
+	})
+
+	briefs := poolBriefs(2)
+	briefs[1].Target = panicTarget
+
+	done := make(chan poolResult, 1)
+	go func() { done <- p.run(context.Background(), briefs, nil) }()
+
+	select {
+	case <-panicStored:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the panicking brief's finding was never stored")
+	}
+	close(releaseSibling)
+
+	var res poolResult
+	select {
+	case res = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pool did not return after the sibling was released")
+	}
+
+	panicked := res.Briefs[1]
+	if panicked.Disposition != dispositionRan || panicked.Status != types.StatusFailed || panicked.Ref.Digest == "" {
+		t.Fatalf("panicking result = %+v, want a stored, failed run", panicked)
+	}
+	if panicked.Detail != panicRecoveryDetail {
+		t.Errorf("panicking result detail = %q, want the fixed generic detail %q", panicked.Detail, panicRecoveryDetail)
+	}
+	if strings.Contains(panicked.Detail, leaked) {
+		t.Errorf("panicking result detail %q echoes the recovered value", panicked.Detail)
+	}
+
+	sibling := res.Briefs[0]
+	if sibling.Disposition != dispositionRan || sibling.Status != types.StatusCompleted || sibling.Ref.Digest == "" {
+		t.Fatalf("sibling result = %+v, want a stored, completed run unaffected by its sibling's panic", sibling)
+	}
+	got, err := readFinding(context.Background(), store, sibling.Ref)
+	if err != nil || got.Finding.Text != "sibling answer" {
+		t.Errorf("sibling finding = %+v, err %v; want the sibling's own answer intact", got, err)
+	}
+
+	if strings.Contains(out.String(), leaked) {
+		t.Errorf("the recovered value reached the trace:\n%s", out.String())
+	}
+	delegates := spansNamed(t, out.String(), trace.SpanDelegate)
+	var panicSpan *traceSpan
+	for i := range delegates {
+		if fmt.Sprint(delegates[i].Attrs[trace.AttrBriefID]) == "brief-2" {
+			panicSpan = &delegates[i]
+		}
+	}
+	if panicSpan == nil {
+		t.Fatalf("no delegate span for the panicking brief:\n%s", out.String())
+	}
+	if panicSpan.Error == "" || panicSpan.Attrs["status"] != "failed" {
+		t.Errorf("panicking delegate span = %+v, want it to end with an error", panicSpan)
+	}
+}
