@@ -1859,9 +1859,10 @@ status, detail and single `Usage` from both passes. None of it is wired to
 `--agent fleet` yet: `Fleet` still returns `ErrNotImplemented` until the
 researcher that calls it lands. No new dependency was introduced.
 
-**Findings are read back by reference.** Synthesis reads each finding from
-the store through `readFinding`, never from the pool's in-memory result, so
-a report is written from the same record a recovered run would see. A
+**Findings are read back by reference.** Before synthesis, the lead reads
+each finding from the store through `readFinding`, never from the pool's
+in-memory result, so a report is written from the same record a recovered
+run would see. A
 finding is used only when its reference lies in the run's own session, its
 stored worker and brief ids match the brief that produced it, it did not
 fail, and it has text. Every other planned brief becomes a gap with one
@@ -1915,6 +1916,19 @@ together unedited, under a note and one heading per finding, and
 sanitised, so no paid finding is lost to a lead failure. The citation pass
 is skipped, and the sources are the union of the worker citations. With no
 finding collected, no call is made and the run fails.
+
+**A panicking lead pass cannot take the process down.** `conclude` reads
+the findings back as its own step before synthesis. It recovers a panic in
+any of its passes, as the pool recovers a panicking worker. The outcome is
+then the findings already read back, stitched, with the union of the worker
+citations, Incomplete. It does not depend on how far the passes got. The
+detail is a fixed sentence and never echoes the recovered value, which can
+carry request or response content. With no finding read back, the run is
+Failed with no body. The `Usage` counts the tokens of each lead call whose
+pass returned before the panic; a call cut short by the panic is not
+counted, as with a recovered worker. A store read that panics is recovered
+on its own, so that brief becomes a gap ("the store panicked") and the
+other briefs' findings are still read back.
 
 **Citations are a subset of what the workers cited.** The citation pass is
 one structured call under a `cite` span, never retried. It sees the report

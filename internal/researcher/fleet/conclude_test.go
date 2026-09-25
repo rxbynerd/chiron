@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -340,6 +341,172 @@ func TestConcludeBodyCannotHideTheSources(t *testing.T) {
 			}
 		})
 	}
+}
+
+// panicValueKey is the credential a fault-injecting fake panics with, so a
+// test can check the recovered value never reaches a detail or trace.
+const panicValueKey = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+
+// panickingTracer panics when a span named panicOn starts, standing in for
+// a faulty tracer inside a lead pass; every other span is discarded.
+type panickingTracer struct {
+	trace.Noop
+	panicOn string
+}
+
+func (p panickingTracer) StartSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	if name == p.panicOn {
+		panic("tracer failure for key " + panicValueKey)
+	}
+	return p.Noop.StartSpan(ctx, name)
+}
+
+// panickingStore panics on every Get of a reference in panicOn.
+type panickingStore struct {
+	memory.ContextStore
+	panicOn map[memory.Reference]bool
+}
+
+func (s panickingStore) Get(ctx context.Context, ref memory.Reference) (io.ReadCloser, memory.ArtifactMeta, error) {
+	if s.panicOn[ref] {
+		panic("store failure for key " + panicValueKey)
+	}
+	return s.ContextStore.Get(ctx, ref)
+}
+
+// TestConcludeRecoversALeadPassPanic: a panic in a lead pass does not reach
+// the caller. The outcome keeps every finding read back, stitched, with
+// every worker citation, Incomplete, under a fixed detail that never echoes
+// the recovered value, and counts the tokens of each lead call that
+// returned; with no finding read back it is Failed with no body.
+func TestConcludeRecoversALeadPassPanic(t *testing.T) {
+	planUsage := types.Usage{InputTokens: 400, OutputTokens: 250}
+	failed := Finding{Status: types.StatusFailed, Detail: "model turn failed", Turns: 1}
+	for _, tt := range []struct {
+		name       string
+		panicOn    string
+		findings   []Finding
+		replies    []modeltest.FakeReply
+		wantStatus types.Status
+		wantCalls  int
+		wantBody   bool
+		wantDetail string
+		leadTokens int
+	}{
+		{
+			name:       "the synthesise span",
+			panicOn:    trace.SpanSynthesise,
+			findings:   []Finding{completedFinding(1, citeURLA), completedFinding(2, citeURLB)},
+			wantStatus: types.StatusIncomplete,
+			wantBody:   true,
+			wantDetail: leadPanicDetail + leadPanicFallback,
+		},
+		{
+			name:       "the cite span, after a paid synthesis",
+			panicOn:    trace.SpanCite,
+			findings:   []Finding{completedFinding(1, citeURLA), completedFinding(2, citeURLB)},
+			replies:    []modeltest.FakeReply{synthesisReply("# Synthesised report")},
+			wantStatus: types.StatusIncomplete,
+			wantCalls:  1,
+			wantBody:   true,
+			wantDetail: leadPanicDetail + leadPanicFallback,
+			leadTokens: synthesisUsage.InputTokens,
+		},
+		{
+			name:       "the synthesise span with no finding",
+			panicOn:    trace.SpanSynthesise,
+			findings:   []Finding{failed, failed},
+			wantStatus: types.StatusFailed,
+			wantDetail: leadPanicDetail,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(tt.replies...)
+			defer modelSrv.Close()
+			store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+			l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: store, Namespace: ns, Tracer: panickingTracer{panicOn: tt.panicOn}})
+			plan, pooled := storedRun(t, store, ns, tt.findings...)
+
+			out := l.conclude(context.Background(), testQuery, plan, planUsage, pooled)
+			if out.Status != tt.wantStatus || out.Detail != tt.wantDetail {
+				t.Errorf("outcome = %s %q, want %s %q", out.Status, out.Detail, tt.wantStatus, tt.wantDetail)
+			}
+			if n := modelSrv.CallCount(); n != tt.wantCalls {
+				t.Errorf("model calls = %d, want %d", n, tt.wantCalls)
+			}
+			collected := []collectedFinding{}
+			for i, f := range tt.findings {
+				if f.Status != types.StatusFailed {
+					collected = append(collected, collectedFinding{BriefID: plan.Briefs[i].ID, Objective: plan.Briefs[i].Brief.Objective, Finding: f})
+				}
+			}
+			wantBody := ""
+			if tt.wantBody {
+				wantBody = stitchFindings(collected)
+			}
+			if out.Body != wantBody {
+				t.Errorf("body = %q, want %q", out.Body, wantBody)
+			}
+			if want := workerCitations(collected); !reflect.DeepEqual(out.Citations, want) {
+				t.Errorf("citations = %+v, want every worker citation %+v", out.Citations, want)
+			}
+			if want := pooled.Usage.InputTokens + planUsage.InputTokens + tt.leadTokens; out.Usage.InputTokens != want {
+				t.Errorf("input tokens = %d, want %d from the workers, the plan and each lead call that returned", out.Usage.InputTokens, want)
+			}
+			if strings.Contains(out.Detail, panicValueKey) || strings.Contains(out.Body, panicValueKey) {
+				t.Errorf("the recovered value reached the outcome: %+v", out)
+			}
+		})
+	}
+}
+
+// TestConcludeRecoversAStoreReadPanic: a store that panics reading one
+// brief's finding back makes that brief a gap with a fixed reason; the other
+// findings are still read back and synthesised, and a store that panics on
+// every read leaves a Failed run with no model call.
+func TestConcludeRecoversAStoreReadPanic(t *testing.T) {
+	t.Run("one read", func(t *testing.T) {
+		modelSrv := modeltest.NewFakeServer(synthesisReply("# Report"), citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t)))
+		defer modelSrv.Close()
+		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+		plan, pooled := storedRun(t, store, ns, completedFinding(1, citeURLA), completedFinding(2, citeURLB))
+		faulty := panickingStore{ContextStore: store, panicOn: map[memory.Reference]bool{pooled.Briefs[1].Ref: true}}
+		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: faulty, Namespace: ns})
+
+		out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
+		if out.Status != types.StatusIncomplete || out.Body != "# Report" {
+			t.Errorf("outcome = %s %q, want the synthesised body, incomplete", out.Status, out.Body)
+		}
+		if want := "brief-2 produced no finding: the finding could not be read back: the store panicked"; !strings.Contains(out.Detail, want) {
+			t.Errorf("detail = %q, want %q", out.Detail, want)
+		}
+		if strings.Contains(out.Detail, panicValueKey) {
+			t.Errorf("the recovered value reached the detail: %q", out.Detail)
+		}
+		if n := modelSrv.CallCount(); n != 2 {
+			t.Errorf("model calls = %d, want synthesis and the citation pass", n)
+		}
+	})
+
+	t.Run("every read", func(t *testing.T) {
+		modelSrv := modeltest.NewFakeServer()
+		defer modelSrv.Close()
+		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+		plan, pooled := storedRun(t, store, ns, completedFinding(1, citeURLA), completedFinding(2, citeURLB))
+		faulty := panickingStore{ContextStore: store, panicOn: map[memory.Reference]bool{}}
+		for _, r := range pooled.Briefs {
+			faulty.panicOn[r.Ref] = true
+		}
+		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: faulty, Namespace: ns})
+
+		out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
+		if out.Status != types.StatusFailed || out.Body != "" || out.Citations != nil {
+			t.Errorf("outcome = %+v, want failed with no body or citations", out)
+		}
+		if n := modelSrv.CallCount(); n != 0 {
+			t.Errorf("model calls = %d, want none", n)
+		}
+	})
 }
 
 // TestConcludeDetailIsScrubbedAndBounded: the run's detail joins every

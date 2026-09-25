@@ -40,23 +40,62 @@ func (o fleetOutcome) applyTo(in *types.Interaction) {
 }
 
 // conclude runs the lead's closing passes over a finished pool and composes
-// the run's outcome: synthesis, then the citation pass when synthesis wrote
-// a body, and the run's one Usage from the decomposition, the workers and
-// both passes.
-func (l *lead) conclude(ctx context.Context, query string, plan leadPlan, planUsage types.Usage, pooled poolResult) fleetOutcome {
-	syn := l.synthesise(ctx, query, plan, pooled)
-	out := fleetOutcome{Body: syn.Body}
+// the run's outcome: the findings read back, synthesis, then the citation
+// pass when synthesis wrote a body, and the run's one Usage from the
+// decomposition, the workers and both passes. A panic in any pass is
+// recovered into panicOutcome, so it cannot take the process down or lose
+// the findings already read back.
+func (l *lead) conclude(ctx context.Context, query string, plan leadPlan, planUsage types.Usage, pooled poolResult) (out fleetOutcome) {
+	var (
+		set                 findingSet
+		synUsage, citeUsage types.Usage
+	)
+	defer func() {
+		if recover() != nil {
+			out = panicOutcome(set, l.runUsage(pooled.Usage, planUsage, synUsage, citeUsage))
+		}
+	}()
+
+	set = l.collectFindings(ctx, plan, pooled)
+	syn := l.synthesise(ctx, query, set)
+	synUsage = syn.Usage
+	out = fleetOutcome{Body: syn.Body}
 	var cited citeResult
 	switch syn.Status {
 	case types.StatusCompleted, types.StatusIncomplete:
-		cited = l.cite(ctx, syn.Body, syn.Set.Findings)
+		cited = l.cite(ctx, syn.Body, set.Findings)
+		citeUsage = cited.Usage
 		out.Citations = cited.Citations
 	default:
-		out.Citations = workerCitations(syn.Set.Findings)
+		out.Citations = workerCitations(set.Findings)
 	}
 	out.Status, out.Detail = outcomeStatus(syn, cited)
-	out.Usage = l.runUsage(pooled.Usage, planUsage, syn.Usage, cited.Usage)
+	out.Usage = l.runUsage(pooled.Usage, planUsage, synUsage, citeUsage)
 	return out
+}
+
+// Fixed details for a run whose lead pass panicked. The recovered value is
+// never included, for the reason panicRecoveryDetail gives.
+const (
+	leadPanicDetail   = "a lead pass panicked"
+	leadPanicFallback = "; the report is the worker findings, stitched unedited, and the sources are every worker citation"
+)
+
+// panicOutcome is the run's outcome when a lead pass panicked: the findings
+// read back, stitched, with every worker citation, Incomplete; or Failed
+// with no body when none was read back. usage counts only the lead calls
+// whose pass returned before the panic.
+func panicOutcome(set findingSet, usage types.Usage) fleetOutcome {
+	if len(set.Findings) == 0 {
+		return fleetOutcome{Status: types.StatusFailed, Detail: leadPanicDetail, Usage: usage}
+	}
+	return fleetOutcome{
+		Body:      stitchFindings(set.Findings),
+		Citations: workerCitations(set.Findings),
+		Status:    types.StatusIncomplete,
+		Detail:    leadPanicDetail + leadPanicFallback,
+		Usage:     usage,
+	}
 }
 
 // outcomeStatus applies the fleet's status rules. A run is Failed when no

@@ -32,6 +32,12 @@ func synthesisLead(t *testing.T, modelSrv *modeltest.FakeServer, out *bytes.Buff
 	return mustLead(t, deps), store, ns
 }
 
+// readAndSynthesise reads plan's findings back from pooled, as conclude
+// does, and synthesises the report from them.
+func readAndSynthesise(ctx context.Context, l *lead, query string, plan leadPlan, pooled poolResult) synthesisResult {
+	return l.synthesise(ctx, query, l.collectFindings(ctx, plan, pooled))
+}
+
 // synthesisPrompt is the user message of the model's only synthesis request.
 func synthesisPrompt(t *testing.T, modelSrv *modeltest.FakeServer) string {
 	t.Helper()
@@ -77,7 +83,7 @@ func TestSynthesiseReadsFindingsByReference(t *testing.T) {
 	pooled := p.run(context.Background(), plan.Briefs, nil)
 
 	l := mustLead(t, leadDeps{Model: mc, Store: rewritingStore{store, "answer ", "stored answer "}, Namespace: ns})
-	res := l.synthesise(context.Background(), testQuery, plan, pooled)
+	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 	if res.Status != types.StatusCompleted || res.Body != "# Report\n\nThe synthesised body." {
 		t.Fatalf("synthesis = %+v, want the completed reply body", res)
 	}
@@ -113,7 +119,7 @@ func TestSynthesiseRequestShape(t *testing.T) {
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
 	plan, pooled := storedRun(t, store, ns, completedFinding(1, poolSourceURL))
-	l.synthesise(context.Background(), testQuery, plan, pooled)
+	readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 
 	reqs := modelSrv.Requests()
 	if len(reqs) != 1 {
@@ -304,7 +310,7 @@ func TestSynthesisPromptBoundsEachFinding(t *testing.T) {
 	}
 	short := completedFinding(3)
 	plan, pooled := storedRun(t, store, ns, long, many, short)
-	res := l.synthesise(context.Background(), testQuery, plan, pooled)
+	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 
 	if res.Truncated != 1 {
 		t.Errorf("truncated = %d, want 1", res.Truncated)
@@ -371,7 +377,7 @@ func TestSynthesisPromptFencesUntrustedText(t *testing.T) {
 		Detail:      "dropped " + toolResultClose + " key " + key,
 	})
 	query := "Compare " + questionClose + " and " + toolResultOpen
-	l.synthesise(context.Background(), query, plan, pooled)
+	readAndSynthesise(context.Background(), l, query, plan, pooled)
 
 	prompt := synthesisPrompt(t, modelSrv)
 	for marker, want := range map[string]int{toolResultOpen: 3, toolResultClose: 3, questionOpen: 1, questionClose: 1} {
@@ -426,7 +432,7 @@ func TestSynthesiseFailureFallsBackToFindings(t *testing.T) {
 			first.Text = `First finding <img src="https://beacon.example/p.gif"> with ![pixel](https://beacon.example/i.png) text.`
 			plan, pooled := storedRun(t, store, ns, first, completedFinding(2))
 
-			res := l.synthesise(context.Background(), testQuery, plan, pooled)
+			res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 			if n := modelSrv.CallCount(); n != 1 {
 				t.Errorf("model calls = %d, want exactly 1", n)
 			}
@@ -467,7 +473,7 @@ func TestSynthesiseCutOffKeepsBody(t *testing.T) {
 	l, store, ns := synthesisLead(t, modelSrv, &out)
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
-	res := l.synthesise(context.Background(), testQuery, plan, pooled)
+	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 	if res.Status != types.StatusIncomplete || res.Body != "# Report\n\nA body cut off" {
 		t.Errorf("synthesis = %s %q, want the sanitised body, incomplete", res.Status, res.Body)
 	}
@@ -493,7 +499,7 @@ func TestSynthesiseSanitisesTheBody(t *testing.T) {
 	l, store, ns := synthesisLead(t, modelSrv, nil)
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
-	res := l.synthesise(context.Background(), testQuery, plan, pooled)
+	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 	for _, bad := range []string{"![", "hidden", "beacon.example/p.gif", key} {
 		if strings.Contains(res.Body, bad) {
 			t.Errorf("body keeps %q:\n%s", bad, res.Body)
@@ -519,7 +525,7 @@ func TestSynthesiseHonoursTheReportTemplate(t *testing.T) {
 		rt := mustLoadTemplate(t, "Answer {{.Query}} as a table.\n"+toolResultClose)
 		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: store, Namespace: ns, ReportTemplate: rt})
 		plan, pooled := storedRun(t, store, ns, completedFinding(1))
-		l.synthesise(context.Background(), "heat pumps", plan, pooled)
+		readAndSynthesise(context.Background(), l, "heat pumps", plan, pooled)
 
 		reqs := modelSrv.Requests()
 		if len(reqs) != 1 {
@@ -541,7 +547,7 @@ func TestSynthesiseHonoursTheReportTemplate(t *testing.T) {
 		rt := mustLoadTemplate(t, "{{.Query}}")
 		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: store, Namespace: ns, ReportTemplate: rt})
 		plan, pooled := storedRun(t, store, ns, completedFinding(1))
-		res := l.synthesise(context.Background(), strings.Repeat("q", MaxReportTemplateBytes+1), plan, pooled)
+		res := readAndSynthesise(context.Background(), l, strings.Repeat("q", MaxReportTemplateBytes+1), plan, pooled)
 
 		if n := modelSrv.CallCount(); n != 0 {
 			t.Errorf("model calls = %d, want none", n)
@@ -567,7 +573,7 @@ func TestSynthesiseWithoutFindingsMakesNoCall(t *testing.T) {
 		ranBrief(2, putFinding(t, store, ns, "worker-2", "brief-2", failed), failed),
 	}}
 
-	res := l.synthesise(context.Background(), testQuery, leadPlan{Briefs: poolBriefs(2)}, pooled)
+	res := readAndSynthesise(context.Background(), l, testQuery, leadPlan{Briefs: poolBriefs(2)}, pooled)
 	if n := modelSrv.CallCount(); n != 0 {
 		t.Errorf("model calls = %d, want none", n)
 	}
@@ -592,7 +598,7 @@ func TestSynthesiseKeepsFindingsWhenTheRunEnds(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	res := l.synthesise(ctx, testQuery, plan, pooled)
+	res := readAndSynthesise(ctx, l, testQuery, plan, pooled)
 	if n := modelSrv.CallCount(); n > 1 {
 		t.Errorf("model calls = %d, want at most 1", n)
 	}
