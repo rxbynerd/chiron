@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/config"
@@ -30,21 +31,22 @@ func requireKnowledge(fc config.FleetConfig) error {
 }
 
 // buildKnowledge builds the knowledge store halves for the configured
-// provider. It returns nil halves when no provider is set. The key reference
-// is resolved only when set, since Billet may be keyless; every call to the
-// store is bounded by callTimeout.
-func buildKnowledge(ctx context.Context, fc config.FleetConfig, callTimeout time.Duration) (memory.Recaller, memory.Rememberer, error) {
+// provider, with the closer that ends the store's session (nil when the
+// adapter holds none). It returns nil halves when no provider is set. The key
+// reference is resolved only when set, since Billet may be keyless; every
+// call to the store is bounded by callTimeout.
+func buildKnowledge(ctx context.Context, fc config.FleetConfig, callTimeout time.Duration) (memory.Recaller, memory.Rememberer, io.Closer, error) {
 	if fc.KnowledgeProvider == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if err := requireKnowledge(fc); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var apiKey string
 	if fc.KnowledgeKeyRef != "" {
 		key, err := secret.Default().Resolve(ctx, fc.KnowledgeKeyRef)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		apiKey = key
 	}
@@ -65,9 +67,10 @@ type knowledgeOptions struct {
 }
 
 // newKnowledgeAdapter constructs the adapter for provider. Billet serves both
-// halves of the seam; Alexandria serves recall only, so its Rememberer is nil
-// and config validation refuses knowledge_remember for it.
-func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recaller, memory.Rememberer, error) {
+// halves of the seam over one MCP session, which the returned closer ends;
+// Alexandria serves recall only, over REST with no session, so its Rememberer
+// and closer are nil and config validation refuses knowledge_remember for it.
+func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recaller, memory.Rememberer, io.Closer, error) {
 	switch provider {
 	case config.KnowledgeBillet:
 		c, err := billet.New(billet.Options{
@@ -77,9 +80,9 @@ func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recalle
 			DefaultLimit:   opts.DefaultLimit,
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return c, c, nil
+		return c, c, c, nil
 	case config.KnowledgeAlexandria:
 		c, err := alexandria.New(alexandria.Options{
 			Endpoint:       opts.Endpoint,
@@ -88,10 +91,10 @@ func newKnowledgeAdapter(provider string, opts knowledgeOptions) (memory.Recalle
 			DefaultLimit:   opts.DefaultLimit,
 		})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return c, nil, nil
+		return c, nil, nil, nil
 	default:
-		return nil, nil, fmt.Errorf("research --agent worker: unknown fleet.knowledge_provider %q", provider)
+		return nil, nil, nil, fmt.Errorf("research --agent worker: unknown fleet.knowledge_provider %q", provider)
 	}
 }
