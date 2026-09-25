@@ -21,9 +21,6 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// ErrNotImplemented reports an agent the composition root does not bind.
-var ErrNotImplemented = errors.New("the fleet researcher is not implemented yet; use --agent worker")
-
 // FleetInteractionIDPrefix marks an id minted by the in-process fleet. Like
 // a worker id it names no server-side state, so the CLI refuses it for
 // `chiron get`/`follow-up`.
