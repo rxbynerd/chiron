@@ -625,8 +625,9 @@ func exitForStatus(result *types.RunResult) error {
 // to send spans would only buffer and drop them. Key references resolve
 // here, before any paid call, and the OTLP header variables are checked:
 // refused beside telemetry.otlp_endpoint, and refused anywhere when
-// malformed. The shutdown func is non-nil only for the OTel binding; it flushes
-// pending spans, then stops routing the SDK's error reports to stderr.
+// malformed. The shutdown func is non-nil only for the OTel binding; it
+// flushes pending spans, then stops routing the SDK's error reports to
+// stderr.
 func newTracer(ctx context.Context, tc config.TelemetryConfig, stderr io.Writer) (trace.Tracer, func(context.Context) error, error) {
 	var (
 		endpoint string
