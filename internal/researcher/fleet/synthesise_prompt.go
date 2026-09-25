@@ -104,13 +104,19 @@ func renderSources(citations []types.Citation) string {
 		if title == "" {
 			title = "(untitled)"
 		}
-		fmt.Fprintf(&b, "%d. %s\n   URL: %s\n", i+1, defang(title), defang(oneLine(c.URI)))
+		fmt.Fprintf(&b, "%d. %s\n   URL: %s\n", i+1, defang(title), shownURI(c.URI))
 	}
 	s := b.String()
 	if len(s) > maxFindingSourcesBytes {
 		s = boundBytes(s, maxFindingSourcesBytes-1) + "\n"
 	}
 	return s
+}
+
+// shownURI is a cited URI as a lead prompt shows it: on one line and
+// defanged.
+func shownURI(uri string) string {
+	return defang(oneLine(uri))
 }
 
 // promptObjective renders a brief's objective on one line, defanged and

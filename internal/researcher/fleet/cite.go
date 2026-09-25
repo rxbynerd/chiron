@@ -103,7 +103,8 @@ type citeResult struct {
 // one structured model call under a cite span, never retried. The emitted
 // citations are a deduplicated subset of the findings' citations, in first
 // attribution order: a returned URL is kept only when it exactly equals a
-// URI a worker cited, and carries that worker's title. A failed call, a cut
+// URI a worker cited, or the form the prompt showed for exactly one such
+// URI, and it is emitted as that worker's URI and title. A failed call, a cut
 // off, filtered or invalid reply, or one that attributes no worker source
 // keeps every worker citation instead, Incomplete. With no worker citation
 // there is nothing to attribute, so no call or span is made.
@@ -211,26 +212,44 @@ func parseCiteReply(raw string) (citeReply, error) {
 	return r, nil
 }
 
-// attributedCitations keeps, in first attribution order and once each,
-// every URL the reply attributes that exactly equals a candidate's URI,
-// with the candidate's title. It counts every other URL as dropped.
+// attributedCitations keeps, in first attribution order and once each, the
+// candidate every URL the reply attributes names, as the candidate itself:
+// its raw URI and its title. A URL names a candidate when it exactly equals
+// the candidate's URI, or else when it exactly equals the form shownURI
+// gave that URI in the prompt and gave no other candidate's. It counts
+// every other URL as dropped.
 func attributedCitations(reply citeReply, candidates []types.Citation) ([]types.Citation, int) {
-	byURI := make(map[string]types.Citation, len(candidates))
-	for _, c := range candidates {
-		byURI[c.URI] = c
+	byURI := make(map[string]int, len(candidates))
+	byShown := make(map[string]int, len(candidates))
+	for i, c := range candidates {
+		byURI[c.URI] = i
+		shown := shownURI(c.URI)
+		if _, shared := byShown[shown]; shared {
+			byShown[shown] = -1
+			continue
+		}
+		byShown[shown] = i
 	}
-	emitted := map[string]bool{}
+	named := func(u string) (int, bool) {
+		if i, ok := byURI[u]; ok {
+			return i, true
+		}
+		i, ok := byShown[u]
+		return i, ok && i >= 0
+	}
+
+	emitted := map[int]bool{}
 	var out []types.Citation
 	dropped := 0
 	for _, claim := range reply.Claims {
 		for _, u := range claim.URLs {
-			c, ok := byURI[u]
+			i, ok := named(u)
 			switch {
 			case !ok:
 				dropped++
-			case !emitted[u]:
-				emitted[u] = true
-				out = append(out, c)
+			case !emitted[i]:
+				emitted[i] = true
+				out = append(out, candidates[i])
 			}
 		}
 	}

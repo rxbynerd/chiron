@@ -1935,11 +1935,17 @@ one structured call under a `cite` span, never retried. It sees the report
 body, fenced and bounded to 64 KiB, and the rendered findings as evidence.
 Its strict schema, pinned by `ValidateStrictSchema` and a golden, returns
 claims and the URLs that support each, and no title. A returned URL is kept
-only when it exactly equals a URI a worker cited. There is no normalisation,
-so the model cannot introduce a variant of a URL no worker fetched. Every
-other URL is dropped and counted as `dropped_citations` on the span. Kept
-citations are deduplicated in first attribution order and carry the
-worker's title, cleaned by `citationTitle`, never a title from the model.
+only when it exactly equals a URI a worker cited. The prompt shows each URI
+on one line and defanged, so a URI with whitespace or `<<` appears altered,
+and a model that copies it as shown would otherwise never match. A URL that
+exactly equals the shown form of one worker URI is therefore kept too. A
+shown form that two worker URIs share names neither, and an exact URI match
+wins over a shown-form match. Either way the emitted citation is the
+worker's own raw URI. There is no other normalisation, so the model cannot
+introduce a variant of a URL no worker fetched. Every other URL is dropped
+and counted as `dropped_citations` on the span. Kept citations are
+deduplicated in first attribution order and carry the worker's title,
+cleaned by `citationTitle`, never a title from the model.
 The pass falls back to the deduplicated union of every worker citation, and
 is Incomplete, on a failed call, a reply that is cut off, filtered or
 invalid, or a reply that attributes no worker source. Claims are not
