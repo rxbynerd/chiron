@@ -212,7 +212,7 @@ type FleetConfig struct {
 	// KnowledgeLimit is the hits per recall, 1 to MaxKnowledgeLimit.
 	KnowledgeLimit int `json:"knowledge_limit,omitempty" yaml:"knowledge_limit,omitempty"`
 	// KnowledgeRemember saves each completed finding back to the store
-	// (billet only).
+	// (billet, worker agent only).
 	KnowledgeRemember bool `json:"knowledge_remember,omitempty" yaml:"knowledge_remember,omitempty"`
 }
 
@@ -358,7 +358,8 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 // composition root requires them); when present they must satisfy the same
 // rules the Gemini base-URL override does. agent gates the fleet-only rules:
 // a single worker has no fan-out and no session plane, so MaxWorkers,
-// Concurrency and the inmemory requirement are enforced for fleet only.
+// Concurrency and the inmemory requirement are enforced for fleet only, and
+// a fleet never saves back, so it refuses KnowledgeRemember.
 func (f FleetConfig) validate(agent string) error {
 	if err := validEndpoint("fleet.model_endpoint", f.ModelEndpoint); err != nil {
 		return err
@@ -415,7 +416,14 @@ func (f FleetConfig) validate(agent string) error {
 	default:
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
 	}
-	return f.validateKnowledge()
+	if err := f.validateKnowledge(); err != nil {
+		return err
+	}
+	if agent == AgentFleet && f.KnowledgeRemember {
+		return fmt.Errorf("fleet.knowledge_remember: agent %q never saves a finding to the knowledge store; remove it (--fleet-knowledge-remember), or use agent %q to save one",
+			AgentFleet, AgentWorker)
+	}
+	return nil
 }
 
 // validateKnowledge checks the knowledge store fields. Without a provider
