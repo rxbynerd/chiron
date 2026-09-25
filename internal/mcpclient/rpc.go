@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -29,7 +30,7 @@ const (
 	mcpProtocolVersionHeader = "MCP-Protocol-Version"
 )
 
-// session is the state initialize establishes for the rest of one CallTool.
+// session is the state initialize establishes for every later request.
 type session struct {
 	id              string // empty for a stateless server
 	protocolVersion string
@@ -117,7 +118,7 @@ func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (r
 	newSession := resp.Header.Get(mcpSessionHeader)
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return rpcResponse{}, newSession, c.errorFromResponse(req.Method, resp)
+		return rpcResponse{}, newSession, c.errorFromResponse(req.Method, resp, sess)
 	}
 
 	// A notification has no reply body to correlate: the server acknowledges
@@ -282,34 +283,63 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 	return rpcResponse{}, fmt.Errorf("mcp: SSE stream carried no JSON-RPC response")
 }
 
-// errorFromResponse builds an error from a non-2xx response, bounding the
-// error-body read, then scrubbing and excerpting it — a server error payload
-// could echo the submitted key back. The key is never in the body Chiron
-// sends (it is header-only), but the server's echo is outside Chiron's
-// control, so the body is scrubbed unconditionally. A body over
-// maxErrorBodyBytes is dropped rather than excerpted.
-func (c *Client) errorFromResponse(method string, resp *http.Response) error {
+// statusError is a non-2xx reply to a POST.
+type statusError struct {
+	method string
+	status int
+	detail string // scrubbed and bounded; empty for an empty or oversized body
+}
+
+func (e *statusError) Error() string {
+	if e.detail == "" {
+		return fmt.Sprintf("mcp: %s failed: HTTP %d", e.method, e.status)
+	}
+	return fmt.Sprintf("mcp: %s failed: HTTP %d: %s", e.method, e.status, e.detail)
+}
+
+// sessionGone reports whether err is the HTTP 404 with which a Streamable-HTTP
+// server answers a request bearing a session id it no longer holds. The
+// server rejects such a request without processing it.
+func sessionGone(err error, sess session) bool {
+	var se *statusError
+	return sess.id != "" && errors.As(err, &se) && se.status == http.StatusNotFound
+}
+
+// errorFromResponse builds an error from a non-2xx response to a request sent
+// on sess, bounding the error-body read, then scrubbing and excerpting it — a
+// server error payload could echo the submitted key or session id back. The
+// key is never in the body Chiron sends (it is header-only), but the server's
+// echo is outside Chiron's control, so the body is scrubbed unconditionally.
+// A body over maxErrorBodyBytes is dropped rather than excerpted.
+func (c *Client) errorFromResponse(method string, resp *http.Response, sess session) error {
 	data, err := httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
 		data = nil
 	}
-	detail := strings.TrimSpace(string(data))
-	if detail == "" {
-		return fmt.Errorf("mcp: %s failed: HTTP %d", method, resp.StatusCode)
+	if sess.id == "" {
+		sess.id = resp.Header.Get(mcpSessionHeader)
 	}
-	return fmt.Errorf("mcp: %s failed: HTTP %d: %s", method, resp.StatusCode, c.errorText(detail))
+	se := &statusError{method: method, status: resp.StatusCode}
+	if detail := strings.TrimSpace(string(data)); detail != "" {
+		se.detail = c.errorText(detail, sess)
+	}
+	return se
 }
 
 // errorText scrubs server-supplied text and cuts it to maxErrorTextBytes.
-func (c *Client) errorText(s string) string {
-	return c.excerpt(s, maxErrorTextBytes)
+func (c *Client) errorText(s string, sess session) string {
+	return c.excerpt(s, maxErrorTextBytes, sess)
 }
 
-// excerpt scrubs server-supplied text, then cuts it to limit bytes on a rune
-// boundary with a marker. Scrubbing first means a key straddling the cut is
-// still redacted by exact match.
-func (c *Client) excerpt(s string, limit int) string {
-	s = c.scrub(s)
+// excerpt redacts the key and sess's id from server-supplied text, scrubs it,
+// then cuts it to limit bytes on a rune boundary with a marker. Redacting
+// first means a key straddling the cut is still caught by exact match.
+func (c *Client) excerpt(s string, limit int, sess session) string {
+	s = c.redactKey(s)
+	if sess.id != "" {
+		s = strings.ReplaceAll(s, sess.id, "[REDACTED:mcp-session-id]")
+	}
+	s = secret.Scrub(s)
 	if len(s) <= limit {
 		return s
 	}
@@ -324,11 +354,16 @@ func (c *Client) excerpt(s string, limit int) string {
 // scrub redacts credentials from a diagnostic string. It replaces the
 // client's own key by exact match first — a guaranteed redaction that does
 // not depend on the key clearing secret.Scrub's entropy heuristics — then
-// runs secret.Scrub for any other credential-shaped material. The empty check
-// guards against an empty apiKey redacting every empty substring.
+// runs secret.Scrub for any other credential-shaped material.
 func (c *Client) scrub(s string) string {
-	if c.apiKey != "" {
-		s = strings.ReplaceAll(s, c.apiKey, "[REDACTED:mcp-api-key]")
+	return secret.Scrub(c.redactKey(s))
+}
+
+// redactKey replaces the client's key by exact match. The empty check guards
+// against an empty apiKey redacting every empty substring.
+func (c *Client) redactKey(s string) string {
+	if c.apiKey == "" {
+		return s
 	}
-	return secret.Scrub(s)
+	return strings.ReplaceAll(s, c.apiKey, "[REDACTED:mcp-api-key]")
 }

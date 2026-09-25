@@ -99,22 +99,25 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 	}
 }
 
-func TestSearchSessionEchoedAndEnded(t *testing.T) {
+func TestSearchSessionReused(t *testing.T) {
 	// A stateful server assigns a session on initialize and requires it on
-	// tools/call; the client echoes it, then ends it with a DELETE.
-	fake := searchtest.NewFakeServer(
-		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
+	// tools/call; the client echoes it on every later request and reuses it
+	// for the next search, whether or not the previous one failed.
+	fake := searchtest.NewFakeServer(nil,
 		searchtest.WithSessionID("sess-abc-123"),
+		searchtest.WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
 	)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Search(context.Background(), "q"); err != nil {
-		t.Fatalf("Search with a session server: %v", err)
+	for range 2 {
+		if _, err := c.Search(context.Background(), "q"); err == nil {
+			t.Fatal("Search should fail when the tool reports isError")
+		}
 	}
 	reqs := fake.Requests()
 	if len(reqs) != 4 {
-		t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
+		t.Fatalf("request count = %d, want 4 (initialize, initialized, two tools/call)", len(reqs))
 	}
 	// initialize is sent without a session; every later request carries the
 	// assigned one.
@@ -122,37 +125,9 @@ func TestSearchSessionEchoedAndEnded(t *testing.T) {
 		t.Errorf("initialize carried a session header %q, want none", reqs[0].SessionID)
 	}
 	for i := 1; i < len(reqs); i++ {
-		if reqs[i].SessionID != "sess-abc-123" {
-			t.Errorf("request[%d] session = %q, want the assigned session echoed", i, reqs[i].SessionID)
+		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].SessionID != "sess-abc-123" {
+			t.Errorf("request[%d] = %s session %q, want a POST echoing the assigned session", i, reqs[i].HTTPMethod, reqs[i].SessionID)
 		}
-	}
-	end := reqs[3]
-	if end.HTTPMethod != http.MethodDelete {
-		t.Fatalf("last request = %s %q, want the session DELETE", end.HTTPMethod, end.Method)
-	}
-	if end.Authorization != "Bearer "+testKey {
-		t.Errorf("DELETE Authorization = %q, want the bearer key header", end.Authorization)
-	}
-	if end.ProtocolVersion != mcpclient.ProtocolVersion {
-		t.Errorf("DELETE MCP-Protocol-Version = %q, want %q", end.ProtocolVersion, mcpclient.ProtocolVersion)
-	}
-}
-
-func TestSearchSessionEndedAfterToolError(t *testing.T) {
-	// The session is ended even when the search itself fails.
-	fake := searchtest.NewFakeServer(nil,
-		searchtest.WithSessionID("sess-err"),
-		searchtest.WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
-	)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.Search(context.Background(), "q"); err == nil {
-		t.Fatal("Search should fail when the tool reports isError")
-	}
-	reqs := fake.Requests()
-	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {
-		t.Errorf("last request = %s with session %q, want a DELETE of sess-err", last.HTTPMethod, last.SessionID)
 	}
 }
 

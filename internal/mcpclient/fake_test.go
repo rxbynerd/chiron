@@ -140,13 +140,19 @@ func TestCallToolNilArgumentsSendsObject(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEchoedAndEnded(t *testing.T) {
+func TestCallToolSessionEchoedAndEndedOnClose(t *testing.T) {
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-abc-123"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	if _, err := call(c); err != nil {
 		t.Fatalf("CallTool with a session server: %v", err)
+	}
+	if n := fake.CallCount(); n != 3 {
+		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call); the session outlives the call", n)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	reqs := fake.Requests()
 	if len(reqs) != 4 {
@@ -172,7 +178,9 @@ func TestCallToolSessionEchoedAndEnded(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEndedAfterToolError(t *testing.T) {
+func TestCallToolSessionSurvivesToolError(t *testing.T) {
+	// A tool-level failure is a successful exchange: the session stays in
+	// use, and is ended only by Close.
 	fake := mcpclienttest.NewFakeServer(nil,
 		mcpclienttest.WithSessionID("sess-err"),
 		mcpclienttest.WithRawResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
@@ -180,12 +188,23 @@ func TestCallToolSessionEndedAfterToolError(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
+	for range 2 {
+		got, err := call(c)
+		if err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+		if !got.IsError || mcpclient.FirstText(got.Content) != "upstream quota exceeded" {
+			t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
+		}
 	}
-	if !got.IsError || mcpclient.FirstText(got.Content) != "upstream quota exceeded" {
-		t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
+	if n := fake.InitializeCount(); n != 1 {
+		t.Errorf("initialize count = %d, want 1", n)
+	}
+	if n := fake.DeleteCount(); n != 0 {
+		t.Errorf("DELETE count = %d before Close, want 0", n)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 	reqs := fake.Requests()
 	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {

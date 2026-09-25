@@ -8,17 +8,20 @@
 // MCP is JSON-RPC 2.0 carried over HTTP. CallTool implements only the minimum
 // correct flow — initialize, an initialized notification, then a tools/call —
 // and returns the raw tool result. It is deliberately not a general MCP
-// client: there is no resources/prompts/sampling surface, no server-initiated
-// request handling, and a session lives for one CallTool: its Mcp-Session-Id
-// and negotiated MCP-Protocol-Version are echoed, then the session is ended
-// with a best-effort DELETE.
+// client: there is no resources/prompts/sampling surface and no
+// server-initiated request handling. One session serves the Client's
+// lifetime: the first CallTool establishes it, every later request echoes its
+// Mcp-Session-Id and negotiated MCP-Protocol-Version, and Close ends it with
+// a best-effort DELETE.
 //
 // Security follows the model adapter (internal/researcher/fleet/model): every
 // response body is bounded, a text/event-stream reply is read under the same
 // bound, cross-host and https-to-http redirects are refused, and the key
 // travels only in the Authorization header — never a URL, query, log, error,
-// or trace. No round-trip is retried: a tools/call may invoke a billable
-// upstream.
+// or trace; nor does the session id. No round-trip is retried, since a
+// tools/call may invoke a billable upstream, with one exception: a request the
+// server answers with HTTP 404 because it no longer holds the session was not
+// processed, so it is sent once more on a fresh session.
 package mcpclient
 
 import (
@@ -28,6 +31,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/httpx"
@@ -104,9 +109,9 @@ type Options struct {
 	// caller's client. Leave its Timeout zero: deadlines come from
 	// RequestTimeout.
 	HTTPClient *http.Client
-	// RequestTimeout bounds one CallTool — initialize, initialized, tools/call
-	// and the closing DELETE — including reading the bodies. Default 30s. A
-	// tighter caller deadline still wins.
+	// RequestTimeout bounds one CallTool, including any initialize and
+	// initialized round-trips it performs and reading the bodies, and bounds
+	// Close's DELETE. Default 30s. A tighter caller deadline still wins.
 	RequestTimeout time.Duration
 	// MaxBodyBytes bounds every response body, application/json or
 	// text/event-stream. Default 8 MiB.
@@ -117,8 +122,11 @@ type Options struct {
 	ClientVersion string
 }
 
-// Client is a hand-rolled net/http MCP client. The API key is never embedded
-// in URLs, logged, or included in error text.
+// ErrClosed is returned by CallTool once Close has been called.
+var ErrClosed = errors.New("mcp: client is closed")
+
+// Client is a hand-rolled net/http MCP client, safe for concurrent use. The
+// API key is never embedded in URLs, logged, or included in error text.
 type Client struct {
 	endpoint       string
 	apiKey         string
@@ -127,6 +135,27 @@ type Client struct {
 	maxBodyBytes   int64
 	clientName     string
 	clientVersion  string
+
+	// lastID numbers JSON-RPC requests; MCP forbids reusing an id within a
+	// session.
+	lastID atomic.Int64
+
+	// mu guards the session state below and is never held across a request.
+	mu      sync.Mutex
+	sess    *session   // established session; nil before the first handshake or after expiry
+	pending *handshake // handshake in flight, shared by concurrent callers
+	closed  bool
+}
+
+// handshake is one in-flight session establishment. done is closed once sess
+// or err is set.
+type handshake struct {
+	done chan struct{}
+	sess *session
+	err  error
+	// retry marks a failure after the leading caller's context ended.
+	// Waiters do not share it: they try again under their own contexts.
+	retry bool
 }
 
 // ToolResult is a tools/call result: the content blocks, the optional
@@ -198,12 +227,17 @@ func New(opts Options) (*Client, error) {
 	return c, nil
 }
 
-// CallTool runs initialize, the initialized notification, and one tools/call
-// for the named tool, then ends any session the server issued with a
-// best-effort DELETE. The exchange is bounded by RequestTimeout and
-// MaxBodyBytes. No round-trip is retried; a caller that wants to retry does so
-// knowingly. An initialize reply naming an unsupported protocol version, or
-// none, fails with ErrUnsupportedProtocolVersion before any tools/call.
+// CallTool issues one tools/call for the named tool on the client's session,
+// first establishing the session (initialize, then the initialized
+// notification) when there is none. Concurrent callers share one handshake.
+// The exchange is bounded by RequestTimeout and MaxBodyBytes.
+//
+// An initialize reply naming an unsupported protocol version, or none, fails
+// with ErrUnsupportedProtocolVersion before any tools/call. When the server
+// answers the tools/call with HTTP 404, the session is gone and the call was
+// not processed: the session is re-established and the call sent once more.
+// Nothing else is retried; a caller that wants to retry does so knowingly.
+// After Close, CallTool fails with ErrClosed.
 //
 // A tool-level failure is returned as a ToolResult with IsError set, not as an
 // error: the caller owns how a tool's failure text is surfaced.
@@ -215,12 +249,124 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]any)
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
 
-	sess, err := c.handshake(ctx)
+	sess, err := c.session(ctx)
 	if err != nil {
 		return ToolResult{}, err
 	}
-	if sess.id != "" {
-		defer c.endSession(ctx, sess)
+	result, err := c.callTool(ctx, *sess, name, args)
+	if !sessionGone(err, *sess) {
+		return result, err
 	}
-	return c.callTool(ctx, sess, name, args)
+	c.forgetSession(sess)
+	if sess, err = c.session(ctx); err != nil {
+		return ToolResult{}, err
+	}
+	result, err = c.callTool(ctx, *sess, name, args)
+	if sessionGone(err, *sess) {
+		c.forgetSession(sess)
+	}
+	return result, err
+}
+
+// Close ends the client's session, when the server issued one, with a
+// best-effort DELETE on a fresh context bounded by RequestTimeout, and makes
+// every later CallTool fail with ErrClosed. It is idempotent and safe to call
+// concurrently with CallTool. It always returns nil: a server may refuse
+// client-initiated termination, and its outcome changes nothing here.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	sess := c.sess
+	c.sess = nil
+	c.mu.Unlock()
+
+	if sess != nil && sess.id != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout)
+		defer cancel()
+		c.endSession(ctx, *sess)
+	}
+	return nil
+}
+
+// session returns the established session, leading a handshake when there is
+// none or joining the one in flight. A waiter honours its own ctx. A failed
+// handshake is not kept, so the next call tries again.
+func (c *Client) session(ctx context.Context) (*session, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return nil, ErrClosed
+		}
+		if c.sess != nil {
+			sess := c.sess
+			c.mu.Unlock()
+			return sess, nil
+		}
+		if hs := c.pending; hs != nil {
+			c.mu.Unlock()
+			select {
+			case <-hs.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if hs.retry {
+				continue
+			}
+			return hs.sess, hs.err
+		}
+		hs := &handshake{done: make(chan struct{})}
+		c.pending = hs
+		c.mu.Unlock()
+		return c.lead(ctx, hs)
+	}
+}
+
+// lead runs the handshake hs stands for and publishes its outcome. A session
+// established after Close is ended at once rather than kept.
+func (c *Client) lead(ctx context.Context, hs *handshake) (*session, error) {
+	sess, err := c.establish(ctx)
+
+	c.mu.Lock()
+	c.pending = nil
+	orphaned := err == nil && c.closed
+	switch {
+	case orphaned:
+		hs.err = ErrClosed
+	case err != nil:
+		hs.err = err
+		hs.retry = ctx.Err() != nil
+	default:
+		hs.sess = &sess
+		c.sess = hs.sess
+	}
+	c.mu.Unlock()
+	close(hs.done)
+
+	if orphaned && sess.id != "" {
+		c.endSession(ctx, sess)
+	}
+	return hs.sess, hs.err
+}
+
+// forgetSession drops sess if it is still the established session, so a
+// caller holding a stale session never discards a fresh one.
+func (c *Client) forgetSession(sess *session) {
+	c.mu.Lock()
+	if c.sess == sess {
+		c.sess = nil
+	}
+	c.mu.Unlock()
+}
+
+// nextID returns a JSON-RPC request id not yet used by this client.
+func (c *Client) nextID() int {
+	return int(c.lastID.Add(1))
 }

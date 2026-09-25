@@ -154,7 +154,7 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 	}
 }
 
-func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
+func TestCloseIgnoresFailedSessionDelete(t *testing.T) {
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -175,10 +175,13 @@ func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
 	c := newClient(t, server.URL)
 	got, err := call(c)
 	if err != nil {
-		t.Fatalf("CallTool should ignore a failed session DELETE, got: %v", err)
+		t.Fatalf("CallTool: %v", err)
 	}
 	if FirstText(got.Content) != "done" {
 		t.Errorf("result = %+v, want the scripted text", got)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("Close should ignore a failed session DELETE, got: %v", err)
 	}
 	if n := deletes.Load(); n != 1 {
 		t.Errorf("DELETE count = %d, want 1", n)
