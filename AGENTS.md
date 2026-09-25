@@ -137,6 +137,15 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   knob. In GKE v2, restrict both to operator-supplied Secrets. An
   explicit `--otlp-endpoint` flag or the Langfuse key pair (below) takes
   precedence over these variables.
+- `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` —
+  request headers, usually a credential, for the collector the variables
+  above name, and they go only to that collector: a run with
+  `--otlp-endpoint` refuses to start while either is set, and the Langfuse
+  key pair replaces them. An authenticated generic collector is therefore
+  configured entirely through the environment, endpoint and headers
+  together. A malformed list is refused on every path before the OTel SDK
+  parses it, since the SDK's own logger would print it raw to stderr; the
+  error names the variable, never its value.
 
 ## Security-sensitive configuration (in-process research agents)
 
@@ -185,16 +194,28 @@ separate from `fleet` and validated for every agent, not only
 - `telemetry.otlp_endpoint` / `telemetry.langfuse_endpoint` — validated
   with the same rule as `CHIRON_GEMINI_BASE_URL`. The collector or
   Langfuse endpoint receives every span, including research queries and
-  the run's spend, so it is deployment configuration, not a user-settable
-  knob. `telemetry.langfuse_endpoint` needs both key refs below; with
-  neither endpoint set, the standard `OTEL_EXPORTER_OTLP_*` variables
-  still apply, but an explicit endpoint here always wins.
+  the run's spend. These fields are settable per run from flags and from
+  a base config (`--config` or piped stdin); base configs are trusted
+  input until issue #28 (a config file can choose both a credential and
+  its destination) lands, and #28 applies to `telemetry.*` for every
+  agent, not only `worker`/`fleet`. `telemetry.langfuse_endpoint` needs
+  both key refs below; with neither endpoint set, the standard
+  `OTEL_EXPORTER_OTLP_*` variables still apply, but an explicit endpoint
+  here wins over their endpoint. `telemetry.otlp_endpoint` is for
+  collectors that need no request headers and is refused while an OTLP
+  header variable is set (see above). Whenever these fields or the
+  Langfuse key refs choose the destination, the exporter refuses
+  redirects and ignores the `OTEL_EXPORTER_OTLP_*` certificate,
+  client-certificate and timeout variables.
 - `telemetry.langfuse_public_key_ref` / `telemetry.langfuse_secret_key_ref`
   — `secret://` references, required together, literals rejected without
   being echoed. Resolved once at the composition root and handed to the
   exporter only, as an `Authorization: Basic` header; nothing else reads
   them. `internal/secret.Scrub` recognises the `pk-lf-`/`sk-lf-` key
-  shape and Basic credentials on every output path (spans, stderr, logs).
+  shape and Basic credentials on every output path Chiron writes (spans,
+  stderr, logs). The OTel SDK's own logger bypasses Scrub; its
+  credential-bearing message, a malformed OTLP header variable, is
+  prevented by refusing the malformed list before the SDK parses it.
 
 These are config fields, not environment variables — they are per-run
 research configuration, not process-wide test hooks. If a later wave adds
