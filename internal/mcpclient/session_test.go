@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,40 @@ func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for %s", what)
 	}
+}
+
+// awaitErr returns the error sent on errc, failing the test if none arrives
+// within five seconds.
+func awaitErr(t *testing.T, errc <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		return nil
+	}
+}
+
+// deleteLog records the session named by each DELETE a test server receives.
+type deleteLog struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+// record logs r's session and answers 204.
+func (d *deleteLog) record(w http.ResponseWriter, r *http.Request) {
+	d.mu.Lock()
+	d.ids = append(d.ids, r.Header.Get("Mcp-Session-Id"))
+	d.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// sessions returns the sessions DELETEd so far, in arrival order.
+func (d *deleteLog) sessions() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.ids)
 }
 
 func TestCallToolReusesSession(t *testing.T) {
@@ -356,6 +391,7 @@ func TestCallToolFailedHandshakeNotCached(t *testing.T) {
 		wantDeletes int32
 	}{
 		{"initialize error", "initialize", "initialize failed: HTTP 500", 0},
+		{"initialize error issuing a session", "initialize-session", "initialize failed: HTTP 500", 1},
 		{"unsupported version", "version", "unsupported protocol version", 1},
 		{"initialized notification error", "initialized", "notifications/initialized failed: HTTP 500", 1},
 	}
@@ -377,6 +413,9 @@ func TestCallToolFailedHandshakeNotCached(t *testing.T) {
 					n := inits.Add(1)
 					switch {
 					case n == 1 && tt.fail == "initialize":
+						w.WriteHeader(http.StatusInternalServerError)
+					case n == 1 && tt.fail == "initialize-session":
+						w.Header().Set("Mcp-Session-Id", "sess-1")
 						w.WriteHeader(http.StatusInternalServerError)
 					case n == 1 && tt.fail == "version":
 						w.Header().Set("Mcp-Session-Id", "sess-1")
@@ -585,6 +624,56 @@ func TestCallToolLeaderCancellationDoesNotFailWaiters(t *testing.T) {
 	}
 }
 
+func TestCallToolCancelledHandshakeEndsSession(t *testing.T) {
+	// A handshake cut short by its caller's context after initialize issued a
+	// session still ends that session: the DELETE runs on its own context.
+	var deletes deleteLog
+	notifying := make(chan struct{})
+	notifyOnce := sync.OnceFunc(func() { close(notifying) })
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.record(w, r)
+			return
+		}
+		req := decodeRPC(t, r)
+		switch req.Method {
+		case "initialize":
+			writeInitialize(w, deref(req.ID), "sess-cut")
+		case "notifications/initialized":
+			notifyOnce()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		default:
+			t.Errorf("%s sent after the handshake was cancelled", req.Method)
+		}
+	}))
+	defer server.Close()
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
+
+	c := newClient(t, server.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := c.CallTool(ctx, "lookup", nil)
+		errc <- err
+	}()
+	awaitSignal(t, notifying, "the initialized notification")
+	cancel()
+
+	err := awaitErr(t, errc, "the cancelled CallTool")
+	if err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("CallTool error = %v, want the cancellation", err)
+	}
+	if got := deletes.sessions(); !slices.Equal(got, []string{"sess-cut"}) {
+		t.Errorf("DELETEs = %q, want one for the cancelled handshake's session", got)
+	}
+}
+
 func TestCloseEndsSessionOnce(t *testing.T) {
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-close"))
 	defer fake.Close()
@@ -721,6 +810,62 @@ func TestCloseConcurrentWithCallTool(t *testing.T) {
 	}
 	if inits, deletes := fake.InitializeCount(), fake.DeleteCount(); inits != deletes || inits > 1 {
 		t.Errorf("initialize count %d, DELETE count %d; want at most one session, ended exactly once", inits, deletes)
+	}
+}
+
+func TestCloseDuringHandshakeEndsLateSession(t *testing.T) {
+	// A handshake that completes after Close has returned yields ErrClosed,
+	// not a tool result, and the session it was issued is ended at once.
+	var deletes deleteLog
+	var toolCalls atomic.Int32
+	arrived := make(chan struct{})
+	arriveOnce := sync.OnceFunc(func() { close(arrived) })
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.record(w, r)
+			return
+		}
+		req := decodeRPC(t, r)
+		switch req.Method {
+		case "initialize":
+			arriveOnce()
+			<-release
+			writeInitialize(w, deref(req.ID), "sess-late")
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			toolCalls.Add(1)
+			writeToolText(w, deref(req.ID), "ok")
+		}
+	}))
+	defer server.Close()
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer releaseOnce()
+
+	c := newClient(t, server.URL)
+	errc := make(chan error, 1)
+	go func() {
+		_, err := call(c)
+		errc <- err
+	}()
+	awaitSignal(t, arrived, "the initialize")
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := deletes.sessions(); len(got) != 0 {
+		t.Fatalf("Close sent DELETEs %q before any session was issued, want none", got)
+	}
+
+	releaseOnce()
+	if err := awaitErr(t, errc, "the CallTool racing Close"); !errors.Is(err, mcpclient.ErrClosed) {
+		t.Errorf("CallTool = %v, want ErrClosed", err)
+	}
+	if n := toolCalls.Load(); n != 0 {
+		t.Errorf("tools/call count = %d, want 0 after Close", n)
+	}
+	if got := deletes.sessions(); !slices.Equal(got, []string{"sess-late"}) {
+		t.Errorf("DELETEs = %q, want one for the session issued after Close", got)
 	}
 }
 

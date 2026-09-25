@@ -1535,7 +1535,9 @@ the quoted protocol version.
 `DELETE` and never answers can therefore delay exit by up to that per store.
 This is accepted for now: the `DELETE` goes to a server that answered every
 earlier request, and a tighter bound would need a `Close` that takes a
-context.
+context. The `DELETE` that ends a session left by a failed handshake, or
+issued after `Close`, runs under the same fresh bound, so a cancelled caller
+cannot skip it but may wait up to `RequestTimeout` for it.
 
 **Fake.** `mcpclienttest.FakeServer` issues a fresh session per `initialize`
 (`id`, then `id-2`, `id-3`), tracks which are live, and answers 400 to a
