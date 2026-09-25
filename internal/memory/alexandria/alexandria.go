@@ -13,14 +13,12 @@ package alexandria
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/memory"
 )
 
@@ -96,9 +94,9 @@ func New(opts Options) (*Client, error) {
 	if opts.APIKey == "" {
 		return nil, errors.New("alexandria: API key must not be empty")
 	}
-	u, err := validateEndpoint(opts.Endpoint)
+	u, err := httpx.ParseEndpoint(opts.Endpoint)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("alexandria: endpoint %w", err)
 	}
 	if (opts.AccessClientID == "") != (opts.AccessClientSecret == "") {
 		return nil, errors.New("alexandria: Access client id and secret must be set together")
@@ -131,8 +129,10 @@ func New(opts Options) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
+	// net/http re-sends Authorization to a same-host target and the Access
+	// secret, a custom header, to any target, so no redirect is followed.
 	hc := *httpClient
-	hc.CheckRedirect = refuseRedirects
+	hc.CheckRedirect = httpx.RefuseAllRedirects
 
 	return &Client{
 		endpoint:           strings.TrimSuffix(opts.Endpoint, "/"),
@@ -146,60 +146,4 @@ func New(opts Options) (*Client, error) {
 		maxTokens:          maxTokens,
 		maxBodyBytes:       maxBodyBytes,
 	}, nil
-}
-
-// validateEndpoint applies the CHIRON_GEMINI_BASE_URL rule (absolute
-// https://, http:// for loopback only) and additionally refuses userinfo,
-// a query and a fragment, none of which a deployment origin carries.
-func validateEndpoint(raw string) (*url.URL, error) {
-	if raw == "" {
-		return nil, errors.New("alexandria: endpoint must not be empty")
-	}
-	u, err := url.Parse(raw)
-	if err == nil && u.User != nil {
-		return nil, errors.New("alexandria: endpoint must not embed userinfo (user:password@); the API key travels only in the Authorization header")
-	}
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return nil, fmt.Errorf("alexandria: endpoint %s must be an absolute https:// URL (http:// only for loopback test servers)", quoteEndpoint(raw))
-	}
-	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") {
-		return nil, fmt.Errorf("alexandria: endpoint %s must not carry a query or fragment", quoteEndpoint(raw))
-	}
-	return u, nil
-}
-
-// quoteEndpoint renders an endpoint for an error message, withholding a
-// value containing '@': a malformed URL can carry credentials that
-// url.Parse does not recognise as userinfo.
-func quoteEndpoint(raw string) string {
-	if strings.Contains(raw, "@") {
-		return "(withheld: contains '@')"
-	}
-	return strconv.Quote(raw)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only,
-// mirroring internal/researcher/fleet/model because this seam cannot import
-// the config or CLI layers.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
-}
-
-// refuseRedirects refuses every redirect: net/http re-sends Authorization
-// to a same-host target and custom headers (the Access secret) to any
-// target, and a search endpoint has no reason to redirect.
-func refuseRedirects(req *http.Request, _ []*http.Request) error {
-	return fmt.Errorf("alexandria: redirect to %s refused: credentials are never sent to a redirect target", req.URL.Host)
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/secret"
 )
 
@@ -124,7 +125,7 @@ func (c *Client) doRequest(ctx context.Context, sess session, req rpcRequest) (r
 	// a JSON-RPC response for it.
 	if req.ID == nil {
 		// Drain a bounded amount so the connection can be reused, then stop.
-		_, _ = readBounded(resp.Body, c.maxBodyBytes)
+		_, _ = httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 		return rpcResponse{}, newSession, nil
 	}
 
@@ -165,7 +166,7 @@ func (c *Client) endSession(ctx context.Context, sess session) {
 		return
 	}
 	defer resp.Body.Close()
-	_, _ = readBounded(resp.Body, maxErrorBodyBytes)
+	_, _ = httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 }
 
 // readResponse extracts the single JSON-RPC response from a 2xx reply,
@@ -181,7 +182,7 @@ func (c *Client) readResponse(resp *http.Response) (rpcResponse, error) {
 		// handling, so anything else is decoded as a single JSON message.
 		fallthrough
 	default:
-		data, err := readBounded(resp.Body, c.maxBodyBytes)
+		data, err := httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 		if err != nil {
 			return rpcResponse{}, fmt.Errorf("mcp: reading response: %s", c.scrub(err.Error()))
 		}
@@ -288,7 +289,7 @@ func (c *Client) readEventStream(r io.Reader) (rpcResponse, error) {
 // control, so the body is scrubbed unconditionally. A body over
 // maxErrorBodyBytes is dropped rather than excerpted.
 func (c *Client) errorFromResponse(method string, resp *http.Response) error {
-	data, err := readBounded(resp.Body, maxErrorBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
 		data = nil
 	}
@@ -325,19 +326,4 @@ func (c *Client) scrub(s string) string {
 		s = strings.ReplaceAll(s, c.apiKey, "[REDACTED:mcp-api-key]")
 	}
 	return secret.Scrub(s)
-}
-
-// readBounded reads at most max bytes, failing — rather than silently
-// truncating — if the body is larger, so a misbehaving server cannot exhaust
-// memory or smuggle a clipped document through as complete. It mirrors
-// internal/interactions.readBounded and model.readBounded.
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > max {
-		return nil, fmt.Errorf("body exceeds %d-byte bound", max)
-	}
-	return data, nil
 }

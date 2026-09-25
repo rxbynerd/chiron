@@ -330,6 +330,8 @@ func TestSearchEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://search.example.com/mcp?key=x", true},
+		{"fragment rejected", "https://search.example.com/mcp#frag", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

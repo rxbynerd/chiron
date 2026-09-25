@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -440,48 +439,6 @@ func TestCallerHTTPClientNotMutated(t *testing.T) {
 	}
 }
 
-func TestRedirectPolicy(t *testing.T) {
-	request := func(raw string) *http.Request {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("url.Parse(%q): %v", raw, err)
-		}
-		return &http.Request{URL: u}
-	}
-	tests := []struct {
-		name    string
-		via     []string
-		target  string
-		wantErr string
-	}{
-		{"same-host https path change followed", []string{"https://mcp.example.com/mcp"}, "https://mcp.example.com/v2/mcp", ""},
-		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/mcp"}, "http://127.0.0.1:8080/v2", ""},
-		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/mcp"}, "https://127.0.0.1:8080/mcp", ""},
-		{"cross-host refused", []string{"https://mcp.example.com/mcp"}, "https://evil.example/mcp", "cross-origin"},
-		{"https to http on the same host refused", []string{"https://mcp.example.com/mcp"}, "http://mcp.example.com/mcp", "downgrade"},
-		{"downgrade on a later hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b"}, "http://mcp.example.com/c", "downgrade"},
-		{"third hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b", "https://mcp.example.com/c"}, "https://mcp.example.com/d", "too many redirects"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, request(v))
-			}
-			err := refuseUnsafeRedirects(request(tt.target), via)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
 	// An endpoint carrying credentials is rejected, and the error never
 	// repeats them, even when a typo stops url.Parse recognising userinfo.
@@ -534,6 +491,10 @@ func TestEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://mcp.example.com/mcp?key=x", true},
+		{"empty query rejected", "https://mcp.example.com/mcp?", true},
+		{"fragment rejected", "https://mcp.example.com/mcp#frag", true},
+		{"empty fragment rejected", "https://mcp.example.com/mcp#", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 const sampleInteraction = `{"id":"v1_abc","object":"interaction","agent":"deep-research-preview-04-2026","status":"in_progress","created":"2026-06-07T12:00:00Z"}`
@@ -43,6 +45,50 @@ func writeJSON(t *testing.T, w http.ResponseWriter, body string) {
 func TestNewRequiresAPIKey(t *testing.T) {
 	if _, err := New(""); err == nil {
 		t.Fatal("New(\"\") succeeded, want error")
+	}
+}
+
+// TestNewValidatesBaseURL: the effective base URL, default or overridden,
+// must satisfy httpx.ParseEndpoint before the client exists, and the error
+// never echoes the rejected value.
+func TestNewValidatesBaseURL(t *testing.T) {
+	const secret = "Winter2026-credential"
+	tests := []struct {
+		name    string
+		opts    []Option
+		wantErr string // "" means accepted
+	}{
+		{"default", nil, ""},
+		{"https override", []Option{WithBaseURL("https://gemini-proxy.example.com/")}, ""},
+		{"loopback http override", []Option{WithBaseURL("http://127.0.0.1:9999")}, ""},
+		{"empty override", []Option{WithBaseURL("")}, "must not be empty"},
+		{"cleartext non-loopback", []Option{WithBaseURL("http://evil.example.com/" + secret)}, "absolute https://"},
+		{"userinfo", []Option{WithBaseURL("https://user:" + secret + "@gemini.example.com")}, "userinfo"},
+		{"query", []Option{WithBaseURL("https://gemini.example.com/?key=" + secret)}, "query or fragment"},
+		{"fragment", []Option{WithBaseURL("https://gemini.example.com/#" + secret)}, "query or fragment"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := New("test-api-key", tt.opts...)
+			if tt.wantErr == "" {
+				if err != nil || c == nil {
+					t.Fatalf("New = %v, want success", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("New succeeded, want an error containing %q", tt.wantErr)
+			}
+			if !strings.HasPrefix(err.Error(), "interactions: base URL ") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("New = %v, want an interactions: base URL error containing %q", err, tt.wantErr)
+			}
+			if !errors.Is(err, httpx.ErrInvalidEndpoint) {
+				t.Errorf("New = %v, want it to match httpx.ErrInvalidEndpoint", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("New error echoed the rejected value: %v", err)
+			}
+		})
 	}
 }
 
