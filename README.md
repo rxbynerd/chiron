@@ -278,7 +278,7 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
 | `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
-| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` | The worker's model, search and knowledge store endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. The knowledge variable is read only with a knowledge provider. |
+| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` | The worker's model, search and knowledge store endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. The knowledge variable is read only with a knowledge provider. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
 
 ## Documents
 

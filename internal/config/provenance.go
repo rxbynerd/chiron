@@ -14,7 +14,7 @@ const (
 )
 
 // FleetEndpoint is one credential-bearing fleet endpoint with the flag and
-// environment variable that may supply it. A base config never may: whoever
+// environment variable that may supply it. A base config may never: whoever
 // controls a shared config could otherwise choose both a key reference and
 // the host that key is sent to.
 type FleetEndpoint struct {

@@ -15,8 +15,8 @@ import (
 
 // applyEndpointEnv fills each fleet endpoint whose flag is unset from its
 // CHIRON_FLEET_*_ENDPOINT variable; a set flag wins. The knowledge variable
-// is read only with a knowledge provider. Errors name the variable, never
-// the value.
+// is read only with a knowledge provider. Errors name the variable and at
+// most the value's scheme and host, never its path, query or credentials.
 func applyEndpointEnv(fc *config.FleetConfig, flags *pflag.FlagSet) error {
 	for _, e := range config.FleetEndpoints(fc) {
 		if flags.Changed(e.Flag) {
