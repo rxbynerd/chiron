@@ -1486,3 +1486,9 @@ writes a space after every `<` immediately followed by another `<`. No
 still `< < <`, so no golden changed. Every caller still uses this one
 function: search titles, snippets and URLs, fetched text, recall hits,
 tool-failure details and the output-format block.
+
+**Only the output-format block is defanged today.** `Brief.Objective`,
+`SourceGuidance` and `Boundaries` still go into the system prompt
+unmodified. That is safe today because they are always CLI/operator text
+under `--agent worker`, the only agent that runs; it becomes a gap once a
+fleet lead writes `Brief` values from tool-output-adjacent context.
