@@ -31,7 +31,7 @@ with actions pinned to full commit SHAs.
 | --- | --- |
 | `cmd/chiron` | Entrypoint; `os.Exit(cli.Execute())` and nothing else. |
 | `internal/cli` | Cobra command tree (`research`, `research-config`, `get`, `follow-up`), flag→config resolution, and the composition root: the only place environment is read, seams are bound, and exit codes (0–4) are assigned. |
-| `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines, validation (enums, timeout cap, secret:// rule, MCP URL schemes). |
+| `internal/config` | `ResearchConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines (`DecodeBase` refuses a base naming a fleet endpoint), validation (enums, timeout cap, secret:// rule, MCP URL schemes). |
 | `internal/types` | Seam-level domain types: `Interaction`, `Output`, `Citation`, `Usage`, `Report`, `RunResult`. Wire schema lives in `internal/interactions`; `researcher/gemini` maps wire→domain (see DECISIONS.md, "Wire types vs domain types"). |
 | `internal/interactions` | Hand-rolled Interactions API client: wire types (`last_verified` marker), create/get with retries and capped backoff, bounded reads everywhere, cross-host and https-to-http redirect refusal, poll-to-terminal, SSE streaming primitive with `?last_event_id=` resume. |
 | `internal/httpx` | Stdlib-only leaf holding the HTTP rules every credential-bearing path shares: `ParseEndpoint` (https anywhere, http for `LoopbackHost` only; no userinfo, query or fragment; errors never echo the value), the `RefuseUnsafeRedirects`/`RefuseAllRedirects` `CheckRedirect` policies, and `ReadAllBounded` (fails with `ErrBodyTooLarge`, never truncates). Used by config, the CLI and every client; change a rule here, not in a caller. |
@@ -44,7 +44,7 @@ with actions pinned to full commit SHAs.
 | `internal/mcpclient` | Hand-rolled Streamable-HTTP MCP transport shared by search and Billet: one session per `Client`, established by a single-flight `initialize` on first use and ended by `Close` with a best-effort DELETE; the negotiated version must be `2025-06-18` or `2025-03-26` (`ErrUnsupportedProtocolVersion`); `tools/call` with bounded JSON or SSE responses; a `tools/call` refused with a session 404 is re-initialised and re-sent once, nothing else retried; cross-host and https-to-http redirects refused; key and session id header-only and scrubbed. |
 | `internal/mcpclient/mcpclienttest` | `mcpclient.Client`'s generic scripted `FakeServer`, exported for downstream tests. Separate from `mcpclient` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/researcher/fleet/fetch` | The `web_fetch` client: SSRF-guarded (private, loopback, link-local, CGNAT, NAT64/6to4, metadata ranges refused at dial time with pinned IPs; no proxy; redirects re-validated), bounded reads with truncation reported, `AllowLoopback` for tests only (see `CHIRON_FETCH_ALLOW_LOOPBACK`). |
-| `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. `Options.ModelEndpoint`/`ModelKeyRef` (via config) are security-sensitive — credentials travel to the configured endpoint. |
+| `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. `Options.ModelEndpoint`/`ModelKeyRef` (via flag, environment or config) are security-sensitive — credentials travel to the configured endpoint. |
 | `internal/researcher/fleet/model/modeltest` | `model.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `model` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report` (front matter, body, charts as assets, numbered sources). Pure — no IO; golden-file tested. |
@@ -137,6 +137,19 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   httptest. Any other non-empty value is a startup error. It never
   relaxes the private-network, link-local or metadata refusals, and must
   never be set in production; absence is the safe default.
+- `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` /
+  `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` — supply the worker's standard-model,
+  search-MCP and knowledge store endpoints when the matching
+  `--fleet-*-endpoint` flag is unset; a set flag wins. The matching key is
+  sent in a header on every request to that endpoint, so whoever controls
+  the variable receives the key. A base config can never name these
+  endpoints, so the flag and the variable are their only sources. Values
+  are validated at startup: absolute `https://` required, `http://`
+  admitted for loopback hosts only, and userinfo, a query or a fragment
+  refused (`internal/httpx`); the error names the variable, never the
+  value. Read only at the composition root on the worker path, the
+  knowledge variable only with a knowledge provider. Treat them as
+  operator-supplied deployment configuration, never a user-settable knob.
 - `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` —
   standard OTel configuration; binding either sends spans carrying
   research queries and interaction ids to the named collector. The
@@ -151,16 +164,23 @@ The `--agent worker`/`fleet` paths add a `fleet` config block
 (`internal/config` `FleetConfig`) whose endpoint and key fields are as
 security-sensitive as `CHIRON_GEMINI_BASE_URL`, for the same reason: the
 standard-model, search-MCP and knowledge store keys travel to whatever
-endpoint the config names, so whoever controls those fields receives the
-credentials.
+endpoint is named, so whoever controls those fields receives the
+credentials. A base config may name the key references but never an
+endpoint.
 
-- `fleet.model_endpoint` / `fleet.search_endpoint` — validated at
-  `ResearchConfig.Validate` with the `CHIRON_GEMINI_BASE_URL` rule:
+- `fleet.model_endpoint` / `fleet.search_endpoint` — set only by
+  `--fleet-model-endpoint` / `--fleet-search-endpoint` or the
+  `CHIRON_FLEET_*_ENDPOINT` variables above. `config.DecodeBase` refuses
+  a base config (`--config`, `-` or piped stdin) naming any fleet
+  endpoint before any flag is applied or secret resolved, and
+  `research-config` refuses the endpoint flags, so a pipeline never emits
+  one. Validated with the `CHIRON_GEMINI_BASE_URL` rule:
   absolute `https://`, `http://` for loopback hosts only, so a cleartext
   or internal-network endpoint can never receive a key; userinfo, a query
   and a fragment are refused too. Config, the CLI and each client's
   constructor all apply `internal/httpx`'s `ParseEndpoint`, so the rule
-  has one definition.
+  has one definition. Before the first model call the worker path emits
+  the endpoint hosts (scheme and host only) as one `delta` event.
 - `fleet.model_key_ref` / `fleet.search_key_ref` — must be `secret://`
   references; literals are rejected and never echoed in the error.
 - `fleet.knowledge_endpoint` / `fleet.knowledge_key_ref` — the knowledge
@@ -169,9 +189,8 @@ credentials.
   for `alexandria`. With no provider every other `fleet.knowledge_*` field
   must be empty or default. `fleet.knowledge_remember` (Billet only) sends
   each completed finding, built from public-web content, to the store; it
-  is off by default and named on the Interaction's tool list. Issue #28 (a
-  config file can choose both a credential and its destination) applies to
-  this pair as it does to the model and search pairs.
+  is off by default and named on the Interaction's tool list. The endpoint
+  follows the same provenance rule as the model and search endpoints.
 - `fleet.model_name` is required for `worker`/`fleet`; the model client
   never sends an empty identifier.
 - Spend caps: `fleet.max_turns`, `fleet.max_tokens` and
@@ -186,7 +205,8 @@ credentials.
   cap or feature applied when the loop ignores it. `stream` is accepted
   and ignored.
 
-These are config fields, not environment variables — they are per-run
-research configuration, not process-wide test hooks. If a later wave adds
-a model/search endpoint override *env var*, validate it exactly like
-`CHIRON_GEMINI_BASE_URL` and list it in the section above.
+These are config fields — per-run research configuration, not
+process-wide test hooks — except the endpoints, which come per run from a
+flag or per deployment from an environment variable, never from a base
+config (docs/DECISIONS.md, 2026-09-25 "Fleet endpoints come only from
+flags or the environment").

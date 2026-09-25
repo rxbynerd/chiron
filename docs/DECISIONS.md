@@ -640,6 +640,10 @@ security-sensitive env var is added; `AGENTS.md` records the `Fleet`
 endpoint/key fields as security-sensitive configuration on the same
 rationale (credentials are sent to the configured endpoint).
 
+**Superseded in part by the 2026-09-25 "Fleet endpoints come only from
+flags or the environment" entry below**: the endpoints now come from their
+flags or `CHIRON_FLEET_*_ENDPOINT`, never from a base config.
+
 ## 2026-07-01 — Standard-model adapter: OpenAI-compatible Chat Completions
 
 Wave 3 needs a model substrate for the in-process research lead and workers
@@ -1307,6 +1311,10 @@ having run.
 below**: the endpoint-scheme mirrors are gone; the `knowledge_space` mirror
 stands.
 
+**Superseded in part by the 2026-09-25 "Fleet endpoints come only from
+flags or the environment" entry below**: issue #28 is resolved there, for
+the knowledge endpoint as for the model and search endpoints.
+
 **Race detection in the test targets.** `just test` and CI run `go test
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
@@ -1594,3 +1602,99 @@ gained `WithExpectedTool(tool, queryArg)`, refusing a `tools/call` under any
 other name or missing that argument, so `internal/cli/worker_test.go` can
 prove the worker reaches a differently-named tool once configured and fails
 after three consecutive tool failures when it is not.
+
+## 2026-09-25 — Fleet endpoints come only from flags or the environment
+
+Issue #28 (cycle-3 finding C3-17). A base config (`--config`, `-` or piped
+stdin) could name both a `secret://` key reference and the endpoint that
+key is sent to. `secret://NAME` resolves any environment variable and
+`secret://file/<abs>` any readable file, so a shared config naming
+`secret://AWS_SECRET_ACCESS_KEY` and an attacker gateway exfiltrated the
+credential on the first model turn. The same held for the search and
+knowledge pairs. v1 never had this shape: the Gemini destination was
+env-only (`CHIRON_GEMINI_BASE_URL`).
+
+**Decision: provenance (option a).** `fleet.model_endpoint`,
+`fleet.search_endpoint` and `fleet.knowledge_endpoint` come only from
+`--fleet-model-endpoint`, `--fleet-search-endpoint` and
+`--fleet-knowledge-endpoint`, or from `CHIRON_FLEET_MODEL_ENDPOINT`,
+`CHIRON_FLEET_SEARCH_ENDPOINT` and `CHIRON_FLEET_KNOWLEDGE_ENDPOINT`.
+`config.DecodeBase` refuses a base naming any of them, whatever its agent,
+since a later flag may select `worker`. The error names the field, says a
+shared config must not choose where credentials are sent, and names the
+flag and variable to use instead, without echoing the value. `loadBase`
+reads every base through it, so the refusal happens at load time: before
+`ApplyFlags`, before validation and before any `secret.Resolve`. Because
+the check runs on the decoded base alone, a flag setting the same endpoint
+does not rescue a base that names one. Key references may still live in a
+base: with the destination chosen by the operator, a reference alone can
+at worst send the wrong operator-held secret to the operator's own
+provider. `config.FleetEndpoints` is the one table of field, flag and
+variable, shared by the refusal, the environment fallback and the
+`research-config` check.
+
+**Why not binding (option b).** Requiring the key reference from a flag
+whenever the endpoint comes from a base, or an allowlist of hosts, still
+lets a shared config steer traffic. A keyless search endpoint chosen by
+the config still receives every query and can return poisoned results,
+and `fleet.knowledge_remember` would write findings to a
+config-chosen store. An allowlist is itself configuration that would need
+the same provenance rule, and a rule that depends on the provenance of two
+fields at once is harder to reason about and to test.
+
+**Why not namespacing (option c).** Restricting env references to
+`CHIRON_` names and file references to a Chiron directory narrows which
+secrets can leak, not where they go: a config could still send the model
+key the operator gave Chiron to an attacker's host, and that key is the
+one worth stealing. It would also break the documented `secret://`
+grammar and existing references (`secret://MODEL_KEY`, the
+`secret://GEMINI_API_KEY` default), constraining the whole secret seam to
+fix a problem in fleet config.
+
+**Precedence.** An explicitly set flag wins over its variable, tested with
+pflag's `Changed` so even an explicitly empty flag is honoured: the flag
+is the per-invocation scope, the variable the deployment default. The
+variables are read only at the composition root, only on the worker path,
+and validated with `httpx.ParseEndpoint`; the error names the variable,
+never the value. The knowledge variable is read only when a knowledge
+provider is configured, so a deployment can export all three and still run
+without recall. As with `CHIRON_GEMINI_BASE_URL`, a variable that is not
+read is not validated.
+
+**Pipelines.** `research-config` output is the next stage's base, so it
+refuses the three endpoint flags with an error pointing at the final stage
+and the variables, and it never reads the variables. Refusing was chosen
+over omitting endpoints from the encoded form: omission would let the
+first stage succeed and push a confusing "is required" error to the last.
+The recipe is to compose everything else through `research-config` and
+give the endpoints to the final `chiron research` stage by flag or
+variable (README, "Pipeline composition").
+
+**Endpoint hosts on stderr.** After every key reference has resolved and
+every client is built, and before `run.Run`, the composition root emits one
+`delta` event whose payload is
+`{"endpoints":{"model":"<scheme://host>","search":"<scheme://host>","knowledge":"<scheme://host>"}}`,
+with `knowledge` omitted without a provider. Values are reduced to scheme
+and host through `httpx.ParseEndpoint`, so a path or query carrying a
+token never reaches stderr. The payload type lives in `internal/cli`
+beside the thought-summary delta payload, because `transport.Event`
+carries raw JSON and the transport need not know payload shapes; the
+NDJSON contract (one `{time, kind, payload}` object per line) is
+unchanged. The event precedes `run_started` because it describes the
+run's configuration and is the last point before the worker loop starts
+that the CLI owns; no MCP session or model request is made while clients
+are built, so it precedes every credential-bearing request. Emission is
+best effort, like every transport write on a paid path.
+
+**Resolver seam.** `NewRootCommand` binds `secret.Default`;
+`newRootCommand(secret.Resolver)` threads any resolver explicitly through
+research, get, follow-up and the worker and knowledge builders. No
+package-level variable is swapped, so a test's counting resolver cannot
+leak into another test. The CLI test with that resolver proves a refused
+base never reaches resolution.
+
+**Scope.** Langfuse and OTLP endpoint flags do not exist yet (Wave 2); the
+OTel collector address is already environment-only
+(`OTEL_EXPORTER_OTLP_*`). Any credential-bearing endpoint added later
+follows this rule. `--agent fleet` will reuse the worker path's fallback
+and event when it lands.
