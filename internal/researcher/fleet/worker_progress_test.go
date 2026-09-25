@@ -413,6 +413,9 @@ func TestWorkerProgressDroppedWithoutAwait(t *testing.T) {
 		in, err := w.Result(ctx, id)
 		return err == nil && in.Status != types.StatusInProgress
 	})
+	if got := log.snapshot(); len(got) != 0 {
+		t.Fatalf("progress before Await = %+v, want none: Await was never called yet", got)
+	}
 	if err := w.Await(ctx, id); err != nil {
 		t.Fatalf("Await: %v", err)
 	}
