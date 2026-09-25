@@ -489,14 +489,9 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 	}
 }
 
-// geminiBaseURL reads and validates CHIRON_GEMINI_BASE_URL before any
-// client exists. The API key travels in a header on every request to
-// this base, so an unvalidated override is a key-exfiltration and SSRF
-// channel (CWE-918, CWE-319). httpx.ParseEndpoint requires https://,
-// permits http:// for loopback hosts only (the CLI smoke tests' httptest
-// servers), and refuses userinfo, a query or a fragment; the error never
-// echoes the value. The variable's absence is the safe default; see
-// AGENTS.md for the operational caveat.
+// geminiBaseURL validates CHIRON_GEMINI_BASE_URL with httpx.ParseEndpoint
+// before any client exists: the API key travels to this base on every
+// request (CWE-918, CWE-319). Absence is the safe default; see AGENTS.md.
 func geminiBaseURL() (string, error) {
 	raw := os.Getenv(envGeminiBaseURL)
 	if raw == "" {
