@@ -228,6 +228,44 @@ func TestBindWorkerProgressPayload(t *testing.T) {
 	}
 }
 
+// TestBindWorkerProgressPayloadRecall: bindWorkerProgress scrubs Detail the
+// same way for a recall action as it does for search.
+func TestBindWorkerProgressPayloadRecall(t *testing.T) {
+	const key = "Zk3xQ9vB2mN7pL4tR8wY1cH6jD5fG0sA"
+	rec := &emitRecorder{}
+	hook := bindWorkerProgress(true, rec)
+	hook(context.Background(), fleet.Progress{
+		Turn: 3, MaxTurns: 8, Action: "recall", Detail: "PHY vendor " + key,
+		InputTokens: 50, OutputTokens: 10, EstimatedCostGBP: 0.0006,
+	})
+
+	if len(rec.events) != 1 || rec.events[0].Kind != transport.KindDelta {
+		t.Fatalf("events = %+v, want one delta", rec.events)
+	}
+	raw := string(rec.events[0].Payload)
+	if strings.Contains(raw, key) {
+		t.Errorf("payload carries the credential: %s", raw)
+	}
+	var p workerTurnPayload
+	if err := json.Unmarshal(rec.events[0].Payload, &p); err != nil {
+		t.Fatalf("payload %s: %v", raw, err)
+	}
+	want := workerTurnPayload{
+		Type:             "worker_turn",
+		Text:             "turn 3/8: recall PHY vendor [REDACTED:high-entropy] (60 tokens so far)",
+		Turn:             3,
+		MaxTurns:         8,
+		Action:           "recall",
+		Detail:           "PHY vendor [REDACTED:high-entropy]",
+		InputTokens:      50,
+		OutputTokens:     10,
+		EstimatedCostGBP: 0.0006,
+	}
+	if p != want {
+		t.Errorf("payload = %+v, want %+v", p, want)
+	}
+}
+
 // TestBindWorkerProgressFailuresAreDropped: an Emit error or an
 // unmarshalable report is dropped without a panic, and the hook returns.
 func TestBindWorkerProgressFailuresAreDropped(t *testing.T) {
