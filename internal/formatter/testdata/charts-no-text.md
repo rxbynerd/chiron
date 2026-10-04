@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Visualise Mediterranean shipping density
 agent: deep-research-max-preview-04-2026

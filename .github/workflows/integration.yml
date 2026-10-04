@@ -65,7 +65,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
-        run: go build -o bin/chiron ./cmd/chiron
+        run: go build -ldflags "-X github.com/rxbynerd/chiron/internal/version.Version=$(git describe --tags --always --dirty)" -o bin/chiron ./cmd/chiron
 
       - name: Research
         id: research

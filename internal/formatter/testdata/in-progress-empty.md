@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Chart quarterly grain shipments through the Bosphorus
 agent: deep-research-preview-04-2026

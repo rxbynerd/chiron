@@ -10,16 +10,18 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/rxbynerd/chiron/internal/types"
+	"github.com/rxbynerd/chiron/internal/version"
 )
 
 // Markdown is the v1 Formatter. It renders one Interaction as a single
-// portable document (PROPOSAL.md §4.4): YAML front matter carrying the
-// run's identity and cost signals, the final text output as the body,
-// chart images as relative links backed by returned assets, and a
-// numbered sources section at the foot. It performs no IO: chart
-// images are returned as Report.Assets and referenced from the
-// document by relative links, leaving placement to the ReportSink
-// (see docs/DECISIONS.md).
+// portable document (PROPOSAL.md §4.4): a leading HTML comment recording
+// the chiron build version, YAML front matter carrying the run's
+// identity and cost signals, the final text output as the body, chart
+// images as relative links backed by returned assets, and a numbered
+// sources section at the foot. It performs no IO: chart images are
+// returned as Report.Assets and referenced from the document by
+// relative links, leaving placement to the ReportSink (see
+// docs/DECISIONS.md).
 type Markdown struct{}
 
 // NewMarkdown returns the markdown Formatter.
@@ -70,11 +72,9 @@ type source struct {
 }
 
 // markdown renders the source as a numbered-list entry body. Title and
-// URI are API-provided and untrusted: `]` in a title and `)` in a URI
-// would break out of the link syntax, so both are neutralised before
-// formatting. A knowledge store locator cannot resolve in a viewer, so it
-// renders as its escaped title and the locator in inline code, never as a
-// link. Scheme filtering happens earlier, in collectSources.
+// URI are untrusted API input: link text goes through escapeInline, and
+// the destination is percent-encoded separately (see webLinkDestination).
+// A knowledge store locator renders as escaped title plus locator in code.
 func (s source) markdown() string {
 	if isKnowledgeURI(s.URI) {
 		uri := strings.ReplaceAll(strings.Join(strings.Fields(s.URI), "%20"), "`", "%60")
@@ -83,13 +83,31 @@ func (s source) markdown() string {
 		}
 		return escapeInline(s.Title) + " `" + uri + "`"
 	}
-	title := strings.ReplaceAll(s.Title, "]", `\]`)
+	title := s.Title
 	if title == "" {
 		title = s.URI
 	}
-	uri := strings.ReplaceAll(s.URI, ")", "%29")
-	return fmt.Sprintf("[%s](%s)", title, uri)
+	return fmt.Sprintf("[%s](%s)", escapeInline(title), webLinkDestination.Replace(s.URI))
 }
+
+// webLinkDestination percent-encodes bytes that would break CommonMark's
+// inline-link destination grammar or force a fallback to literal text,
+// where raw HTML in the URI would then render live: "(", ")", ASCII
+// whitespace, "<", ">", and every ASCII control byte (0x00-0x1F, 0x7F).
+var webLinkDestination = func() *strings.Replacer {
+	pairs := []string{
+		"(", "%28",
+		")", "%29",
+		" ", "%20",
+		"<", "%3C",
+		">", "%3E",
+	}
+	for b := 0; b <= 0x1F; b++ {
+		pairs = append(pairs, string(rune(b)), fmt.Sprintf("%%%02X", b))
+	}
+	pairs = append(pairs, string(rune(0x7F)), fmt.Sprintf("%%%02X", 0x7F))
+	return strings.NewReplacer(pairs...)
+}()
 
 // Format renders the interaction. The body is the last text output —
 // the final report; earlier text outputs are interim and thought
@@ -123,6 +141,7 @@ func (m *Markdown) Format(_ context.Context, in *types.Interaction) (*types.Repo
 	sources := collectSources(in.Citations)
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "<!-- chiron-version: %s -->\n", version.Version)
 	b.WriteString("---\n")
 	enc := yaml.NewEncoder(&b)
 	enc.SetIndent(2)

@@ -1,8 +1,10 @@
 # Chiron task runner. Run `just --list` for an overview.
 
-# Build the chiron binary into ./bin.
+version_pkg := "github.com/rxbynerd/chiron/internal/version"
+
+# Build the chiron binary into ./bin, stamped with its git version.
 build:
-    go build -o bin/chiron ./cmd/chiron
+    go build -ldflags "-X {{version_pkg}}.Version=$(git describe --tags --always --dirty)" -o bin/chiron ./cmd/chiron
 
 # Run all tests.
 test:

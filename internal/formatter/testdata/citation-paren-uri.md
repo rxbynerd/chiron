@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Survey URLs containing parentheses
 agent: deep-research-preview-04-2026
@@ -16,4 +17,4 @@ Findings.
 
 ## Sources
 
-1. [Foo (bar)](https://example.org/wiki/Foo_(bar%29)
+1. [Foo (bar)](https://example.org/wiki/Foo_%28bar%29)

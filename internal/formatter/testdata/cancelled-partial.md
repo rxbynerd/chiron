@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Trace the etymology of the word chiron
 agent: deep-research-preview-04-2026

@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Catalogue bracket usage in legal citations
 agent: deep-research-preview-04-2026

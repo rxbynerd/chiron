@@ -1,3 +1,4 @@
+<!-- chiron-version: dev -->
 ---
 query: Audit the provenance of the Codex Sinaiticus
 agent: deep-research-preview-04-2026
