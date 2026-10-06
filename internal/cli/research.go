@@ -127,13 +127,15 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 // endpoints from the environment, build the worker from cfg.Fleet, name its
 // destinations on the event stream, then drive the unchanged run core. The
 // deep-research levers are rejected by config validation for this agent
-// rather than ignored; the worker's spend bounds are the fleet caps.
+// rather than ignored; the worker's spend bounds are the fleet caps. Per-turn
+// progress reaches the transport as worker_turn deltas unless --quiet.
 func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
 	if err := applyEndpointEnv(&cfg.Fleet, cmd.Flags()); err != nil {
 		return err
 	}
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
-		res, sessions, err := buildWorker(ctx, cfg, resolver, deps.Tracer, stderr)
+		progress := bindWorkerProgress(cfg.Stream, deps.Transport)
+		res, sessions, err := buildWorker(ctx, cfg, resolver, deps.Tracer, stderr, progress)
 		if err != nil {
 			return err
 		}
@@ -164,7 +166,8 @@ const fetchMaxContentBytes = 1 << 20
 // run and each model, search and knowledge call; fetch has its own tighter
 // per-call bound. The returned closer ends the MCP sessions the search and
 // knowledge clients hold; when buildWorker fails, nothing is left open.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer) (_ *fleet.Worker, _ io.Closer, err error) {
+// progress, when non-nil, receives the per-turn reports.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ *fleet.Worker, _ io.Closer, err error) {
 	fc := cfg.Fleet
 	if fc.ModelEndpoint == "" {
 		return nil, nil, fmt.Errorf("research --agent worker: fleet.model_endpoint is required; pass --fleet-model-endpoint or set %s", config.EnvFleetModelEndpoint)
@@ -262,6 +265,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		KnowledgeNamespace: memory.Namespace(fc.KnowledgeSpace),
 		Tracer:             tracer,
 		Logger:             slog.New(secret.NewScrubHandler(slog.NewTextHandler(stderr, nil))),
+		Progress:           progress,
 		Caps: fleet.Caps{
 			MaxTurns:         fc.MaxTurns,
 			MaxTokens:        fc.MaxTokens,
@@ -516,6 +520,54 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 		// degraded to polling — without it, an operator watching the
 		// event stream cannot tell a connectivity failure from --quiet.
 		payload, err := json.Marshal(deltaPayload{Type: "stream_degraded", Text: "streaming failed repeatedly; awaiting by polling"})
+		if err != nil {
+			return
+		}
+		_ = tr.Emit(ctx, transport.Event{Kind: transport.KindDelta, Payload: payload})
+	}
+}
+
+// workerTurnPayload is the delta payload for one worker progress report: the
+// type and text every delta carries, plus the report's fields.
+type workerTurnPayload struct {
+	Type             string  `json:"type"`
+	Text             string  `json:"text"`
+	Turn             int     `json:"turn"`
+	MaxTurns         int     `json:"max_turns"`
+	Action           string  `json:"action"`
+	Detail           string  `json:"detail"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	EstimatedCostGBP float64 `json:"estimated_cost_gbp"`
+}
+
+// bindWorkerProgress routes worker progress onto the transport as delta
+// events typed worker_turn and, like bindThoughtDisplay, binds nothing under
+// --quiet. text stands alone because the proto Delta carries only text.
+// Emission is best effort: a marshal or emit failure is dropped.
+func bindWorkerProgress(stream bool, tr transport.Transport) func(context.Context, fleet.Progress) {
+	if !stream {
+		return nil
+	}
+	return func(ctx context.Context, p fleet.Progress) {
+		// The worker scrubs Detail; every output path scrubs again.
+		detail := secret.Scrub(p.Detail)
+		text := fmt.Sprintf("turn %d/%d: %s", p.Turn, p.MaxTurns, p.Action)
+		if detail != "" {
+			text += " " + detail
+		}
+		text += fmt.Sprintf(" (%d tokens so far)", p.InputTokens+p.OutputTokens)
+		payload, err := json.Marshal(workerTurnPayload{
+			Type:             "worker_turn",
+			Text:             secret.Scrub(text),
+			Turn:             p.Turn,
+			MaxTurns:         p.MaxTurns,
+			Action:           p.Action,
+			Detail:           detail,
+			InputTokens:      p.InputTokens,
+			OutputTokens:     p.OutputTokens,
+			EstimatedCostGBP: p.EstimatedCostGBP,
+		})
 		if err != nil {
 			return
 		}
