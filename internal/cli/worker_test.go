@@ -7,12 +7,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 )
 
 // workerArgs returns the flags that point --agent worker at the given fakes.
-func workerArgs(modelSrv *model.FakeServer, searchSrv *search.FakeServer, extra ...string) []string {
+func workerArgs(modelSrv *modeltest.FakeServer, searchSrv *searchtest.FakeServer, extra ...string) []string {
 	args := []string{
 		"research", "--query", "why is the sky blue",
 		"--agent", "worker",
@@ -33,12 +34,12 @@ func TestWorkerSearchFetchFinalThroughCLI(t *testing.T) {
 		_, _ = w.Write([]byte("<html><body><h1>Sky</h1><p>Rayleigh scattering.</p></body></html>"))
 	}))
 	defer page.Close()
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky article", URL: page.URL, Snippet: "scattering"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky article", URL: page.URL, Snippet: "scattering"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"` + page.URL + `","title":"Sky article"}]}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"` + page.URL + `","title":"Sky article"}]}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
@@ -59,12 +60,72 @@ func TestWorkerSearchFetchFinalThroughCLI(t *testing.T) {
 	}
 }
 
+// TestWorkerCustomSearchToolConfiguration: fleet.search_tool and
+// fleet.search_query_arg let the worker reach a search MCP server that names
+// its tool and query argument differently from the reference backend's
+// search/query (docs/DECISIONS.md, 2026-09-25 "SP-A").
+func TestWorkerCustomSearchToolConfiguration(t *testing.T) {
+	t.Run("succeeds when configured", func(t *testing.T) {
+		page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<html><body><h1>Sky</h1><p>Rayleigh scattering.</p></body></html>"))
+		}))
+		defer page.Close()
+		searchSrv := searchtest.NewFakeServer(
+			[]search.Result{{Title: "Sky article", URL: page.URL, Snippet: "scattering"}},
+			searchtest.WithExpectedTool("web_search", "q"),
+		)
+		defer searchSrv.Close()
+		modelSrv := modeltest.NewFakeServer(
+			modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+			modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
+			modeltest.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"` + page.URL + `","title":"Sky article"}]}`, FinishReason: "stop"},
+		)
+		defer modelSrv.Close()
+		t.Setenv("MODEL_KEY", "test-model-key")
+		t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "1")
+
+		args := workerArgs(modelSrv, searchSrv, "-o", "text",
+			"--fleet-search-tool", "web_search", "--fleet-search-query-arg", "q")
+		stdout, stderr, err := execute(t, args...)
+		if err != nil {
+			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+		}
+		if !strings.Contains(stdout, "Rayleigh scattering") || !strings.Contains(stdout, "[Sky article]("+page.URL+")") {
+			t.Errorf("report lacks the body or the fetched source:\n%s", stdout)
+		}
+	})
+
+	t.Run("fails when not configured", func(t *testing.T) {
+		searchSrv := searchtest.NewFakeServer(nil, searchtest.WithExpectedTool("web_search", "q"))
+		defer searchSrv.Close()
+		var replies []modeltest.FakeReply
+		for i := 0; i < 3; i++ {
+			replies = append(replies, modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"})
+		}
+		modelSrv := modeltest.NewFakeServer(replies...)
+		defer modelSrv.Close()
+		t.Setenv("MODEL_KEY", "test-model-key")
+
+		// workerArgs alone leaves fleet.search_tool/query_arg at their
+		// search/query defaults, which the fake above refuses.
+		stdout, _, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "text")...)
+		var exitErr *ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != ExitResearchFailed {
+			t.Fatalf("err = %v, want ExitError code %d", err, ExitResearchFailed)
+		}
+		if !strings.Contains(stdout, "consecutive tool failures") {
+			t.Errorf("report lacks the tool-failure detail:\n%s", stdout)
+		}
+	})
+}
+
 // TestWorkerLoopbackSwitchRejectsOtherValues: the loopback switch accepts
 // only "1", so a typo cannot widen the SSRF guard.
 func TestWorkerLoopbackSwitchRejectsOtherValues(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "true")
@@ -82,9 +143,9 @@ func TestWorkerLoopbackSwitchRejectsOtherValues(t *testing.T) {
 // action) exits with the research-failed code after emitting a placeholder
 // report, matching the exit-code contract.
 func TestWorkerFailureExitCode(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(model.FakeReply{Content: `{"action":"shell","query":"rm -rf /"}`, FinishReason: "stop"})
+	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{Content: `{"action":"shell","query":"rm -rf /"}`, FinishReason: "stop"})
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 
@@ -101,9 +162,9 @@ func TestWorkerFailureExitCode(t *testing.T) {
 // TestWorkerRejectsDeepResearchLevers: --budget and --plan are refused with
 // --agent worker before any secret is resolved or request made.
 func TestWorkerRejectsDeepResearchLevers(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 
 	for _, tt := range []struct {
@@ -153,9 +214,9 @@ func TestGetAndFollowUpRefuseWorkerIDs(t *testing.T) {
 // TestWorkerMissingFleetFieldsFailBeforeAnyRequest: each required fleet
 // field is named in the error when absent, and nothing is dialled.
 func TestWorkerMissingFleetFieldsFailBeforeAnyRequest(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 
@@ -195,9 +256,9 @@ func TestWorkerMissingFleetFieldsFailBeforeAnyRequest(t *testing.T) {
 // names an unset variable, so an error that reached secret resolution would
 // name it instead of the knowledge field.
 func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	const unsetModelKey = "CHIRON_TEST_UNSET_MODEL_KEY"
 
@@ -232,9 +293,9 @@ func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
 // TestWorkerKnowledgeKeyResolution: an unresolvable knowledge key ref stops
 // the run before any request and never leaks a resolved value.
 func TestWorkerKnowledgeKeyResolution(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("KB_KEY", "test-kb-key")

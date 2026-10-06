@@ -7,9 +7,11 @@ import (
 	"testing"
 
 	"github.com/rxbynerd/chiron/internal/memory/alexandria"
-	"github.com/rxbynerd/chiron/internal/memory/billet"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/memory/alexandria/alexandriatest"
+	"github.com/rxbynerd/chiron/internal/memory/billet/billettest"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 )
 
 // TestWorkerRecallSearchFetchFinalThroughCLI drives a worker that recalls
@@ -22,20 +24,20 @@ func TestWorkerRecallSearchFetchFinalThroughCLI(t *testing.T) {
 		_, _ = w.Write([]byte("<html><body><p>Rayleigh scattering.</p></body></html>"))
 	}))
 	defer page.Close()
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky article", URL: page.URL, Snippet: "scattering"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky article", URL: page.URL, Snippet: "scattering"}})
 	defer searchSrv.Close()
-	kbSrv := billet.NewFakeServer([]billet.Record{{
+	kbSrv := billettest.NewFakeServer([]billettest.Record{{
 		MemoryID:  "mem-0a1b",
 		Content:   "Prior finding: the team settled on Rayleigh scattering as the accepted explanation.",
 		Score:     0.9,
 		CreatedAt: "2026-09-01T00:00:00Z",
 	}})
 	defer kbSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[` +
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[` +
 			`{"url":"` + page.URL + `","title":"Sky article"},` +
 			`{"url":"billet://memory/mem-0a1b","title":"Prior finding"}]}`, FinishReason: "stop"},
 	)
@@ -88,12 +90,12 @@ func TestWorkerRecallSearchFetchFinalThroughCLI(t *testing.T) {
 // objective, the answer and the sources, and the interaction lists the
 // remember tool.
 func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	kbSrv := billet.NewFakeServer(nil)
+	kbSrv := billettest.NewFakeServer(nil)
 	defer kbSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"final","answer":"The sky is blue because of Rayleigh scattering.","citations":[]}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"final","answer":"The sky is blue because of Rayleigh scattering.","citations":[]}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")
@@ -133,9 +135,9 @@ func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
 // REST with the bearer and the configured space, and a fragment hit is
 // citable by its web locator.
 func TestWorkerRecallAlexandriaThroughCLI(t *testing.T) {
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	kbSrv := alexandria.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{{
+	kbSrv := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{{
 		Ref:     "kb://fragment/0f2e4d6c-1111-2222-3333-444455556666",
 		Unit:    "fragment",
 		ID:      "0f2e4d6c-1111-2222-3333-444455556666",
@@ -147,9 +149,9 @@ func TestWorkerRecallAlexandriaThroughCLI(t *testing.T) {
 	}}})
 	defer kbSrv.Close()
 	locator := kbSrv.URL() + "/f/0f2e4d6c-1111-2222-3333-444455556666"
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"final","answer":"Rayleigh scattering.","citations":[{"url":"` + locator + `","title":"Sky colour decision"}]}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"final","answer":"Rayleigh scattering.","citations":[{"url":"` + locator + `","title":"Sky colour decision"}]}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", "test-model-key")

@@ -1,4 +1,7 @@
-package billet
+// Package billettest ships billet.Client's scripted test double. It is a
+// separate package from internal/memory/billet so net/http/httptest, needed
+// only to script the double, never links into the chiron binary.
+package billettest
 
 import (
 	"encoding/json"
@@ -6,6 +9,16 @@ import (
 	"sync"
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
+	"github.com/rxbynerd/chiron/internal/mcpclient/mcpclienttest"
+	"github.com/rxbynerd/chiron/internal/memory/billet"
+)
+
+// searchTool and saveTool mirror billet's unexported tool names (see
+// internal/memory/billet/billet.go); the fake speaks the wire protocol
+// directly rather than reaching into billet's unexported constants.
+const (
+	searchTool = "search_memory"
+	saveTool   = "save_memory"
 )
 
 // Record is one scripted search_memory record.
@@ -16,18 +29,26 @@ type Record struct {
 	CreatedAt string
 }
 
-// FakeServer is a Billet stand-in built on mcpclient.FakeServer, shared by
-// every package that drives recall or save-back in tests. search_memory
+// wireRecord mirrors the search_memory record shape billet.Client decodes.
+type wireRecord struct {
+	MemoryID  string  `json:"memory_id"`
+	Content   string  `json:"content"`
+	Score     float64 `json:"score"`
+	CreatedAt string  `json:"created_at"`
+}
+
+// FakeServer is a Billet stand-in built on mcpclienttest.FakeServer, shared
+// by every package that drives recall or save-back in tests. search_memory
 // answers with the scripted records (at most the requested limit) as
 // structuredContent plus a text block carrying the same document, as Billet
 // does; save_memory records the content it received and accepts it with a
 // fresh id. Callers own its lifecycle: build it at the call site and defer
 // Close.
 type FakeServer struct {
-	inner     *mcpclient.FakeServer
+	inner     *mcpclienttest.FakeServer
 	records   []Record
 	toolError string
-	opts      []mcpclient.FakeOption
+	opts      []mcpclienttest.FakeOption
 
 	mu    sync.Mutex
 	saved []string
@@ -42,10 +63,16 @@ func WithToolError(text string) FakeOption {
 	return func(f *FakeServer) { f.toolError = text }
 }
 
+// WithSessionID makes the fake issue a session on initialize and require it
+// on every later request, modelling a stateful server.
+func WithSessionID(id string) FakeOption {
+	return func(f *FakeServer) { f.opts = append(f.opts, mcpclienttest.WithSessionID(id)) }
+}
+
 // WithRawResult makes every tools/call return raw verbatim as the result
 // member, for malformed-shape cases.
 func WithRawResult(raw string) FakeOption {
-	return func(f *FakeServer) { f.opts = append(f.opts, mcpclient.WithRawResult(raw)) }
+	return func(f *FakeServer) { f.opts = append(f.opts, mcpclienttest.WithRawResult(raw)) }
 }
 
 // NewFakeServer starts a fake Billet answering search_memory with records.
@@ -55,7 +82,7 @@ func NewFakeServer(records []Record, opts ...FakeOption) *FakeServer {
 	for _, o := range opts {
 		o(f)
 	}
-	f.inner = mcpclient.NewFakeServer(f.answer, f.opts...)
+	f.inner = mcpclienttest.NewFakeServer(f.answer, f.opts...)
 	return f
 }
 
@@ -66,13 +93,24 @@ func (f *FakeServer) URL() string { return f.inner.URL() }
 func (f *FakeServer) Close() { f.inner.Close() }
 
 // Requests returns a copy of the requests received, in arrival order.
-func (f *FakeServer) Requests() []mcpclient.FakeRequest { return f.inner.Requests() }
+func (f *FakeServer) Requests() []mcpclienttest.FakeRequest { return f.inner.Requests() }
 
 // CallCount reports every request received, handshake included.
 func (f *FakeServer) CallCount() int { return f.inner.CallCount() }
 
 // ToolCallCount reports the tools/call requests received.
 func (f *FakeServer) ToolCallCount() int { return f.inner.ToolCallCount() }
+
+// InitializeCount reports the initialize requests received: 1 per Client
+// lifetime unless a session ended.
+func (f *FakeServer) InitializeCount() int { return f.inner.InitializeCount() }
+
+// DeleteCount reports the session DELETE requests received.
+func (f *FakeServer) DeleteCount() int { return f.inner.DeleteCount() }
+
+// ExpireSession ends every session the fake has issued, so the next request
+// bearing one gets HTTP 404.
+func (f *FakeServer) ExpireSession() { f.inner.ExpireSession() }
 
 // SavedContents returns the content of every save_memory call, in order.
 func (f *FakeServer) SavedContents() []string {
@@ -92,7 +130,7 @@ func (f *FakeServer) answer(tool string, args map[string]any) (mcpclient.ToolRes
 	}
 	switch tool {
 	case searchTool:
-		limit := DefaultLimit
+		limit := billet.DefaultLimit
 		if n, ok := args["limit"].(float64); ok && n > 0 {
 			limit = int(n)
 		}

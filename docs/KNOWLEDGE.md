@@ -55,7 +55,8 @@ This document defines:
   search pair. This design adds the pair under the same mitigations already in
   place (absolute https, loopback-only http, no userinfo/query/fragment,
   `secret://` only, values never echoed) and notes the pair in #28 rather than
-  resolving #28 here.
+  resolving #28 here. Resolved by the 2026-09-25 DECISIONS entry "Fleet
+  endpoints come only from flags or the environment".
 
 ## 2. The seam: `internal/memory`
 
@@ -477,8 +478,10 @@ prints the fields automatically.
 ## 8. Security
 
 - The knowledge endpoint and key ref are as sensitive as the search pair:
-  the key travels to whatever endpoint the config names. Same validation,
-  same never-echo rule, same header-only carriage, same scrubbing.
+  the key travels to whatever endpoint the flag or
+  `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` names; a base config naming one is
+  refused. Same validation, same never-echo rule, same header-only
+  carriage, same scrubbing.
 - Recall results and remembered content are untrusted data inside the
   fence; nothing in a hit can become an instruction or close the fence.
 - Save-back sends the finding, which was built from public-web content, to

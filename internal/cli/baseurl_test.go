@@ -35,6 +35,36 @@ func TestBaseURLOverrideRejectedBeforeAnyRequest(t *testing.T) {
 	}
 }
 
+// TestBaseURLOverrideRefusesCredentialCarriers: userinfo, a query and a
+// fragment are refused like any other unsafe override, and the error names
+// the value by scheme and host only.
+func TestBaseURLOverrideRefusesCredentialCarriers(t *testing.T) {
+	const secret = "Winter2026-credential"
+	cases := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{"userinfo", "https://user:" + secret + "@gemini.example.com", "userinfo"},
+		{"query", "https://gemini.example.com/?key=" + secret, "query or fragment"},
+		{"empty query on loopback", "http://127.0.0.1:9999/?", "query or fragment"},
+		{"fragment", "https://gemini.example.com/#" + secret, "query or fragment"},
+		{"cleartext with a secret path", "http://evil.example.com/" + secret, "must be an absolute https:// URL"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CHIRON_GEMINI_BASE_URL", tt.url)
+			_, err := geminiBaseURL()
+			if err == nil || !strings.HasPrefix(err.Error(), "CHIRON_GEMINI_BASE_URL ") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("geminiBaseURL = %v, want a CHIRON_GEMINI_BASE_URL error containing %q", err, tt.wantErr)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), tt.url) {
+				t.Errorf("error echoed the value: %v", err)
+			}
+		})
+	}
+}
+
 // TestBaseURLOverrideAccepted: https anywhere and http on loopback are
 // admitted — the loopback exemption is what lets the smoke tests run
 // against httptest servers.

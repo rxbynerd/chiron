@@ -630,12 +630,19 @@ the `api_key_ref` rule. Endpoint and key fields are optional at the config
 layer (a later wave resolves and requires them); the caps are validated
 eagerly.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: config
+and the CLI now share `httpx.ParseEndpoint`; nothing is mirrored.
+
 Wave 3 prefers config fields to new environment variables for the model
 and search overrides — the endpoints are per-run research configuration,
 not process-wide test hooks like `CHIRON_GEMINI_BASE_URL`. No new
 security-sensitive env var is added; `AGENTS.md` records the `Fleet`
 endpoint/key fields as security-sensitive configuration on the same
 rationale (credentials are sent to the configured endpoint).
+
+**Superseded in part by the 2026-09-25 "Fleet endpoints come only from
+flags or the environment" entry below**: the endpoints now come from their
+flags or `CHIRON_FLEET_*_ENDPOINT`, never from a base config.
 
 ## 2026-07-01 — Standard-model adapter: OpenAI-compatible Chat Completions
 
@@ -695,6 +702,9 @@ caller to have checked. Extracting a shared `internal/httpx` (or similar)
 helper for redirect policy, bounded reads, and the loopback scheme rule is
 deferred; when a third consumer lands it should be revisited.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: all
+three now live in `internal/httpx`.
+
 **Credential-scrub belt-and-braces.** The key is only ever in the
 `Authorization` header, so Chiron never puts it in a request body or URL.
 But a provider *error body* (a 401 in particular) can echo the submitted
@@ -714,6 +724,10 @@ worker and lead chunks can reuse one fake model transport for CI
 the deliberate trade for cross-chunk reuse of a single scripted transport,
 and the package is a test-support-heavy adapter. Callers own the fake's
 lifecycle (build at the call site, `defer Close`).
+
+**Superseded by the 2026-09-25 entry below**: the fake now lives in
+`internal/researcher/fleet/model/modeltest`, not `fake.go`, so
+`net/http/httptest` no longer reaches the `chiron` binary's normal build.
 
 ## 2026-07-01 — Search MCP client and its assumed tool-result shape
 
@@ -735,6 +749,10 @@ decision. `initialize`/`initialized`/`tools/call` are each single-attempt:
 (the same reasoning the model adapter applies to its paid POST); the cheap
 handshake calls are not retried either, keeping the flow's cost ceiling
 obvious.
+
+**Superseded in part by the 2026-09-25 "MCP client: supported protocol
+versions" entry below**: a session now serves the client's lifetime, and a
+`tools/call` refused with a session 404 is re-sent once.
 
 **Two reply framings, both bounded.** A Streamable-HTTP `tools/call` POST may
 return `application/json` (one JSON-RPC message) or `text/event-stream` (SSE
@@ -770,6 +788,9 @@ the credential are refused. `allowedEndpointScheme`, `refuseCrossHostRedirects`
 and `readBounded` are reimplemented here, the same accepted duplication noted
 for the model adapter pending a shared `internal/httpx` helper.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**: the
+search transport (now `internal/mcpclient`) uses `internal/httpx`.
+
 **Fake shipped in `fake.go`, not `_test.go`.** As with the model adapter, an
 `httptest.Server`-backed `FakeServer` lives in the non-test build so the later
 worker/lead chunks reuse one fake search MCP for CI (docs/V2-RESEARCH-AGENT
@@ -777,6 +798,10 @@ worker/lead chunks reuse one fake search MCP for CI (docs/V2-RESEARCH-AGENT
 call counts, and has options for an assigned session id, an SSE reply framing,
 and a verbatim tool result (for unexpected-shape / oversize cases). Callers
 own its lifecycle.
+
+**Superseded by the 2026-09-25 entry below**: the fake now lives in
+`internal/researcher/fleet/search/searchtest`, not `fake.go`, so
+`net/http/httptest` no longer reaches the `chiron` binary's normal build.
 
 ## 2026-07-01 — web_fetch client: SSRF posture and oversize truncation
 
@@ -1052,6 +1077,10 @@ The v1 `internal/interactions.refuseCrossHostRedirects` has the same shape and
 is not changed by this entry. Alongside this, both clients reject an endpoint
 that embeds userinfo, and no endpoint error echoes a value containing `@`.
 
+**Superseded by the 2026-09-25 "Shared internal/httpx" entry below**:
+`internal/interactions` now refuses the downgrade too, and no endpoint error
+echoes the raw value at all.
+
 **MCP transport conformance.** The search client now follows three more rules
 of the 2025-06-18 Streamable-HTTP transport. It sends `MCP-Protocol-Version`
 on every request after `initialize`, using the `protocolVersion` the server
@@ -1068,6 +1097,10 @@ for one `Search`: reusing one across searches would save two round trips per
 query but needs re-initialisation on a 404 and concurrency control, and is
 deferred. The tool name and query argument key stay configurable through
 `Options.ToolName` and `Options.QueryArgKey` (defaults `search` and `query`).
+
+**Superseded by the 2026-09-25 "MCP client: supported protocol versions"
+entry below**: an unsupported or missing version now fails the call, and one
+session serves the client's lifetime.
 
 ## 2026-09-23 — Cycle-3 remediation: worker loop, spend levers, CLI surface and wave order
 
@@ -1274,6 +1307,14 @@ checked against Alexandria's slug grammar in `internal/config` and again in
 the endpoint-scheme mirrors, since the adapter must not depend on config
 having run.
 
+**Superseded in part by the 2026-09-25 "Shared internal/httpx" entry
+below**: the endpoint-scheme mirrors are gone; the `knowledge_space` mirror
+stands.
+
+**Superseded in part by the 2026-09-25 "Fleet endpoints come only from
+flags or the environment" entry below**: issue #28 is resolved there, for
+the knowledge endpoint as for the model and search endpoints.
+
 **Race detection in the test targets.** `just test` and CI run `go test
 -race ./...`: the worker's save-back and the stdio transport write to the
 same stderr from different goroutines, and the CLI hands both one locked
@@ -1304,3 +1345,386 @@ matter is `Interaction`-derived data (PROPOSAL §4.4) and is
 YAML-encoded as a block, while the version describes the tool that
 rendered the document, not the run itself, and needs to survive as
 plain text a refresh script can grep for without a YAML parser.
+
+## 2026-09-25 — Scripted fakes live in test-support packages
+
+Issue #17. `model.FakeServer`, `search.FakeServer`, `mcpclient.FakeServer`,
+`billet.FakeServer` and `alexandria.FakeServer` each lived in their client
+package's own `fake.go` — a non-test build file, per the 2026-07-01
+standard-model and search entries' "shared fake reused across chunks"
+rationale. `go list -deps ./cmd/chiron` showed the cost of that choice
+plainly: `net/http/httptest` was a dependency of the release binary,
+reachable through all five `fake.go` files, not only through test code. A
+Go binary that ships `httptest` is shipping a testing helper with real
+listener/handler machinery for no runtime benefit, and it is exactly the
+kind of import a supply-chain review flags without context.
+
+Each fake moves to a sibling `<pkg>test` package (`modeltest`, `searchtest`,
+`mcpclienttest`, `billettest`, `alexandriatest`) with an identical exported
+API — call sites change only their import path and package qualifier, not
+their calls. `go list -deps ./cmd/chiron | grep -c httptest` is 0 after the
+move. The cross-chunk-reuse need the 2026-07-01 entries were solving for is
+unaffected: a `<pkg>test` package is exactly as shareable across downstream
+packages as the old `fake.go` was, it just does not compile into `cmd/chiron`
+because nothing under `cmd/` imports it.
+
+**Wire-shape duplication over exporting production internals.** A fake needs
+a handful of its client's unexported wire types (`model`'s `chatRequest`/
+`chatResponse`, `mcpclient`'s session/protocol-version header names,
+`billet`'s `search_memory`/`save_memory` tool names and record shape,
+`alexandria`'s `/v1/search` path) to speak the same protocol. Rather than
+exporting those for the fake's sake, each `<pkg>test` package defines its own
+private mirror of the wire shape it needs — the same trade the packages
+already made for `structuredContent`/text-block JSON on the wire, just
+applied one level down. `alexandria`'s title/snippet truncation bounds
+(`maxTitleRunes`, `maxSnippetBytes`) are pure magic numbers a test asserts
+against, not protocol shape, so the one test needing them inlines the
+current values rather than exporting them.
+
+**Internal test files cannot import a fake that imports back into the
+package under test.** A `_test.go` file declared `package foo` (not `package
+foo_test`) sits inside `foo`'s compilation unit; if `footest` imports `foo`,
+importing `footest` from `foo`'s own internal test file is an import cycle
+(`go test` fails it explicitly, it is not merely discouraged). Go's own
+`net/http/client_test.go`, which imports `net/http/httptest`, is `package
+http_test` for this reason. `search` and `alexandria` had no test needing
+unexported access, so their test files simply became `package search_test`/
+`package alexandria_test` wholesale. `mcpclient` and `model` each had a mix:
+tests needing genuine unexported access (not just wire shape) stayed in the
+original file under `package mcpclient`/`package model`, and the fake-driven
+tests moved to a new `package mcpclient_test`/`package model_test` file.
+`billet` had the same mix but only three such tests (`toolError`'s bound, the
+`mcp` field `TestFakeUnknownToolIsRPCError` calls through, and
+`firstLine`'s own unit test) — rather than keep a second internal-only file
+just for them, a minimal `export_test.go` (`billet.ToolError`,
+`billet.SaveTool`, `billet.MaxToolErrBytes`, `billet.MCPClient`,
+`billet.FirstLine`) lets the whole suite live in one external
+`package billet_test` file.
+
+## 2026-09-25 — Shared internal/httpx endpoint, redirect and bounded-read rules
+
+Issue #15. The endpoint rule (absolute `https://`, `http://` for loopback
+only), userinfo, query and fragment rejection, the redirect policies and the
+bounded body read were reimplemented in `internal/config`, `internal/cli`,
+`internal/interactions`, `internal/mcpclient`,
+`internal/researcher/fleet/model` and `internal/memory/alexandria`, accepted
+as mirrors by the 2026-07-01 and 2026-09-23 entries pending a shared helper.
+The copies had drifted: config and Alexandria refused a query and fragment
+while the model and MCP clients did not, `internal/interactions` refused only
+cross-host redirects, and the CLI echoed a rejected `CHIRON_GEMINI_BASE_URL`
+verbatim. One package replaces them all. No new dependency.
+
+**`internal/httpx` is a stdlib-only leaf.** It imports nothing from
+`internal/`, so config (which the CLI imports) and every client can depend on
+it without a cycle. Its API:
+
+- `ParseEndpoint(raw string) (*url.URL, error)`: `https` anywhere, `http`
+  only when `LoopbackHost` admits the host, a non-empty hostname, and no
+  userinfo, query or fragment, including a bare trailing `?` or `#`. Every
+  error matches `ErrInvalidEndpoint` via `errors.Is`.
+- `LoopbackHost(host string) bool`: exactly `localhost` (lower-case, no
+  trailing dot), or a literal address in 127.0.0.0/8 or `::1`, including the
+  IPv4-mapped form of a 127.0.0.0/8 address. It takes the bare hostname
+  `url.URL.Hostname` returns, so a bracketed `[::1]` is refused. Upper-case
+  `LOCALHOST`, lookalike names (`127.0.0.1.nip.io`, `localhost.evil.com`),
+  `0.0.0.0`, `::` and non-dotted-decimal IPv4 forms are refused too. No other
+  name is admitted, because what a name resolves to is outside the check's
+  control.
+- `RefuseUnsafeRedirects`: a `CheckRedirect` policy that follows a redirect
+  only to the original request's exact host and port, never from an `https`
+  original to a non-`https` target, and never past a chain of three requests
+  (two redirects).
+- `RefuseAllRedirects`: a `CheckRedirect` policy that follows nothing.
+- `ReadAllBounded(r io.Reader, limit int64) ([]byte, error)`: fails with an
+  error matching `ErrBodyTooLarge` (text `body exceeds N-byte bound`) rather
+  than truncating.
+
+**Strictest union, so no caller gets weaker.** `ParseEndpoint` takes every
+refusal any copy made: Alexandria's raw-value check that catches a bare `?` or
+`#`, config's query, fragment and userinfo refusal, and the model, MCP and
+Alexandria clients' userinfo-first ordering and `@` withholding. It adds one
+refusal no copy made: a port with an empty hostname (`https://:443`), which
+`net/http` would dial on the local machine. Errors name the URL by scheme and
+host only and withhold both when the value contains `@`, since
+`https://<key>#@host` parses with the key as its host. Messages read as
+predicates ("must be an absolute https:// URL ...") so each caller prefixes
+its own subject (`model: endpoint `, `CHIRON_GEMINI_BASE_URL `, a config field
+name) and the substrings existing tests pin survive.
+
+**What changed per caller.**
+
+- `internal/interactions` validates its effective base URL (the default or
+  `WithBaseURL`'s value) in `New`. Its redirect policy moves from cross-host
+  only to `RefuseUnsafeRedirects`, which also refuses a same-host
+  `https`-to-`http` downgrade. This is strictly stronger: `net/http` forwards
+  `x-goog-api-key` to any redirect target, so a downgraded hop would send the
+  key in cleartext, and no Gemini endpoint has a reason to downgrade.
+- `internal/mcpclient` (and so search and Billet) and the fleet model adapter
+  refuse a query or fragment in `New`, uniformly with config; their redirect
+  policy is unchanged.
+- `internal/memory/alexandria` keeps refusing every redirect through
+  `RefuseAllRedirects` rather than following same-host ones: its Cloudflare
+  Access secret is a custom header that `net/http` forwards to any target.
+- `internal/config` keeps its field-name-prefixed messages and additionally
+  refuses a bare `?` or `#` and an empty hostname.
+- `CHIRON_GEMINI_BASE_URL` now refuses userinfo, a query and a fragment, which
+  the CLI admitted before, and its error names the value by scheme and host
+  instead of echoing it with `%q`.
+
+Redirect refusals no longer carry an inner package prefix; each client's call
+site already wraps transport errors with one.
+
+**Left out on purpose.**
+
+- `internal/researcher/fleet/fetch` keeps its own policy. It fetches arbitrary
+  public URLs under connection-time SSRF pinning and re-validates every
+  redirect hop, a different and stricter question from which endpoint may
+  receive a credential, and it truncates and reports an oversize page rather
+  than failing.
+- Two bounded reads that are not read-to-EOF stay on `io.LimitReader`.
+  Alexandria's error-body excerpt keeps a bounded head by design, and failing
+  on oversize would lose the diagnostic. The MCP event-stream reader returns
+  the first response without waiting for the stream to end, under its own
+  aggregate cap.
+- The rune-safe truncation loops the issue's comment counts as string
+  handling, not HTTP, and stay where they are.
+- `internal/researcher/gemini/input.go` bounds a file read, not an HTTP body.
+
+## 2026-09-25 — MCP client: supported protocol versions and one session per client
+
+Issue #16. `internal/mcpclient` accepted whatever `protocolVersion` the
+server named, fell back to its own revision when the reply named none, and
+opened and ended a session on every `CallTool`: four round-trips per search
+or recall, three of them overhead. The 2026-09-23 entry deferred both. No new
+dependency.
+
+**A supported set, strictly enforced.** `initialize` still advertises
+`2025-06-18`. The reply must name `2025-06-18` or `2025-03-26`, the two
+revisions that define the Streamable-HTTP transport the client implements
+(`2024-11-05` used the older HTTP+SSE transport). Any other version fails the
+call with `*ProtocolVersionError`, which matches `ErrUnsupportedProtocolVersion`
+through `errors.Is`, before `notifications/initialized` or any `tools/call`.
+A session id the server issued is ended with the best-effort `DELETE`, sent
+without `MCP-Protocol-Version` because no version was agreed. The refused
+version is server-controlled text, so the error carries it scrubbed, cut to
+32 bytes and quoted.
+
+**A reply with no version is refused too.** The MCP schema makes
+`InitializeResult.protocolVersion` required in every revision. A server that
+omits it is non-conformant and its transport rules cannot be assumed, so
+falling back to the client's own revision was a guess. Only the package's
+own test helpers relied on the fallback; the shared fakes always name a
+version, and `mcpclienttest.WithoutProtocolVersion` now models the omission.
+A result that is not a JSON object is a decode error.
+
+**One session per client.** The first `CallTool` runs `initialize` and
+`notifications/initialized`; later calls reuse the session id and the
+negotiated version. JSON-RPC ids come from a per-client counter, because MCP
+forbids reusing an id within a session. `Close() error` ends the session with
+the best-effort `DELETE` on a fresh context bounded by `RequestTimeout`. It is
+idempotent and safe alongside `CallTool`, and later calls fail with
+`ErrClosed`. The search client and the Billet adapter expose `Close`. The CLI
+composition root closes both when the command exits, and `buildWorker`
+closes whatever it built when a later step fails. `memory.Recaller` and
+`memory.Rememberer` gain no lifecycle method: only Billet holds a session, and
+`buildKnowledge` returns its closer beside the two halves.
+
+**Re-initialise once on a session 404.** Under the Streamable-HTTP transport,
+a server that no longer holds a session answers any request bearing its id
+with HTTP 404, and the client must start a new session. On exactly that, a
+404 to a `tools/call` sent with a session id, the client discards the
+session, re-initialises once and re-sends the `tools/call` once. A second 404
+fails the call and drops the session, so the next call starts afresh under
+the same bound. A 404 on a request without a session id is an ordinary
+failure. Nothing else is retried.
+
+**Why the re-send is money-safe.** The rule against auto-retrying paid POSTs
+guards ambiguous failures: a 5xx, a timeout or a dropped connection may
+follow work the server already did and billed. A session 404 is not
+ambiguous. The transport rejects the request before it reaches any tool, so
+nothing ran. The residual risk is a server that runs the tool and then
+answers 404, which breaks the transport contract; it is bounded at one extra
+call per `CallTool`. The alternative, failing this call and re-initialising
+only for the next, was rejected. Every session expiry would reach the worker
+as a failed search and cost one of its three strikes, for a call the server
+never processed.
+
+**Concurrency.** A mutex guards the session state and is never held across a
+request. Establishing a session is single-flight. Callers that find none wait
+on the one handshake in flight, each under its own context. A failed
+handshake is shared with its waiters but not kept, so the next call tries
+again. A failure caused by the leading caller's own context ending is not
+shared: a waiter with time left runs the handshake itself. A caller holding a
+stale session drops it only if it is still the current one, compared by
+pointer, so it never discards a fresh session another caller established. A
+handshake that completes after `Close` ends its new session at once.
+
+**The session id is handled like the key.** Within a stateful server it
+works as a bearer, so no error carries it. It is redacted by exact match from
+server-supplied error bodies, JSON-RPC error messages, tool-error text and
+the quoted protocol version. An issued id over 1024 bytes, or with any
+character outside visible ASCII (the only range MCP permits), fails the
+handshake at `initialize` as a protocol error and is never stored, echoed or
+ended.
+
+**Close's bound at the CLI.** There `RequestTimeout` is
+`fleet.worker_timeout`, five minutes by default. A server that accepts the
+`DELETE` and never answers can therefore delay exit by up to that per store.
+This is accepted for now: the `DELETE` goes to a server that answered every
+earlier request, and a tighter bound would need a `Close` that takes a
+context. The `DELETE` that ends a session left by a failed handshake, or
+issued after `Close`, runs under the same fresh bound, so a cancelled caller
+cannot skip it but may wait up to `RequestTimeout` for it.
+
+**Fake.** `mcpclienttest.FakeServer` issues a fresh session per `initialize`
+(`id`, then `id-2`, `id-3`), tracks which are live, and answers 400 to a
+request without one and 404 to one that has ended. It adds `ExpireSession`,
+`InitializeCount`, `DeleteCount` and `FakeRequest.ID`. `searchtest` and
+`billettest` forward the new methods, and `billettest.WithSessionID` is new.
+
+## 2026-09-25 — SP-A: web-search MCP backend and configurable tool shape
+
+Issue #12. `internal/researcher/fleet/search` (2026-07-01 entry) has always
+assumed a `search` tool taking a `query` argument and returning
+`{"results":[{"title","url","snippet"}]}`, but SP-A (`docs/V2-PLAN.md` §5)
+named no concrete backend, and the tool name and argument key were not
+reachable from `FleetConfig`, so pointing the worker at a server that named
+either differently needed a code change (cycle-3 finding C3-18).
+
+**Chosen backend.** The default web-search MCP server is a self-hosted
+SearXNG instance behind a generic Streamable-HTTP MCP wrapper, exposing a
+tool named `search` that takes a `query` argument and answers with
+`{"results":[{"title","url","snippet"}, ...]}` — exactly the shape
+`internal/researcher/fleet/search` already assumes, so the reference
+deployment needs no configuration beyond `fleet.search_endpoint`. A
+self-hosted SearXNG meta-search instance was chosen over a metered vendor
+search API for the reference deployment because it puts no per-query cost
+on the critical path SP-A is proving out; a priced vendor backend remains a
+drop-in swap behind the same tool shape.
+
+**Tool name and query argument stay configurable.** Vendor MCP search
+servers (Tavily, Exa, Brave and others named in `V2-RESEARCH-AGENT.md` §3)
+do not agree on a tool or argument name, and pinning either to the
+reference backend's choice would force a fork of `internal/researcher/fleet/search`
+for every alternative operators want to reach. `FleetConfig` gains
+`search_tool` and `search_query_arg` (flags `--fleet-search-tool` /
+`--fleet-search-query-arg`), defaulting to `search` / `query` so a bare
+`--agent worker` run needs no override, and threaded into
+`search.Options.ToolName` / `QueryArgKey` at the CLI composition root
+(`buildWorker`), which already default the same way when left empty. The
+result *shape* is not made configurable: `internal/researcher/fleet/search`
+still assumes `{"results":[{"title","url","snippet"}]}` with its documented
+graceful degradation, because a differently-shaped result needs a parser
+change, not a config knob, and no such server is in scope for SP-A.
+
+**Validation.** Both fields are required non-empty identifiers matching
+`^[A-Za-z0-9_.-]+$`, at most 64 bytes — the character set a `tools/call`
+request can safely carry without further escaping. The error names the
+field and the rule but never echoes the value, matching `fleet.*_key_ref`,
+because an operator could paste a credential into the wrong field.
+
+**Test coverage.** `internal/researcher/fleet/search/searchtest.FakeServer`
+gained `WithExpectedTool(tool, queryArg)`, refusing a `tools/call` under any
+other name or missing that argument, so `internal/cli/worker_test.go` can
+prove the worker reaches a differently-named tool once configured and fails
+after three consecutive tool failures when it is not.
+
+## 2026-09-25 — Fleet endpoints come only from flags or the environment
+
+Issue #28 (cycle-3 finding C3-17). A base config (`--config`, `-` or piped
+stdin) could name both a `secret://` key reference and the endpoint that
+key is sent to. `secret://NAME` resolves any environment variable and
+`secret://file/<abs>` any readable file, so a shared config naming
+`secret://AWS_SECRET_ACCESS_KEY` and an attacker gateway exfiltrated the
+credential on the first model turn. The same held for the search and
+knowledge pairs. v1 never had this shape: the Gemini destination was
+env-only (`CHIRON_GEMINI_BASE_URL`).
+
+**Decision: provenance (option a).** `fleet.model_endpoint`,
+`fleet.search_endpoint` and `fleet.knowledge_endpoint` come only from
+`--fleet-model-endpoint`, `--fleet-search-endpoint` and
+`--fleet-knowledge-endpoint`, or from `CHIRON_FLEET_MODEL_ENDPOINT`,
+`CHIRON_FLEET_SEARCH_ENDPOINT` and `CHIRON_FLEET_KNOWLEDGE_ENDPOINT`.
+`config.DecodeBase` refuses a base naming any of them, whatever its agent,
+since a later flag may select `worker`. The error names the field, says a
+shared config must not choose where credentials are sent, and names the
+flag and variable to use instead, without echoing the value. `loadBase`
+reads every base through it, so the refusal happens at load time: before
+`ApplyFlags`, before validation and before any `secret.Resolve`. Because
+the check runs on the decoded base alone, a flag setting the same endpoint
+does not rescue a base that names one. Key references may still live in a
+base. The operator chooses every destination, but a reference still
+chooses which secret goes there: any variable or file the process can read
+is sent to whichever party controls the endpoint, which for a keyless or
+community search or knowledge server may be a third party the operator
+does not control. A base config must therefore be trusted as much as the
+environment it resolves against. `config.FleetEndpoints` is the one table
+of field, flag and variable, shared by the refusal, the environment
+fallback and the `research-config` check.
+
+**Why not binding (option b).** Requiring the key reference from a flag
+whenever the endpoint comes from a base, or an allowlist of hosts, still
+lets a shared config steer traffic. A keyless search endpoint chosen by
+the config still receives every query and can return poisoned results,
+and `fleet.knowledge_remember` would write findings to a
+config-chosen store. An allowlist is itself configuration that would need
+the same provenance rule, and a rule that depends on the provenance of two
+fields at once is harder to reason about and to test.
+
+**Why not namespacing (option c).** Restricting env references to
+`CHIRON_` names and file references to a Chiron directory narrows which
+secrets can leak, not where they go: a config could still send the model
+key the operator gave Chiron to an attacker's host, and that key is the
+one worth stealing. It would also break the documented `secret://`
+grammar and existing references (`secret://MODEL_KEY`, the
+`secret://GEMINI_API_KEY` default), constraining the whole secret seam to
+fix a problem in fleet config.
+
+**Precedence.** An explicitly set flag wins over its variable, tested with
+pflag's `Changed` so even an explicitly empty flag is honoured: the flag
+is the per-invocation scope, the variable the deployment default. The
+variables are read only at the composition root, only on the worker path,
+and validated with `httpx.ParseEndpoint`; the error names the variable and
+at most the value's scheme and host, never its path, query or credentials.
+The knowledge variable is read only when a knowledge provider is
+configured, so a deployment can export all three and still run without
+recall. As with `CHIRON_GEMINI_BASE_URL`, a variable that is not read is
+not validated.
+
+**Pipelines.** `research-config` output is the next stage's base, so it
+refuses the three endpoint flags with an error pointing at the final stage
+and the variables, and it never reads the variables. Refusing was chosen
+over omitting endpoints from the encoded form: omission would let the
+first stage succeed and push a confusing "is required" error to the last.
+The recipe is to compose everything else through `research-config` and
+give the endpoints to the final `chiron research` stage by flag or
+variable (README, "Pipeline composition").
+
+**Endpoint hosts on stderr.** After every key reference has resolved and
+every client is built, and before `run.Run`, the composition root emits one
+`delta` event whose payload is
+`{"endpoints":{"model":"<scheme://host>","search":"<scheme://host>","knowledge":"<scheme://host>"}}`,
+with `knowledge` omitted without a provider. Values are reduced to scheme
+and host through `httpx.ParseEndpoint`, so a path or query carrying a
+token never reaches stderr. The payload type lives in `internal/cli`
+beside the thought-summary delta payload, because `transport.Event`
+carries raw JSON and the transport need not know payload shapes; the
+NDJSON contract (one `{time, kind, payload}` object per line) is
+unchanged. The event precedes `run_started` because it describes the
+run's configuration and is the last point before the worker loop starts
+that the CLI owns; no MCP session or model request is made while clients
+are built, so it precedes every credential-bearing request. Emission is
+best effort, like every transport write on a paid path.
+
+**Resolver seam.** `NewRootCommand` binds `secret.Default`;
+`newRootCommand(secret.Resolver)` threads any resolver explicitly through
+research, get, follow-up and the worker and knowledge builders. No
+package-level variable is swapped, so a test's counting resolver cannot
+leak into another test. The CLI test with that resolver proves a refused
+base never reaches resolution.
+
+**Scope.** Langfuse and OTLP endpoint flags do not exist yet (Wave 2); the
+OTel collector address is already environment-only
+(`OTEL_EXPORTER_OTLP_*`). Any credential-bearing endpoint added later
+follows this rule. `--agent fleet` will reuse the worker path's fallback
+and event when it lands.

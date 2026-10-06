@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +40,16 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 		{"search-key-ref", []string{"--fleet-search-key-ref", "secret://SEARCH_KEY"}, func(t *testing.T, f FleetConfig) {
 			if f.SearchKeyRef != "secret://SEARCH_KEY" {
 				t.Errorf("SearchKeyRef = %q", f.SearchKeyRef)
+			}
+		}},
+		{"search-tool", []string{"--fleet-search-tool", "web_search"}, func(t *testing.T, f FleetConfig) {
+			if f.SearchTool != "web_search" {
+				t.Errorf("SearchTool = %q", f.SearchTool)
+			}
+		}},
+		{"search-query-arg", []string{"--fleet-search-query-arg", "q"}, func(t *testing.T, f FleetConfig) {
+			if f.SearchQueryArg != "q" {
+				t.Errorf("SearchQueryArg = %q", f.SearchQueryArg)
 			}
 		}},
 		{"max-turns", []string{"--fleet-max-turns", "12"}, func(t *testing.T, f FleetConfig) {
@@ -149,7 +160,7 @@ func TestApplyFlagsFleetLevers(t *testing.T) {
 func TestApplyFlagsFleetUnsetLeavesBase(t *testing.T) {
 	base := Default()
 	base.Agent = AgentFleet
-	base.Fleet.ModelEndpoint = "https://from.the.pipe"
+	base.Fleet.ModelName = "from-the-pipe"
 	base.Fleet.MaxTurns = 3
 
 	fs := newFlagSet(t)
@@ -159,7 +170,19 @@ func TestApplyFlagsFleetUnsetLeavesBase(t *testing.T) {
 	if err := ApplyFlags(&base, fs); err != nil {
 		t.Fatalf("ApplyFlags: %v", err)
 	}
-	if base.Fleet.ModelEndpoint != "https://from.the.pipe" || base.Fleet.MaxTurns != 3 {
+	if base.Fleet.ModelName != "from-the-pipe" || base.Fleet.MaxTurns != 3 {
 		t.Errorf("unset fleet flags clobbered the base: %+v", base.Fleet)
+	}
+}
+
+// TestFleetSearchFlagUsageHasNoDuplicateDefault: --fleet-search-tool and
+// --fleet-search-query-arg carry a non-zero default, which pflag's stock
+// help template already annotates — the usage string must not repeat it.
+func TestFleetSearchFlagUsageHasNoDuplicateDefault(t *testing.T) {
+	fs := newFlagSet(t)
+	for _, name := range []string{"fleet-search-tool", "fleet-search-query-arg"} {
+		if usage := fs.Lookup(name).Usage; strings.Contains(usage, "(default") {
+			t.Errorf("--%s usage %q duplicates pflag's own default annotation", name, usage)
+		}
 	}
 }

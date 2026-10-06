@@ -17,13 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 // Agent tiers (PROPOSAL §3): the max tier is more comprehensive at roughly
@@ -68,6 +68,23 @@ var knowledgeSpace = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 const maxKnowledgeSpaceLen = 64
 
+// DefaultSearchTool and DefaultSearchQueryArg are the reference web-search
+// MCP backend's tool name and query argument key (docs/DECISIONS.md,
+// 2026-09-25 "SP-A"), duplicated from search.Options' own defaults because
+// config does not import the fleet packages.
+const (
+	DefaultSearchTool     = "search"
+	DefaultSearchQueryArg = "query"
+)
+
+// searchIdentifier is the grammar for fleet.search_tool and
+// fleet.search_query_arg: a vendor MCP search server may name its tool and
+// argument differently, so these travel into a tools/call request rather
+// than a fixed pair, and are bounded to what that request can safely carry.
+var searchIdentifier = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+const maxSearchIdentifierLen = 64
+
 // Run output modes, mirroring Stirrup's output surface.
 const (
 	OutputText = "text"
@@ -84,7 +101,7 @@ const DefaultAPIKeyRef = "secret://GEMINI_API_KEY"
 const MaxTimeout = 60 * time.Minute
 
 // ResearchConfig declares one research run. Zero values mean "unset";
-// Default supplies the documented defaults, and Decode overlays a base
+// Default supplies the documented defaults, and DecodeBase overlays a base
 // config on top of them, so an absent key never clobbers a default.
 type ResearchConfig struct {
 	// Query is the research question.
@@ -148,7 +165,9 @@ type ResearchConfig struct {
 //
 // Endpoint and key fields are optional at the config layer and required by
 // the composition root when the agent runs; the caps carry documented
-// defaults so a bare `--agent worker` run is already bounded.
+// defaults so a bare `--agent worker` run is already bounded. The endpoints
+// come only from their flags or environment variables (FleetEndpoints); a
+// base config naming one is refused by DecodeBase.
 type FleetConfig struct {
 	// ModelEndpoint is the standard-model base URL. Absolute https://,
 	// with http:// permitted for loopback test servers only. Distinct
@@ -212,6 +231,15 @@ type FleetConfig struct {
 	// KnowledgeRemember saves each completed finding back to the store
 	// (billet only).
 	KnowledgeRemember bool `json:"knowledge_remember,omitempty" yaml:"knowledge_remember,omitempty"`
+	// SearchTool is the MCP tool the search client invokes in tools/call.
+	// Default DefaultSearchTool; override for a vendor search server that
+	// names its tool differently.
+	SearchTool string `json:"search_tool,omitempty" yaml:"search_tool,omitempty"`
+	// SearchQueryArg is the argument key the search query is passed under
+	// in the tools/call arguments object. Default DefaultSearchQueryArg;
+	// override for a vendor search server that names its argument
+	// differently.
+	SearchQueryArg string `json:"search_query_arg,omitempty" yaml:"search_query_arg,omitempty"`
 }
 
 // Default returns the documented defaults (PROPOSAL §4.3). The Fleet
@@ -244,15 +272,18 @@ func defaultFleet() FleetConfig {
 		Concurrency:    3,
 		Memory:         MemoryNoop,
 		KnowledgeLimit: DefaultKnowledgeLimit,
+		SearchTool:     DefaultSearchTool,
+		SearchQueryArg: DefaultSearchQueryArg,
 	}
 }
 
-// Decode reads a base ResearchConfig (JSON or YAML — JSON is a YAML
+// decode reads a base ResearchConfig (JSON or YAML — JSON is a YAML
 // subset, so one strict decoder covers both) overlaid on the defaults.
 // Empty input yields the defaults, so an empty stdin pipe is harmless.
 // Unknown keys are an error: configs are small and a silent typo would
-// silently change a paid run.
-func Decode(r io.Reader) (ResearchConfig, error) {
+// silently change a paid run. A base config is read with DecodeBase, which
+// also refuses fleet endpoints.
+func decode(r io.Reader) (ResearchConfig, error) {
 	cfg := Default()
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -371,6 +402,12 @@ func (f FleetConfig) validate(agent string) error {
 	if err := validKeyRef("fleet.search_key_ref", f.SearchKeyRef); err != nil {
 		return err
 	}
+	if err := validIdentifier("fleet.search_tool", f.SearchTool); err != nil {
+		return err
+	}
+	if err := validIdentifier("fleet.search_query_arg", f.SearchQueryArg); err != nil {
+		return err
+	}
 	if f.MaxTurns <= 0 {
 		return fmt.Errorf("fleet.max_turns: %d is not positive — a worker needs at least one turn", f.MaxTurns)
 	}
@@ -466,53 +503,17 @@ func (f FleetConfig) validateKnowledge() error {
 	return nil
 }
 
-// validEndpoint admits an unset endpoint (a later wave requires it) and,
-// when set, applies the CHIRON_GEMINI_BASE_URL rule: an absolute https://
-// URL, with http:// permitted for loopback hosts only. Credentials are
-// sent to whatever endpoint is configured, so a cleartext or internal
-// override would be a key-exfiltration and SSRF channel (CWE-918,
-// CWE-319). The message never echoes a credential — only the endpoint.
+// validEndpoint admits an unset endpoint (the composition root requires it)
+// and otherwise applies httpx.ParseEndpoint: credentials go to whatever
+// endpoint is configured (CWE-918, CWE-319).
 func validEndpoint(field, raw string) error {
 	if raw == "" {
 		return nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || !allowedEndpointScheme(u) {
-		return fmt.Errorf("%s: must be an absolute https:// URL (http:// only for loopback test servers); got %s", field, describeEndpoint(u))
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("%s: must not carry userinfo, a query string or a fragment; got %s", field, describeEndpoint(u))
+	if _, err := httpx.ParseEndpoint(raw); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
 	}
 	return nil
-}
-
-// describeEndpoint names an endpoint in an error without echoing the raw
-// value, which may embed a credential in its userinfo.
-func describeEndpoint(u *url.URL) string {
-	if u == nil {
-		return "an unparseable URL"
-	}
-	return fmt.Sprintf("scheme %q host %q", u.Scheme, u.Host)
-}
-
-// allowedEndpointScheme admits https anywhere and http on loopback only —
-// the same rule the Gemini base-URL override enforces in internal/cli,
-// kept in step with it. It cannot import that copy without a cycle
-// (internal/cli imports internal/config), so the rule is mirrored here.
-func allowedEndpointScheme(u *url.URL) bool {
-	switch u.Scheme {
-	case "https":
-		return true
-	case "http":
-		host := u.Hostname()
-		if host == "localhost" {
-			return true
-		}
-		ip := net.ParseIP(host)
-		return ip != nil && ip.IsLoopback()
-	default:
-		return false
-	}
 }
 
 // validKeyRef admits an unset reference and, when set, requires the
@@ -525,6 +526,17 @@ func validKeyRef(field, ref string) error {
 	}
 	if !strings.HasPrefix(ref, "secret://") {
 		return fmt.Errorf("%s: is not a secret:// reference — literal keys never live in config", field)
+	}
+	return nil
+}
+
+// validIdentifier requires a non-empty MCP tool name or argument key
+// (fleet.search_tool, fleet.search_query_arg): letters, digits, underscore,
+// dot or hyphen only, at most maxSearchIdentifierLen bytes. The message
+// never echoes value, which may carry a pasted secret (docs/DECISIONS.md "SP-A").
+func validIdentifier(field, value string) error {
+	if value == "" || len(value) > maxSearchIdentifierLen || !searchIdentifier.MatchString(value) {
+		return fmt.Errorf("%s: must be a non-empty identifier of letters, digits, underscore, dot or hyphen, at most %d bytes", field, maxSearchIdentifierLen)
 	}
 	return nil
 }

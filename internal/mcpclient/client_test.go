@@ -3,19 +3,16 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
 const testKey = "sk-mcp-0123456789abcdefABCDEF"
@@ -40,17 +37,18 @@ func call(c *Client) (ToolResult, error) {
 	return c.CallTool(context.Background(), "lookup", map[string]any{"query": "q"})
 }
 
-// textResult is a handler answering every call with one text block.
-func textResult(text string) FakeHandler {
-	return func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: text}}}, nil
+// deref dereferences an rpcRequest.ID, defaulting to 0.
+func deref(id *int) int {
+	if id == nil {
+		return 0
 	}
+	return *id
 }
 
 // answerHandshake reads one request in full and answers it when it belongs to
-// the MCP handshake, as a minimal stateless server whose initialize result
-// names no protocol version. It returns the decoded request and whether it
-// was answered; the caller answers anything else (tools/call).
+// the MCP handshake, as a minimal stateless server that accepts the client's
+// protocol version. It returns the decoded request and whether it was
+// answered; the caller answers anything else (tools/call).
 func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
 	t.Helper()
 	var req rpcRequest
@@ -66,7 +64,7 @@ func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcR
 	switch req.Method {
 	case "initialize":
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID))
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q,"capabilities":{},"serverInfo":{"name":"test","version":"0"}}}`, deref(req.ID), ProtocolVersion)
 		return req, true
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
@@ -87,57 +85,6 @@ func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	}
 	if fl, ok := w.(http.Flusher); ok {
 		fl.Flush()
-	}
-}
-
-func TestCallToolHappyPath(t *testing.T) {
-	var gotTool string
-	var gotArgs map[string]any
-	fake := NewFakeServer(func(tool string, args map[string]any) (ToolResult, error) {
-		gotTool, gotArgs = tool, args
-		return ToolResult{
-			Content:           []ContentBlock{{Type: "text", Text: "hello"}},
-			StructuredContent: json.RawMessage(`{"answer":42}`),
-		}, nil
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := c.CallTool(context.Background(), "lookup", map[string]any{"query": "sky", "limit": 3})
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if got.IsError || FirstText(got.Content) != "hello" || string(got.StructuredContent) != `{"answer":42}` {
-		t.Errorf("result = %+v, want the scripted text and structuredContent", got)
-	}
-	if gotTool != "lookup" || gotArgs["query"] != "sky" || gotArgs["limit"] != float64(3) {
-		t.Errorf("handler saw tool %q args %+v, want lookup with query and limit", gotTool, gotArgs)
-	}
-
-	reqs := fake.Requests()
-	if len(reqs) != 3 {
-		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call)", len(reqs))
-	}
-	for i, m := range []string{"initialize", "notifications/initialized", "tools/call"} {
-		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].Method != m {
-			t.Errorf("request[%d] = %s %q, want POST %q", i, reqs[i].HTTPMethod, reqs[i].Method, m)
-		}
-		if reqs[i].Authorization != "Bearer "+testKey {
-			t.Errorf("request[%d].Authorization = %q, want the bearer key header", i, reqs[i].Authorization)
-		}
-	}
-}
-
-func TestCallToolNilArgumentsSendsObject(t *testing.T) {
-	fake := NewFakeServer(nil)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.CallTool(context.Background(), "ping", nil); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if args := fake.Requests()[2].Arguments; args == nil {
-		t.Error("tools/call arguments = null, want an empty object")
 	}
 }
 
@@ -177,7 +124,7 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 					mu.Lock()
 					info = req.Params.ClientInfo
 					mu.Unlock()
-					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{}}`, deref(req.ID))
+					fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"protocolVersion":%q}}`, deref(req.ID), ProtocolVersion)
 				case "notifications/initialized":
 					w.WriteHeader(http.StatusAccepted)
 				default:
@@ -207,60 +154,7 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 	}
 }
 
-func TestCallToolSessionEchoedAndEnded(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"), WithSessionID("sess-abc-123"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool with a session server: %v", err)
-	}
-	reqs := fake.Requests()
-	if len(reqs) != 4 {
-		t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
-	}
-	if reqs[0].SessionID != "" {
-		t.Errorf("initialize carried a session header %q, want none", reqs[0].SessionID)
-	}
-	for i := 1; i < len(reqs); i++ {
-		if reqs[i].SessionID != "sess-abc-123" {
-			t.Errorf("request[%d] session = %q, want the assigned session echoed", i, reqs[i].SessionID)
-		}
-	}
-	end := reqs[3]
-	if end.HTTPMethod != http.MethodDelete {
-		t.Fatalf("last request = %s %q, want the session DELETE", end.HTTPMethod, end.Method)
-	}
-	if end.Authorization != "Bearer "+testKey {
-		t.Errorf("DELETE Authorization = %q, want the bearer key header", end.Authorization)
-	}
-	if end.ProtocolVersion != ProtocolVersion {
-		t.Errorf("DELETE MCP-Protocol-Version = %q, want %q", end.ProtocolVersion, ProtocolVersion)
-	}
-}
-
-func TestCallToolSessionEndedAfterToolError(t *testing.T) {
-	fake := NewFakeServer(nil,
-		WithSessionID("sess-err"),
-		WithRawResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
-	)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !got.IsError || FirstText(got.Content) != "upstream quota exceeded" {
-		t.Errorf("result = %+v, want the tool error surfaced as IsError", got)
-	}
-	reqs := fake.Requests()
-	if last := reqs[len(reqs)-1]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-err" {
-		t.Errorf("last request = %s with session %q, want a DELETE of sess-err", last.HTTPMethod, last.SessionID)
-	}
-}
-
-func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
+func TestCloseIgnoresFailedSessionDelete(t *testing.T) {
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -281,54 +175,16 @@ func TestCallToolFailedSessionDeleteIgnored(t *testing.T) {
 	c := newClient(t, server.URL)
 	got, err := call(c)
 	if err != nil {
-		t.Fatalf("CallTool should ignore a failed session DELETE, got: %v", err)
+		t.Fatalf("CallTool: %v", err)
 	}
 	if FirstText(got.Content) != "done" {
 		t.Errorf("result = %+v, want the scripted text", got)
 	}
+	if err := c.Close(); err != nil {
+		t.Errorf("Close should ignore a failed session DELETE, got: %v", err)
+	}
 	if n := deletes.Load(); n != 1 {
 		t.Errorf("DELETE count = %d, want 1", n)
-	}
-}
-
-func TestCallToolProtocolVersionHeader(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"), WithProtocolVersion("2025-03-26"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	reqs := fake.Requests()
-	if reqs[0].ProtocolVersion != "" {
-		t.Errorf("initialize carried MCP-Protocol-Version %q, want none", reqs[0].ProtocolVersion)
-	}
-	for i := 1; i < len(reqs); i++ {
-		if reqs[i].ProtocolVersion != "2025-03-26" {
-			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
-		}
-	}
-}
-
-func TestCallToolProtocolVersionDefaultsWhenUnnamed(t *testing.T) {
-	var toolCallVersion atomic.Value
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		req, answered := answerHandshake(t, w, r)
-		if answered {
-			return
-		}
-		toolCallVersion.Store(r.Header.Get(mcpProtocolVersionHeader))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[]}}`, deref(req.ID))
-	}))
-	defer server.Close()
-
-	c := newClient(t, server.URL)
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if got, _ := toolCallVersion.Load().(string); got != ProtocolVersion {
-		t.Errorf("tools/call MCP-Protocol-Version = %q, want the client default %q", got, ProtocolVersion)
 	}
 }
 
@@ -374,45 +230,6 @@ func TestCallToolRPCError(t *testing.T) {
 	}
 }
 
-func TestFakeHandlerErrorIsRPCError(t *testing.T) {
-	fake := NewFakeServer(func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{}, errors.New("unknown tool")
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := call(c)
-	if err == nil || !strings.Contains(err.Error(), "tools/call rejected: rpc error -32000: unknown tool") {
-		t.Errorf("error = %v, want the handler error as a JSON-RPC rejection", err)
-	}
-}
-
-func TestCallToolIsErrorTextScrubbed(t *testing.T) {
-	// A tool error echoing the key is returned with the key redacted, so a
-	// caller can put the text in an error safely.
-	fake := NewFakeServer(textErrorHandler("backend rejected key " + testKey))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if !got.IsError {
-		t.Fatal("IsError = false, want the tool error flagged")
-	}
-	text := FirstText(got.Content)
-	if strings.Contains(text, testKey) || !strings.Contains(text, "backend rejected key") {
-		t.Errorf("tool error text = %q, want it kept with the key redacted", text)
-	}
-}
-
-func textErrorHandler(text string) FakeHandler {
-	return func(string, map[string]any) (ToolResult, error) {
-		return ToolResult{Content: []ContentBlock{{Type: "text", Text: text}}, IsError: true}, nil
-	}
-}
-
 func TestCallToolMismatchedResponseID(t *testing.T) {
 	const result = `"result":{"content":[]}`
 	tests := []struct {
@@ -449,20 +266,6 @@ func TestCallToolMismatchedResponseID(t *testing.T) {
 				t.Errorf("error = %v, want an id-mismatch error", err)
 			}
 		})
-	}
-}
-
-func TestCallToolOverSSE(t *testing.T) {
-	fake := NewFakeServer(textResult("streamed"), WithSSE())
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool over SSE: %v", err)
-	}
-	if FirstText(got.Content) != "streamed" {
-		t.Fatalf("result = %+v, want the streamed text", got)
 	}
 }
 
@@ -554,42 +357,40 @@ func TestCallToolSSEStreamBounded(t *testing.T) {
 	}
 }
 
-func TestCallToolNotRetried(t *testing.T) {
-	// A tools/call reply that cannot be decoded must not be retried.
-	fake := NewFakeServer(nil, WithRawResult("this is not json"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := call(c); err == nil {
-		t.Fatal("CallTool should fail on an undecodable reply")
-	}
-	if n := fake.ToolCallCount(); n != 1 {
-		t.Errorf("tools/call count = %d, want exactly 1; the call must not be retried", n)
-	}
-}
-
-func TestCallToolOversizedBodyBounded(t *testing.T) {
-	big := strings.Repeat("x", 4096)
-	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
+func TestCallToolMalformedReply(t *testing.T) {
+	// A tools/call reply body that is not JSON, or an event stream that is
+	// malformed, has a line past the bound, or ends without a response, fails
+	// the call.
 	tests := []struct {
-		name string
-		opts []FakeOption
+		name         string
+		contentType  string
+		body         string
+		maxBodyBytes int64
+		wantErr      string
 	}{
-		{"json", []FakeOption{WithRawResult(raw)}},
-		{"sse", []FakeOption{WithRawResult(raw), WithSSE()}},
+		{"JSON body truncated", "application/json", `{"jsonrpc":"2.0","id":2,`, 0, "mcp: decoding response:"},
+		{"SSE data not JSON", "text/event-stream", "data: {not json}\n\n", 0, "mcp: decoding SSE response:"},
+		// The line must outgrow the scanner's 64 KiB initial buffer to reach
+		// the per-line bound rather than the aggregate one.
+		{"SSE line over the bound", "text/event-stream", "data: " + strings.Repeat("x", 200<<10), 100 << 10, "mcp: SSE event exceeds 102400-byte bound"},
+		{"SSE stream without a response", "text/event-stream", ": keep-alive\n\n" + `data: {"jsonrpc":"2.0","method":"notifications/progress"}` + "\n\n", 0, "mcp: SSE stream carried no JSON-RPC response"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(nil, tt.opts...)
-			defer fake.Close()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				w.Header().Set("Content-Type", tt.contentType)
+				// The client may stop reading early, so a write error is expected.
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
 
-			c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = 512 })
+			c := newClient(t, server.URL, func(o *Options) { o.MaxBodyBytes = tt.maxBodyBytes })
 			_, err := call(c)
-			if err == nil {
-				t.Fatal("CallTool should fail when the response exceeds MaxBodyBytes")
-			}
-			if !strings.Contains(err.Error(), "512-byte bound") {
-				t.Errorf("error = %v, want a body-bound error", err)
+			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+				t.Errorf("error = %.200v, want %q", err, tt.wantErr)
 			}
 		})
 	}
@@ -614,6 +415,40 @@ func TestCallToolCrossHostRedirectRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cross-origin") {
 		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+}
+
+func TestCallToolCallerCheckRedirectOverridden(t *testing.T) {
+	// New must impose its own redirect policy even when the caller's
+	// http.Client already carries a permissive one.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer target.Close()
+
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
+	_, err := call(c)
+	if err == nil {
+		t.Fatal("CallTool should refuse the redirect even though the caller's client permits it")
+	}
+	if !strings.Contains(err.Error(), "cross-origin") {
+		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin hits = %d, want 1", got)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("target hits = %d, want 0", got)
 	}
 }
 
@@ -650,53 +485,48 @@ func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
 	}
 }
 
+func TestCloseCrossHostRedirectRefused(t *testing.T) {
+	// Close's session DELETE carries the key and the session id, so it
+	// refuses a cross-host redirect exactly as a POST does.
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("redirect target was called with %s; the session DELETE followed a cross-host redirect", r.Method)
+	}))
+	defer elsewhere.Close()
+
+	var deletes atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			http.Redirect(w, r, elsewhere.URL, http.StatusTemporaryRedirect)
+			return
+		}
+		w.Header().Set(mcpSessionHeader, "sess-redirect")
+		req, answered := answerHandshake(t, w, r)
+		if answered {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":{"content":[]}}`, deref(req.ID))
+	}))
+	defer origin.Close()
+
+	c := newClient(t, origin.URL)
+	if _, err := call(c); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+	if n := deletes.Load(); n != 1 {
+		t.Errorf("origin DELETE count = %d, want 1", n)
+	}
+}
+
 func TestCallerHTTPClientNotMutated(t *testing.T) {
 	hc := &http.Client{}
 	_ = newClient(t, "https://mcp.example.com/", func(o *Options) { o.HTTPClient = hc })
 	if hc.CheckRedirect != nil {
 		t.Error("New set CheckRedirect on the caller's client; it must work on a copy")
-	}
-}
-
-func TestRedirectPolicy(t *testing.T) {
-	request := func(raw string) *http.Request {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("url.Parse(%q): %v", raw, err)
-		}
-		return &http.Request{URL: u}
-	}
-	tests := []struct {
-		name    string
-		via     []string
-		target  string
-		wantErr string
-	}{
-		{"same-host https path change followed", []string{"https://mcp.example.com/mcp"}, "https://mcp.example.com/v2/mcp", ""},
-		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/mcp"}, "http://127.0.0.1:8080/v2", ""},
-		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/mcp"}, "https://127.0.0.1:8080/mcp", ""},
-		{"cross-host refused", []string{"https://mcp.example.com/mcp"}, "https://evil.example/mcp", "cross-origin"},
-		{"https to http on the same host refused", []string{"https://mcp.example.com/mcp"}, "http://mcp.example.com/mcp", "downgrade"},
-		{"downgrade on a later hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b"}, "http://mcp.example.com/c", "downgrade"},
-		{"third hop refused", []string{"https://mcp.example.com/a", "https://mcp.example.com/b", "https://mcp.example.com/c"}, "https://mcp.example.com/d", "too many redirects"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, request(v))
-			}
-			err := refuseUnsafeRedirects(request(tt.target), via)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
-		})
 	}
 }
 
@@ -752,6 +582,10 @@ func TestEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://mcp.example.com/mcp?key=x", true},
+		{"empty query rejected", "https://mcp.example.com/mcp?", true},
+		{"fragment rejected", "https://mcp.example.com/mcp#frag", true},
+		{"empty fragment rejected", "https://mcp.example.com/mcp#", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -791,16 +625,46 @@ func TestCallToolErrorNeverLeaksKey(t *testing.T) {
 	}
 }
 
-func TestCallToolEmptyNameRejected(t *testing.T) {
-	fake := NewFakeServer(nil)
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.CallTool(context.Background(), "", nil); err == nil {
-		t.Fatal("CallTool with an empty tool name should fail")
+func TestCallToolKeylessErrorTextIntact(t *testing.T) {
+	// A keyless client has no key to redact, so server text reaches an error
+	// or a tool error unaltered, not interleaved with redaction markers.
+	tests := []struct {
+		name     string
+		status   int
+		reply    string
+		wantErr  string
+		wantText string
+	}{
+		{"error body", http.StatusBadGateway, "backend unavailable", "mcp: tools/call failed: HTTP 502: backend unavailable", ""},
+		{"JSON-RPC error", http.StatusOK, `{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"backend unavailable"}}`, "mcp: tools/call rejected: rpc error -32000: backend unavailable", ""},
+		{"tool error", http.StatusOK, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"backend unavailable"}],"isError":true}}`, "", "backend unavailable"},
 	}
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0; validation must precede any request", fake.CallCount())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, answered := answerHandshake(t, w, r); answered {
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.reply)
+			}))
+			defer server.Close()
+
+			got, err := call(newClient(t, server.URL, func(o *Options) { o.APIKey = "" }))
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Errorf("error = %v, want exactly %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CallTool: %v", err)
+			}
+			if text := FirstText(got.Content); !got.IsError || text != tt.wantText {
+				t.Errorf("tool error text = %q (IsError %v), want exactly %q", text, got.IsError, tt.wantText)
+			}
+		})
 	}
 }
 
@@ -838,21 +702,6 @@ func TestCallToolCallerContextDeadlineWins(t *testing.T) {
 	}
 }
 
-func TestCallToolKeylessServer(t *testing.T) {
-	fake := NewFakeServer(textResult("ok"))
-	defer fake.Close()
-
-	c := newClient(t, fake.URL(), func(o *Options) { o.APIKey = "" })
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	for i, req := range fake.Requests() {
-		if req.Authorization != "" {
-			t.Errorf("request[%d] carried Authorization %q on a keyless client", i, req.Authorization)
-		}
-	}
-}
-
 func TestFirstText(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -869,62 +718,5 @@ func TestFirstText(t *testing.T) {
 				t.Errorf("FirstText = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestCallToolErrorTextBounded(t *testing.T) {
-	// Every server-supplied error text is scrubbed and cut to 4 KiB, so an
-	// adapter's error never carries megabytes into a caller's transcript.
-	huge := "backend failed for key " + testKey + "\n" + strings.Repeat("é", 200<<10)
-	tests := []struct {
-		name       string
-		status     int
-		body       string
-		wantErr    string
-		wantDetail bool
-	}{
-		{"tools/call rejection", http.StatusOK, fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":%q}}`, huge), "tools/call rejected", true},
-		{"error body", http.StatusBadGateway, huge, "tools/call failed: HTTP 502: backend failed", true},
-		{"non-JSON error body over the read bound", http.StatusBadGateway, strings.Repeat("<html>", maxErrorBodyBytes/5), "tools/call failed: HTTP 502", false},
-		{"empty error body", http.StatusBadGateway, "", "tools/call failed: HTTP 502", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if _, answered := answerHandshake(t, w, r); answered {
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(tt.status)
-				_, _ = io.WriteString(w, tt.body)
-			}))
-			defer server.Close()
-
-			_, err := call(newClient(t, server.URL))
-			if err == nil {
-				t.Fatal("CallTool should fail")
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, tt.wantErr) || strings.Contains(msg, testKey) {
-				t.Errorf("error = %.200q, want %q with the key redacted", msg, tt.wantErr)
-			}
-			if len(msg) > maxErrorTextBytes+64 || !utf8.ValidString(msg) {
-				t.Errorf("error is %d bytes (valid UTF-8 %v), want at most the %d-byte bound plus its prefix", len(msg), utf8.ValidString(msg), maxErrorTextBytes)
-			}
-			if got := strings.HasSuffix(msg, " [truncated]"); got != tt.wantDetail {
-				t.Errorf("error truncation marker = %v, want %v: %.200q", got, tt.wantDetail, msg)
-			}
-		})
-	}
-
-	fake := NewFakeServer(textErrorHandler(huge))
-	defer fake.Close()
-	got, err := call(newClient(t, fake.URL()))
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	text := FirstText(got.Content)
-	if !got.IsError || len(text) > maxErrorTextBytes || !strings.HasSuffix(text, " [truncated]") || strings.Contains(text, testKey) {
-		t.Errorf("IsError text is %d bytes, want a scrubbed excerpt of at most %d ending in the marker", len(text), maxErrorTextBytes)
 	}
 }

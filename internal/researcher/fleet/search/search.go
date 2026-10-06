@@ -4,10 +4,11 @@
 // candidate URLs, then hands them to the web_fetch client.
 //
 // The tool is reached over the Model Context Protocol "Streamable HTTP"
-// transport through internal/mcpclient, which owns the handshake, bounded
+// transport through internal/mcpclient, which owns the session, bounded
 // reads, redirect refusal and key scrubbing. This package is the result-shape
 // layer: it names the tool and its query argument and parses the reply into a
-// flat []Result.
+// flat []Result. A Client holds one MCP session for its lifetime; Close ends
+// it.
 package search
 
 import (
@@ -45,9 +46,10 @@ type Options struct {
 	// policy can be set without mutating the caller's client; leave its
 	// Timeout zero — per-call deadlines come from RequestTimeout.
 	HTTPClient *http.Client
-	// RequestTimeout bounds each Search call — spanning the initialize,
-	// initialized and tools/call round-trips — including reading the bodies.
-	// Default 30s. A caller-supplied context deadline still wins if tighter.
+	// RequestTimeout bounds each Search call, including any session
+	// initialisation it performs and reading the bodies, and bounds Close's
+	// DELETE. Default 30s. A caller-supplied context deadline still wins if
+	// tighter.
 	RequestTimeout time.Duration
 	// MaxBodyBytes bounds how much of any single response body is read before
 	// failing, whether the reply is application/json or text/event-stream.
@@ -106,8 +108,11 @@ type Result struct {
 // deadline wins) and MaxBodyBytes.
 //
 // Nothing is retried: tools/call may invoke a billable upstream search, so it
-// is single-attempt like the model adapter's paid POST. A caller that wants to
-// retry a failed search does so knowingly.
+// is single-attempt like the model adapter's paid POST. The one exception is
+// mcpclient's: a call the server refused with HTTP 404 because the session
+// expired was not processed, and is sent once more on a fresh session. A
+// caller that wants to retry a failed search does so knowingly. After Close,
+// Search fails with an error matching mcpclient.ErrClosed.
 func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
 	if query == "" {
 		return nil, errors.New("search: query must not be empty")
@@ -120,4 +125,10 @@ func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
 		return nil, fmt.Errorf("search: tool reported an error: %s", mcpclient.FirstText(result.Content))
 	}
 	return parseResults(result), nil
+}
+
+// Close ends the search session, when the server issued one, with a
+// best-effort DELETE. It is idempotent and always returns nil.
+func (c *Client) Close() error {
+	return c.mcp.Close()
 }

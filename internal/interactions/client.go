@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 const basePath = "/v1beta/interactions"
@@ -49,7 +51,7 @@ type Client struct {
 type Option func(*Client)
 
 // WithBaseURL overrides DefaultBaseURL — primarily for tests against
-// httptest servers.
+// httptest servers. New refuses a value httpx.ParseEndpoint rejects.
 func WithBaseURL(u string) Option {
 	return func(c *Client) { c.baseURL = strings.TrimSuffix(u, "/") }
 }
@@ -112,30 +114,17 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		opt(c)
 	}
-	// Go's net/http strips only its own sensitive headers (Authorization,
-	// Cookie, ...) on cross-domain redirects — never custom ones, so a
-	// followed redirect would deliver x-goog-api-key to the new host. The
-	// same-host policy is enforced on a shallow copy (sharing the
-	// caller's Transport, jar and timeout), so supplying a bare client
-	// via WithHTTPClient cannot lose the guarantee.
+	if _, err := httpx.ParseEndpoint(c.baseURL); err != nil {
+		return nil, fmt.Errorf("interactions: base URL %w", err)
+	}
+	// The x-goog-api-key header travels on every request, and net/http
+	// forwards custom headers to any redirect target. The policy is set on a
+	// shallow copy (sharing the caller's Transport, jar and timeout), so
+	// supplying a bare client via WithHTTPClient cannot lose the guarantee.
 	hc := *c.httpClient
-	hc.CheckRedirect = refuseCrossHostRedirects
+	hc.CheckRedirect = httpx.RefuseUnsafeRedirects
 	c.httpClient = &hc
 	return c, nil
-}
-
-// refuseCrossHostRedirects is every client's redirect policy: same-host
-// redirects are followed (capped at three hops), cross-host redirects
-// are refused outright — the API key header travels on every request,
-// and following one would hand it to the redirect target (CWE-601).
-func refuseCrossHostRedirects(req *http.Request, via []*http.Request) error {
-	if req.URL.Host != via[0].URL.Host {
-		return fmt.Errorf("interactions: redirect to %s refused: cross-origin redirect with sensitive headers", req.URL.Host)
-	}
-	if len(via) >= 3 {
-		return errors.New("interactions: too many redirects")
-	}
-	return nil
 }
 
 // Create starts an interaction: POST /v1beta/interactions
@@ -215,7 +204,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return errorFromResponse(resp)
 	}
-	data, err := readBounded(resp.Body, c.maxBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 	if err != nil {
 		return fmt.Errorf("interactions: reading response: %w", err)
 	}
@@ -261,7 +250,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		case err != nil:
 			lastErr = fmt.Errorf("interactions: %s %s: %w", method, path, err)
 		case retryableStatus(resp.StatusCode):
-			data, _ := readBounded(resp.Body, maxErrorBodyBytes)
+			data, _ := httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 			resp.Body.Close()
 			lastErr = parseAPIError(resp.StatusCode, data)
 		default:
@@ -294,23 +283,9 @@ func (c *Client) backoffDelay(attempt int) time.Duration {
 }
 
 func errorFromResponse(resp *http.Response) error {
-	data, err := readBounded(resp.Body, maxErrorBodyBytes)
+	data, err := httpx.ReadAllBounded(resp.Body, maxErrorBodyBytes)
 	if err != nil {
 		data = nil
 	}
 	return parseAPIError(resp.StatusCode, data)
-}
-
-// readBounded reads at most max bytes, failing — rather than silently
-// truncating — if the body is larger, so a misbehaving server cannot
-// exhaust memory or smuggle a clipped document through as complete.
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > max {
-		return nil, fmt.Errorf("body exceeds %d-byte bound", max)
-	}
-	return data, nil
 }

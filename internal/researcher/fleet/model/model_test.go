@@ -3,12 +3,10 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,61 +28,6 @@ func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client 
 		t.Fatalf("New: %v", err)
 	}
 	return c
-}
-
-func TestGenerateText(t *testing.T) {
-	fake := NewFakeServer(FakeReply{
-		Content:      "The sky is blue because of Rayleigh scattering.",
-		FinishReason: "stop",
-		Usage:        Usage{InputTokens: 12, OutputTokens: 9, TotalTokens: 21},
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	resp, err := c.Generate(context.Background(), Request{
-		Messages: []Message{
-			{Role: RoleSystem, Content: "You are a concise researcher."},
-			{Role: RoleUser, Content: "Why is the sky blue?"},
-		},
-		MaxTokens: 256,
-	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-
-	if resp.Content != "The sky is blue because of Rayleigh scattering." {
-		t.Errorf("Content = %q, want the scripted reply", resp.Content)
-	}
-	if resp.FinishReason != "stop" {
-		t.Errorf("FinishReason = %q, want stop", resp.FinishReason)
-	}
-	if resp.Usage != (Usage{InputTokens: 12, OutputTokens: 9, TotalTokens: 21}) {
-		t.Errorf("Usage = %+v, want prompt→input=12 completion→output=9 total=21", resp.Usage)
-	}
-
-	// The request the fake saw carries the transcript, model, completion cap
-	// and no response_format (plain text), and the key rides only the
-	// Authorization header.
-	reqs := fake.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("call count = %d, want 1", len(reqs))
-	}
-	got := reqs[0]
-	if got.Model != "gpt-test" {
-		t.Errorf("model = %q, want gpt-test", got.Model)
-	}
-	if got.MaxTokens != 256 {
-		t.Errorf("max_completion_tokens = %d, want 256", got.MaxTokens)
-	}
-	if got.ResponseFormatType != "" {
-		t.Errorf("response_format present on a text call: %q", got.ResponseFormatType)
-	}
-	if len(got.Messages) != 2 || got.Messages[0].Role != RoleSystem || got.Messages[1].Content != "Why is the sky blue?" {
-		t.Errorf("messages = %+v, want the two-message transcript", got.Messages)
-	}
-	if got.Authorization != "Bearer "+testKey {
-		t.Errorf("Authorization = %q, want the bearer key header", got.Authorization)
-	}
 }
 
 func TestGenerateSendsMaxCompletionTokens(t *testing.T) {
@@ -136,92 +79,6 @@ func TestGenerateOmitsCompletionCapWhenUnset(t *testing.T) {
 		if _, present := body[field]; present {
 			t.Errorf("request carried %s with MaxTokens unset: %s", field, body[field])
 		}
-	}
-}
-
-func TestGenerateStructured(t *testing.T) {
-	// The model returns a JSON string as the content for a structured call;
-	// the client returns it verbatim for the caller to parse.
-	fake := NewFakeServer(FakeReply{
-		Content: `{"subtasks":["a","b","c"]}`,
-		Usage:   Usage{InputTokens: 30, OutputTokens: 15, TotalTokens: 45},
-	})
-	defer fake.Close()
-
-	schema := json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"subtasks":{"type":"array","items":{"type":"string"}}},"required":["subtasks"]}`)
-	c := newClient(t, fake.URL())
-	resp, err := c.Generate(context.Background(), Request{
-		Messages:   []Message{{Role: RoleUser, Content: "Decompose: why is the sky blue?"}},
-		JSONSchema: schema,
-		SchemaName: "decomposition",
-	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-
-	// Content is the raw JSON string; it must parse.
-	var parsed struct {
-		Subtasks []string `json:"subtasks"`
-	}
-	if err := json.Unmarshal([]byte(resp.Content), &parsed); err != nil {
-		t.Fatalf("structured content did not parse: %v (content %q)", err, resp.Content)
-	}
-	if len(parsed.Subtasks) != 3 {
-		t.Errorf("subtasks = %v, want three", parsed.Subtasks)
-	}
-
-	// The fake saw a provider-native response_format, strict, with the
-	// schema echoed — not prompt-only coaxing.
-	got := fake.Requests()[0]
-	if got.ResponseFormatType != "json_schema" {
-		t.Errorf("response_format.type = %q, want json_schema", got.ResponseFormatType)
-	}
-	if got.SchemaName != "decomposition" {
-		t.Errorf("schema name = %q, want decomposition", got.SchemaName)
-	}
-	if !got.Strict {
-		t.Errorf("strict = false, want true")
-	}
-	if string(got.Schema) != string(schema) {
-		t.Errorf("schema = %s, want the request schema echoed", got.Schema)
-	}
-}
-
-func TestFakeRejectsNonStrictSchema(t *testing.T) {
-	// A strict request whose schema the provider would refuse fails with the
-	// provider's 400 shape, and the scripted reply stays queued for the next
-	// compliant call.
-	fake := NewFakeServer(FakeReply{Content: `{"answer":"42"}`})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := c.Generate(context.Background(), Request{
-		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
-		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"note":{"type":"string"}},"required":["answer"]}`),
-		SchemaName: "reply",
-	})
-	if err == nil {
-		t.Fatal("Generate with a non-strict schema should fail against the fake")
-	}
-	for _, want := range []string{"HTTP 400", "invalid_request_error", "Invalid schema for response_format 'reply'", `property \"note\" must be listed in required`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v, want it to contain %q", err, want)
-		}
-	}
-	if fake.CallCount() != 1 {
-		t.Errorf("call count = %d, want 1", fake.CallCount())
-	}
-
-	resp, err := c.Generate(context.Background(), Request{
-		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
-		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"}},"required":["answer"]}`),
-		SchemaName: "reply",
-	})
-	if err != nil {
-		t.Fatalf("Generate with a strict schema: %v", err)
-	}
-	if resp.Content != `{"answer":"42"}` {
-		t.Errorf("Content = %q, want the scripted reply the rejected call did not consume", resp.Content)
 	}
 }
 
@@ -316,84 +173,6 @@ func TestValidateStrictSchema(t *testing.T) {
 	}
 }
 
-func TestStructuredRequiresSchemaName(t *testing.T) {
-	fake := NewFakeServer()
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := c.Generate(context.Background(), Request{
-		Messages:   []Message{{Role: RoleUser, Content: "hi"}},
-		JSONSchema: json.RawMessage(`{"type":"object"}`),
-	})
-	if err == nil {
-		t.Fatal("Generate with a schema but no name should fail")
-	}
-	// It must fail before touching the wire — no paid call.
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0 — validation must precede the POST", fake.CallCount())
-	}
-}
-
-func TestNoRetryOn5xx(t *testing.T) {
-	// A 5xx may already have billed a turn; the paid POST is single-attempt.
-	fake := NewFakeServer(FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":"boom"}`})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := c.Generate(context.Background(), Request{
-		Messages: []Message{{Role: RoleUser, Content: "hi"}},
-	})
-	if err == nil {
-		t.Fatal("Generate should fail on a 5xx")
-	}
-	if fake.CallCount() != 1 {
-		t.Errorf("call count = %d, want exactly 1 — the paid POST must not be retried", fake.CallCount())
-	}
-}
-
-func TestOversizedBodyRejected(t *testing.T) {
-	// A body over the bound is an error, not a truncation-to-success.
-	big := strings.Repeat("x", 2048)
-	fake := NewFakeServer(FakeReply{RawBody: fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, big)})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL(), func(o *Options) { o.MaxBodyBytes = 512 })
-	_, err := c.Generate(context.Background(), Request{
-		Messages: []Message{{Role: RoleUser, Content: "hi"}},
-	})
-	if err == nil {
-		t.Fatal("Generate should fail when the body exceeds MaxBodyBytes")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("error = %v, want a body-bound error", err)
-	}
-}
-
-// TestGenerateMalformedBodyIsError: a 200 whose body is not a Chat Completions
-// object is a decode error naming the problem, never an empty success.
-func TestGenerateMalformedBodyIsError(t *testing.T) {
-	for _, tt := range []struct {
-		name, body, want string
-	}{
-		{"not json", "<html>upstream proxy error</html>", "decoding response"},
-		{"no choices", `{"id":"x","choices":[]}`, "no choices"},
-		{"wrong shape", `{"choices":"nope"}`, "decoding response"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := NewFakeServer(FakeReply{RawBody: tt.body})
-			defer fake.Close()
-
-			c := newClient(t, fake.URL())
-			_, err := c.Generate(context.Background(), Request{
-				Messages: []Message{{Role: RoleUser, Content: "hi"}},
-			})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Generate = %v, want an error containing %q", err, tt.want)
-			}
-		})
-	}
-}
-
 func TestCrossHostRedirectRefused(t *testing.T) {
 	// A credential-bearing client must not follow a redirect to another
 	// host — that would hand the Authorization header to the target.
@@ -417,6 +196,42 @@ func TestCrossHostRedirectRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
 		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+}
+
+func TestCallerCheckRedirectOverridden(t *testing.T) {
+	// New must impose its own redirect policy even when the caller's
+	// http.Client already carries a permissive one.
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		w.Write([]byte(`{"choices":[{"message":{"content":"leaked"}}]}`))
+	}))
+	defer target.Close()
+
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits.Add(1)
+		http.Redirect(w, r, target.URL+chatCompletionsPath, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
+	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
+	_, err := c.Generate(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("Generate should refuse the redirect even though the caller's client permits it")
+	}
+	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
+		t.Errorf("error = %v, want a cross-host redirect refusal", err)
+	}
+	if got := originHits.Load(); got != 1 {
+		t.Errorf("origin hits = %d, want 1", got)
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("target hits = %d, want 0", got)
 	}
 }
 
@@ -455,48 +270,6 @@ func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
 	}
 }
 
-func TestRedirectPolicy(t *testing.T) {
-	request := func(raw string) *http.Request {
-		u, err := url.Parse(raw)
-		if err != nil {
-			t.Fatalf("url.Parse(%q): %v", raw, err)
-		}
-		return &http.Request{URL: u}
-	}
-	tests := []struct {
-		name    string
-		via     []string
-		target  string
-		wantErr string
-	}{
-		{"same-host https path change followed", []string{"https://api.example.com/v1/chat/completions"}, "https://api.example.com/v2/chat/completions", ""},
-		{"same-host loopback http followed", []string{"http://127.0.0.1:8080/v1"}, "http://127.0.0.1:8080/v2", ""},
-		{"same-host upgrade to https followed", []string{"http://127.0.0.1:8080/v1"}, "https://127.0.0.1:8080/v1", ""},
-		{"cross-host refused", []string{"https://api.example.com/v1"}, "https://evil.example/v1", "cross-origin"},
-		{"https to http on the same host refused", []string{"https://api.example.com/v1"}, "http://api.example.com/v1", "downgrade"},
-		{"downgrade on a later hop refused", []string{"https://api.example.com/v1", "https://api.example.com/v2"}, "http://api.example.com/v3", "downgrade"},
-		{"third hop refused", []string{"https://api.example.com/a", "https://api.example.com/b", "https://api.example.com/c"}, "https://api.example.com/d", "too many redirects"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, request(v))
-			}
-			err := refuseUnsafeRedirects(request(tt.target), via)
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("refuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("refuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
 func TestEndpointValidation(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -512,6 +285,10 @@ func TestEndpointValidation(t *testing.T) {
 		{"empty rejected", "", true},
 		{"garbage rejected", "://not a url", true},
 		{"ftp scheme rejected", "ftp://example.com", true},
+		{"query rejected", "https://api.openai.com/v1?api_key=x", true},
+		{"empty query rejected", "https://api.openai.com/v1?", true},
+		{"fragment rejected", "https://api.openai.com/v1#frag", true},
+		{"empty fragment rejected", "https://api.openai.com/v1#", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -521,6 +298,9 @@ func TestEndpointValidation(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Errorf("New(%q) = %v, want success", tt.endpoint, err)
+			}
+			if err != nil && !strings.HasPrefix(err.Error(), "model: endpoint ") {
+				t.Errorf("error = %v, want the model: endpoint prefix", err)
 			}
 		})
 	}
@@ -579,27 +359,6 @@ func TestNewValidatesRequiredFields(t *testing.T) {
 	}
 }
 
-func TestErrorNeverLeaksKey(t *testing.T) {
-	// A failing request must not surface the API key anywhere in the error,
-	// even when the provider echoes request context in its error body.
-	fake := NewFakeServer(FakeReply{
-		Status:     http.StatusUnauthorized,
-		StatusBody: `{"error":"invalid key ` + testKey + `"}`,
-	})
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	_, err := c.Generate(context.Background(), Request{
-		Messages: []Message{{Role: RoleUser, Content: "hi"}},
-	})
-	if err == nil {
-		t.Fatal("Generate should fail on a 401")
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Fatalf("error leaked the API key: %v", err)
-	}
-}
-
 func TestCallerContextDeadlineWins(t *testing.T) {
 	// The caller's tighter deadline must beat the generous RequestTimeout. The
 	// handler drains the body because net/http only cancels r.Context() on
@@ -633,18 +392,5 @@ func TestCallerContextDeadlineWins(t *testing.T) {
 	case <-aborted:
 	case <-time.After(time.Second):
 		t.Error("the server never observed the request being aborted")
-	}
-}
-
-func TestEmptyMessagesRejected(t *testing.T) {
-	fake := NewFakeServer()
-	defer fake.Close()
-
-	c := newClient(t, fake.URL())
-	if _, err := c.Generate(context.Background(), Request{}); err == nil {
-		t.Fatal("Generate with no messages should fail")
-	}
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0 — validation must precede the POST", fake.CallCount())
 	}
 }

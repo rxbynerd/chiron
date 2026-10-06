@@ -1,4 +1,8 @@
-package model
+// Package modeltest ships model.Client's scripted test double. It is a
+// separate package from internal/researcher/fleet/model so
+// net/http/httptest, needed only to script the double, never links into the
+// chiron binary.
+package modeltest
 
 import (
 	"encoding/json"
@@ -6,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 )
 
 // FakeServer is an httptest-backed stand-in for the Chat Completions
@@ -16,12 +22,13 @@ import (
 // call site and defer Close.
 //
 // Like the provider, it rejects a strict structured-output request whose
-// schema fails ValidateStrictSchema with an HTTP 400 invalid_request_error;
-// the rejected call is recorded but does not consume a scripted reply.
+// schema fails model.ValidateStrictSchema with an HTTP 400
+// invalid_request_error; the rejected call is recorded but does not consume
+// a scripted reply.
 //
 // The zero value is not usable; construct with NewFakeServer. Point a
-// Client at it via Options{Endpoint: fake.URL(), ...}; the Client appends
-// "/chat/completions", which the fake serves.
+// Client at it via model.Options{Endpoint: fake.URL(), ...}; the Client
+// appends "/chat/completions", which the fake serves.
 type FakeServer struct {
 	server *httptest.Server
 
@@ -44,7 +51,7 @@ type FakeReply struct {
 	// empty on a success reply.
 	FinishReason string
 	// Usage is echoed into the response's usage block.
-	Usage Usage
+	Usage model.Usage
 	// Status, when >= 400, makes the fake return that HTTP status with
 	// StatusBody instead of a success reply.
 	Status int
@@ -65,7 +72,7 @@ type FakeRequest struct {
 	// Model is the model field from the request body.
 	Model string
 	// Messages is the transcript from the request body.
-	Messages []Message
+	Messages []model.Message
 	// MaxTokens is the max_completion_tokens field (0 when unset).
 	MaxTokens int
 	// ResponseFormatType is response_format.type ("" when the request was
@@ -132,7 +139,7 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:     body.MaxCompletionTokens,
 	}
 	for _, m := range body.Messages {
-		rec.Messages = append(rec.Messages, Message{Role: Role(m.Role), Content: m.Content})
+		rec.Messages = append(rec.Messages, model.Message{Role: model.Role(m.Role), Content: m.Content})
 	}
 	if body.ResponseFormat != nil {
 		rec.ResponseFormatType = body.ResponseFormat.Type
@@ -143,7 +150,7 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, rec)
 
 	if rf := body.ResponseFormat; rf != nil && rf.Type == "json_schema" && rf.JSONSchema.Strict {
-		if err := checkStrictSchema(rf.JSONSchema.Schema); err != nil {
+		if err := model.ValidateStrictSchema(rf.JSONSchema.Schema); err != nil {
 			f.mu.Unlock()
 			writeInvalidRequest(w, fmt.Sprintf("Invalid schema for response_format '%s': %s", rf.JSONSchema.Name, err))
 			return
@@ -198,6 +205,47 @@ func (f *FakeServer) handle(w http.ResponseWriter, r *http.Request) {
 			panic(fmt.Sprintf("fake: encoding reply: %v", err))
 		}
 	}
+}
+
+// chatRequest and chatResponse mirror the minimal OpenAI-compatible Chat
+// Completions wire shape model.Client sends and expects (see
+// internal/researcher/fleet/model/generate.go); the fake speaks the wire
+// protocol directly rather than reaching into model's unexported types.
+type chatRequest struct {
+	Model               string          `json:"model"`
+	Messages            []chatMessage   `json:"messages"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	ResponseFormat      *responseFormat `json:"response_format,omitempty"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type responseFormat struct {
+	Type       string         `json:"type"`
+	JSONSchema jsonSchemaSpec `json:"json_schema"`
+}
+
+type jsonSchemaSpec struct {
+	Name   string          `json:"name"`
+	Schema json.RawMessage `json:"schema"`
+	Strict bool            `json:"strict"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 // providerError mirrors the OpenAI error envelope.
