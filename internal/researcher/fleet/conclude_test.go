@@ -336,7 +336,13 @@ func TestConcludeBodyCannotHideTheSources(t *testing.T) {
 			if !strings.HasSuffix(md, "\n\\"+unclosed+"\n\n## Sources\n\n1. [Source 1]("+citeURLA+")\n") {
 				t.Errorf("the report does not end in the escaped comment then the Sources list:\n%s", md)
 			}
-			if unescapedHTMLOpener.MatchString(md) {
+			// The formatter's provenance comment opens every report; only the
+			// body below it must keep no raw-HTML opener.
+			body := md
+			if strings.HasPrefix(md, "<!-- chiron-version: ") {
+				_, body, _ = strings.Cut(md, "\n")
+			}
+			if unescapedHTMLOpener.MatchString(body) {
 				t.Errorf("the report keeps an unescaped raw-HTML opener, which could hide the Sources list:\n%s", md)
 			}
 		})
