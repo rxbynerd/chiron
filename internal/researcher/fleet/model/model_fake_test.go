@@ -223,6 +223,29 @@ func TestOversizedBodyRejected(t *testing.T) {
 	}
 }
 
+// TestGenerateClampsNegativeUsage: a negative token count in the provider's
+// usage is reported as zero, so it cannot offset spend elsewhere, while a
+// non-negative count beside it is kept.
+func TestGenerateClampsNegativeUsage(t *testing.T) {
+	fake := modeltest.NewFakeServer(modeltest.FakeReply{
+		Content:      "ok",
+		FinishReason: "stop",
+		Usage:        model.Usage{InputTokens: -5_000_000, OutputTokens: 7, TotalTokens: -4_999_993},
+	})
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	resp, err := c.Generate(context.Background(), model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if want := (model.Usage{InputTokens: 0, OutputTokens: 7, TotalTokens: 0}); resp.Usage != want {
+		t.Errorf("Usage = %+v, want %+v", resp.Usage, want)
+	}
+}
+
 // TestGenerateMalformedBodyIsError: a 200 whose body is not a Chat Completions
 // object is a decode error naming the problem, never an empty success.
 func TestGenerateMalformedBodyIsError(t *testing.T) {

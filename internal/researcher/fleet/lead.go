@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -60,6 +61,27 @@ type leadDeps struct {
 	// Routes validates each brief's target and dispatches it. nil selects
 	// liveRoutes.
 	Routes router
+	// ReportTemplate, when non-nil, is rendered with the query as the
+	// synthesis's output-format block; nil selects the built-in format.
+	// Pass WorkerDeps.ReportTemplate: fleet workers never receive it.
+	ReportTemplate *ReportTemplate
+	// InputGBPPerMTok and OutputGBPPerMTok price the lead's own calls in the
+	// run's Usage. Pass the workers' Caps prices, so the whole run is priced
+	// alike; zero leaves the lead's share of the estimate at 0.
+	InputGBPPerMTok  float64
+	OutputGBPPerMTok float64
+
+	// findingsReadTimeoutOverride replaces findingsReadTimeout when
+	// positive, so tests can shorten it.
+	findingsReadTimeoutOverride time.Duration
+}
+
+// findingsReadDeadline is the bound on reading every finding back.
+func (d leadDeps) findingsReadDeadline() time.Duration {
+	if d.findingsReadTimeoutOverride > 0 {
+		return d.findingsReadTimeoutOverride
+	}
+	return findingsReadTimeout
 }
 
 // lead is the fleet's orchestrator for one run.

