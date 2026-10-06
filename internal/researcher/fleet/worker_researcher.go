@@ -133,7 +133,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		brief.OutputFormat = format
 	}
 
-	id, err := newInteractionID()
+	id, err := newInteractionID(InteractionIDPrefix)
 	if err != nil {
 		return "", err
 	}
@@ -158,12 +158,29 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		w.rememberFinding(ctx, id, brief.Objective, f, span)
 	}
 	go func() {
+		defer close(st.done)
 		defer cancel()
+		defer st.recoverPanic()
 		runWorker(runCtx, w.deps, brief, st.awaiting, after)
-		close(st.done)
 	}()
 
 	return id, nil
+}
+
+// recoverPanic, deferred by the run's goroutine, recovers a panic so it
+// cannot take the process down. A Finding already recorded is kept;
+// otherwise the run records a Failed Finding under panicRecoveryDetail.
+func (st *workerState) recoverPanic() {
+	if recover() == nil {
+		return
+	}
+	select {
+	case <-st.loopDone:
+	default:
+		st.finding = Finding{Status: types.StatusFailed, Detail: panicRecoveryDetail}
+		st.completed = time.Now()
+		close(st.loopDone)
+	}
 }
 
 // Await implements researcher.Researcher: block until the run for id
@@ -363,11 +380,12 @@ func boundRunes(s string, n int) string {
 }
 
 // newInteractionID mints an opaque, unguessable local id for one in-process
-// run. 128 bits of randomness makes collisions within a process negligible.
-func newInteractionID() (string, error) {
+// run, under the researcher's prefix. 128 bits of randomness makes collisions
+// within a process negligible.
+func newInteractionID(prefix string) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("fleet: generating interaction id: %w", err)
 	}
-	return InteractionIDPrefix + hex.EncodeToString(b[:]), nil
+	return prefix + hex.EncodeToString(b[:]), nil
 }

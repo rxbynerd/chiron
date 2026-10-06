@@ -148,12 +148,18 @@ func newPool(deps poolDeps) (*pool, error) {
 // worker's progress deliveries until it is closed.
 //
 // run returns only after every worker goroutine it started has returned and
-// stored its finding. Results are in brief order, whatever the completion
-// order. A failed worker is never dispatched again.
+// stored its finding; if dispatching panics, it cancels those workers first.
+// Results are in brief order, whatever the completion order. A failed worker
+// is never dispatched again.
 func (p *pool) run(ctx context.Context, briefs []plannedBrief, progressGate <-chan struct{}) poolResult {
+	ctx, cancel := context.WithCancel(ctx)
 	results := make([]briefResult, len(briefs))
 	slots := make(chan struct{}, p.deps.Concurrency)
 	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 	for i, pb := range briefs {
 		if i >= p.deps.MaxWorkers {
 			results[i] = p.skip(ctx, pb, dispositionDropped, fmt.Sprintf(

@@ -19,6 +19,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/planner"
+	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -74,8 +75,8 @@ func (e *ExitError) Unwrap() error { return e.Err }
 // runResearch executes `chiron research` end-to-end: select the
 // researcher for the chosen agent, gate the budget, optionally review the
 // plan (--plan), then hand off to the run core. The deep-research tiers
-// bind the Gemini adapter; --agent worker binds Chiron's in-process worker
-// (runWorkerResearch); --agent fleet has no researcher yet.
+// bind the Gemini adapter; --agent worker and --agent fleet bind Chiron's
+// in-process agents (runInProcessResearch).
 func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
 	if cfg.Query == "" {
 		return errors.New("research: a query is required (--query or the positional argument)")
@@ -85,8 +86,11 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 	if err := checkResearcherWired(cfg.Agent); err != nil {
 		return err
 	}
-	if cfg.Agent == config.AgentWorker {
-		return runWorkerResearch(cmd, cfg, resolver)
+	switch cfg.Agent {
+	case config.AgentWorker:
+		return runInProcessResearch(cmd, cfg, resolver, buildWorker)
+	case config.AgentFleet:
+		return runInProcessResearch(cmd, cfg, resolver, buildFleet)
 	}
 
 	return withRunSeams(cmd, cfg, resolver, func(ctx context.Context, apiKey string, deps run.Deps) error {
@@ -123,19 +127,20 @@ func runResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 	})
 }
 
-// runWorkerResearch runs `chiron research --agent worker`: fill unset fleet
-// endpoints from the environment, build the worker from cfg.Fleet, name its
-// destinations on the event stream, then drive the unchanged run core. The
-// deep-research levers are rejected by config validation for this agent
-// rather than ignored; the worker's spend bounds are the fleet caps. Per-turn
+// runInProcessResearch runs `chiron research` for an in-process agent: fill
+// unset fleet endpoints from the environment, bind its researcher from
+// cfg.Fleet with build, name its destinations on the event stream, then drive
+// the unchanged run core. The deep-research levers (--plan, --budget and the
+// Gemini tool flags) are rejected by config validation for these agents
+// rather than ignored; their spend bounds are the fleet caps. Per-turn
 // progress reaches the transport as worker_turn deltas unless --quiet.
-func runWorkerResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver) error {
+func runInProcessResearch(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver, build inProcessBuilder) error {
 	if err := applyEndpointEnv(&cfg.Fleet, cmd.Flags()); err != nil {
 		return err
 	}
 	return withRunLifecycle(cmd, cfg, func(ctx context.Context, deps run.Deps, stderr io.Writer) error {
 		progress := bindWorkerProgress(cfg.Stream, deps.Transport)
-		res, sessions, err := buildWorker(ctx, cfg, resolver, deps.Tracer, stderr, progress)
+		res, sessions, err := build(ctx, cfg, resolver, deps.Tracer, stderr, progress)
 		if err != nil {
 			return err
 		}
@@ -158,45 +163,84 @@ const fetchRequestTimeout = 30 * time.Second
 // reduces it to text (fleet.max_page_bytes bounds the text).
 const fetchMaxContentBytes = 1 << 20
 
-// buildWorker constructs the in-process worker researcher from the resolved
-// config. It resolves the model, search and knowledge key references here, at
-// the composition root, and fails before any request if a required endpoint
-// or key is missing or unresolvable, so a misconfigured worker never emits a
-// resume handle for a run that cannot proceed. A --template is loaded and
-// validated here for the same reason. WorkerTimeout bounds the whole run and
-// each model, search and knowledge call; fetch has its own tighter per-call
-// bound. The returned closer ends the MCP sessions the search and knowledge
-// clients hold; when buildWorker fails, nothing is left open. progress, when
-// non-nil, receives the per-turn reports.
-func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ *fleet.Worker, _ io.Closer, err error) {
+// inProcessBuilder binds an in-process agent's researcher from the resolved
+// config. progress, when non-nil, receives every worker's per-turn reports.
+// The returned closer ends the MCP sessions the researcher's clients hold;
+// when the builder fails, nothing is left open.
+type inProcessBuilder func(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error)
+
+// buildWorker binds the single in-process worker over the shared worker
+// deps.
+func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error) {
+	wd, sessions, err := buildWorkerDeps(ctx, cfg, resolver, tracer, stderr, progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	w, err := fleet.NewWorker(wd)
+	if err != nil {
+		_ = sessions.Close()
+		return nil, nil, err
+	}
+	return w, sessions, nil
+}
+
+// buildFleet binds the fleet over the shared worker deps, so one model
+// client serves its lead and every worker, with an in-process session store
+// and fleet.max_workers and fleet.concurrency as its fan-out caps.
+func buildFleet(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (researcher.Researcher, io.Closer, error) {
+	wd, sessions, err := buildWorkerDeps(ctx, cfg, resolver, tracer, stderr, progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := fleet.NewFleet(fleet.FleetDeps{
+		Worker:      wd,
+		Store:       memory.NewInMemory(memory.InMemoryOptions{}),
+		MaxWorkers:  cfg.Fleet.MaxWorkers,
+		Concurrency: cfg.Fleet.Concurrency,
+	})
+	if err != nil {
+		_ = sessions.Close()
+		return nil, nil, err
+	}
+	return f, sessions, nil
+}
+
+// buildWorkerDeps builds the clients and caps every in-process agent shares.
+// It resolves every key reference and loads any --template before any
+// request, so a misconfigured agent never emits a resume handle. WorkerTimeout
+// bounds each worker and each model, search and knowledge call. The returned
+// closer ends the clients' MCP sessions; on failure nothing is left open.
+func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ fleet.WorkerDeps, _ io.Closer, err error) {
 	fc := cfg.Fleet
-	if fc.ModelEndpoint == "" {
-		return nil, nil, fmt.Errorf("research --agent worker: fleet.model_endpoint is required; pass --fleet-model-endpoint or set %s", config.EnvFleetModelEndpoint)
-	}
-	if fc.ModelName == "" {
-		return nil, nil, errors.New("research --agent worker: fleet.model_name is required")
-	}
-	if fc.ModelKeyRef == "" {
-		return nil, nil, errors.New("research --agent worker: fleet.model_key_ref is required")
-	}
-	if fc.SearchEndpoint == "" {
-		return nil, nil, fmt.Errorf("research --agent worker: fleet.search_endpoint is required; pass --fleet-search-endpoint or set %s", config.EnvFleetSearchEndpoint)
+	for _, required := range []struct {
+		field string
+		set   bool
+		hint  string
+	}{
+		{"fleet.model_endpoint", fc.ModelEndpoint != "", "; pass --fleet-model-endpoint or set " + config.EnvFleetModelEndpoint},
+		{"fleet.model_name", fc.ModelName != "", ""},
+		{"fleet.model_key_ref", fc.ModelKeyRef != "", ""},
+		{"fleet.search_endpoint", fc.SearchEndpoint != "", "; pass --fleet-search-endpoint or set " + config.EnvFleetSearchEndpoint},
+	} {
+		if !required.set {
+			return fleet.WorkerDeps{}, nil, fmt.Errorf("research --agent %s: %s is required%s", cfg.Agent, required.field, required.hint)
+		}
 	}
 	if err := requireKnowledge(fc); err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	var reportTemplate *fleet.ReportTemplate
 	if cfg.Template != "" {
 		rt, err := fleet.LoadReportTemplate(cfg.Template)
 		if err != nil {
-			return nil, nil, err
+			return fleet.WorkerDeps{}, nil, err
 		}
 		reportTemplate = rt
 	}
 
 	modelKey, err := resolver.Resolve(ctx, fc.ModelKeyRef)
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	// The search MCP may be keyless; resolve only when a reference is set, so
 	// an empty ref sends no Authorization header rather than failing.
@@ -204,13 +248,13 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 	if fc.SearchKeyRef != "" {
 		searchKey, err = resolver.Resolve(ctx, fc.SearchKeyRef)
 		if err != nil {
-			return nil, nil, err
+			return fleet.WorkerDeps{}, nil, err
 		}
 	}
 
 	allowLoopback, err := fetchAllowLoopbackFromEnv()
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 
 	var sessions closers
@@ -233,7 +277,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		RequestTimeout: callTimeout,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	searchClient, err := search.New(search.Options{
 		Endpoint:       fc.SearchEndpoint,
@@ -243,12 +287,12 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		QueryArgKey:    fc.SearchQueryArg,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	sessions = append(sessions, searchClient)
 	recaller, rememberer, knowledgeSession, err := buildKnowledge(ctx, fc, resolver, callTimeout)
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 	if knowledgeSession != nil {
 		sessions = append(sessions, knowledgeSession)
@@ -262,10 +306,10 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 		AllowLoopback:   allowLoopback,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fleet.WorkerDeps{}, nil, err
 	}
 
-	worker, err := fleet.NewWorker(fleet.WorkerDeps{
+	return fleet.WorkerDeps{
 		Model:              modelClient,
 		Search:             searchClient,
 		Fetch:              fetchClient,
@@ -286,11 +330,7 @@ func buildWorker(ctx context.Context, cfg config.ResearchConfig, resolver secret
 			MaxPageBytes:     fc.MaxPageBytes,
 			RecallLimit:      fc.KnowledgeLimit,
 		},
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return worker, sessions, nil
+	}, sessions, nil
 }
 
 // closers closes each member, last first, and joins their errors.
@@ -323,21 +363,25 @@ func fetchAllowLoopbackFromEnv() (bool, error) {
 	}
 }
 
-// refuseWorkerInteractionID rejects a worker-minted id for the commands that
-// re-attach to server-side state: an in-process run keeps none, so there is
-// nothing to fetch or follow up.
-func refuseWorkerInteractionID(command, id string) error {
-	if !fleet.IsWorkerInteractionID(id) {
+// refuseInProcessInteractionID rejects a worker- or fleet-minted id for the
+// commands that re-attach to server-side state: an in-process run keeps
+// none, so there is nothing to fetch or follow up.
+func refuseInProcessInteractionID(command, id string) error {
+	switch {
+	case fleet.IsWorkerInteractionID(id):
+		return fmt.Errorf("%s: %s is an in-process worker id; worker runs hold no server-side state and cannot be re-fetched or followed up", command, id)
+	case fleet.IsFleetInteractionID(id):
+		return fmt.Errorf("%s: %s is an in-process fleet id; fleet runs hold no server-side state and cannot be re-fetched or followed up", command, id)
+	default:
 		return nil
 	}
-	return fmt.Errorf("%s: %s is an in-process worker id; worker runs hold no server-side state and cannot be re-fetched or followed up", command, id)
 }
 
 // runGet executes `chiron get <id>`: re-attach to a stored interaction,
 // await whatever state remains (respecting --timeout), and emit the
 // report through the normal sinks. No create, no spend, no budget gate.
 func runGet(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.Resolver, id string) error {
-	if err := refuseWorkerInteractionID("get", id); err != nil {
+	if err := refuseInProcessInteractionID("get", id); err != nil {
 		return err
 	}
 	return withRunSeams(cmd, cfg, resolver, func(ctx context.Context, apiKey string, deps run.Deps) error {
@@ -363,7 +407,7 @@ func runFollowUp(cmd *cobra.Command, cfg config.ResearchConfig, resolver secret.
 	if cfg.Query == "" {
 		return errors.New("follow-up: a query is required (--query)")
 	}
-	if err := refuseWorkerInteractionID("follow-up", previousID); err != nil {
+	if err := refuseInProcessInteractionID("follow-up", previousID); err != nil {
 		return err
 	}
 	model := cfg.Model
@@ -463,15 +507,14 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 }
 
 // checkResearcherWired reports whether the selected agent has a researcher
-// bound at this composition root. The fleet orchestrator passes config
-// validation but has no implementation, so it fails here with a clear error
-// rather than a nil researcher or a Gemini fallback.
+// bound at this composition root, so an agent with none fails with a clear
+// error rather than a nil researcher or a Gemini fallback.
 func checkResearcherWired(agent string) error {
 	switch agent {
-	case config.AgentDeepResearch, config.AgentDeepResearchMax, config.AgentWorker:
+	case config.AgentDeepResearch, config.AgentDeepResearchMax, config.AgentWorker, config.AgentFleet:
 		return nil
 	default:
-		return fmt.Errorf("agent %q: %w", agent, fleet.ErrNotImplemented)
+		return fmt.Errorf("research: agent %q has no researcher bound", agent)
 	}
 }
 
@@ -538,10 +581,12 @@ func bindThoughtDisplay(ctx context.Context, opts *gemini.Options, tr transport.
 }
 
 // workerTurnPayload is the delta payload for one worker progress report: the
-// type and text every delta carries, plus the report's fields.
+// type and text every delta carries, plus the report's fields. WorkerID names
+// the fleet worker and is omitted for the single-worker agent.
 type workerTurnPayload struct {
 	Type             string  `json:"type"`
 	Text             string  `json:"text"`
+	WorkerID         string  `json:"worker_id,omitempty"`
 	Turn             int     `json:"turn"`
 	MaxTurns         int     `json:"max_turns"`
 	Action           string  `json:"action"`
@@ -563,6 +608,9 @@ func bindWorkerProgress(stream bool, tr transport.Transport) func(context.Contex
 		// The worker scrubs Detail; every output path scrubs again.
 		detail := secret.Scrub(p.Detail)
 		text := fmt.Sprintf("turn %d/%d: %s", p.Turn, p.MaxTurns, p.Action)
+		if p.WorkerID != "" {
+			text = p.WorkerID + " " + text
+		}
 		if detail != "" {
 			text += " " + detail
 		}
@@ -570,6 +618,7 @@ func bindWorkerProgress(stream bool, tr transport.Transport) func(context.Contex
 		payload, err := json.Marshal(workerTurnPayload{
 			Type:             "worker_turn",
 			Text:             secret.Scrub(text),
+			WorkerID:         p.WorkerID,
 			Turn:             p.Turn,
 			MaxTurns:         p.MaxTurns,
 			Action:           p.Action,
