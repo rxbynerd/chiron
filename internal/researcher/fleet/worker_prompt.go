@@ -124,8 +124,10 @@ var recallSystemPromptTemplate = func() string {
 }()
 
 // buildSystemPrompt renders the system prompt for a brief, substituting
-// defaults for blank fields. recall selects the prompt that also describes
-// the knowledge store; without it the prompt is systemPromptTemplate alone.
+// defaults for blank fields. Every brief field is defanged, so no field can
+// form a tool-result fence whether an operator or the lead wrote it. recall
+// selects the prompt that also describes the knowledge store; without it the
+// prompt is systemPromptTemplate alone.
 func buildSystemPrompt(brief Brief, recall bool) string {
 	objective := strings.TrimSpace(brief.Objective)
 	if objective == "" {
@@ -147,7 +149,7 @@ func buildSystemPrompt(brief Brief, recall bool) string {
 	if recall {
 		template = recallSystemPromptTemplate
 	}
-	return fmt.Sprintf(template, objective, format, guidance, boundaries)
+	return fmt.Sprintf(template, defang(objective), format, defang(guidance), defang(boundaries))
 }
 
 // outputFormatBlock is the text under "Required output format:": the
