@@ -88,15 +88,19 @@ func origin(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// refuseEndpointFlags stops research-config from emitting a fleet endpoint:
-// its output is the next stage's base config, which config.DecodeBase
-// refuses.
+// refuseEndpointFlags stops research-config from emitting a fleet endpoint
+// or fleet.search_send_objective: its output is the next stage's base
+// config, which config.DecodeBase refuses.
 func refuseEndpointFlags(flags *pflag.FlagSet) error {
 	for _, e := range config.FleetEndpoints(&config.FleetConfig{}) {
 		if flags.Changed(e.Flag) {
 			return fmt.Errorf("research-config: --%s cannot travel through a pipeline, because the next stage refuses a base config that chooses where credentials are sent; pass --%s to the final chiron research stage or set %s for it",
 				e.Flag, e.Flag, e.Env)
 		}
+	}
+	if flags.Changed(config.FlagSearchSendObjective) {
+		return fmt.Errorf("research-config: --%s cannot travel through a pipeline, because the next stage refuses a base config that chooses to send the research question to a search provider; pass it to the final chiron research stage",
+			config.FlagSearchSendObjective)
 	}
 	return nil
 }

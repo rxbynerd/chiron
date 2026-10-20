@@ -40,17 +40,12 @@ func requireWeb(fc config.FleetConfig) error {
 
 // buildWeb builds the web search and fetch providers the configuration
 // selects, with the closer that ends the MCP search session (nil when search
-// is not MCP). Every key reference it needs is resolved before any client is
-// built. An MCP search call is bounded by callTimeout; an Exa call, either
-// role, and a direct fetch by fetchTimeout. CHIRON_FETCH_ALLOW_LOOPBACK is
-// read only when Chiron fetches pages itself.
-//
-// When both roles use Exa they share one client, so a per-provider limit
-// such as a rate limiter applies across both.
+// is not MCP). The caller has applied requireWeb. Every key reference it
+// needs is resolved before any client is built. An MCP search call is
+// bounded by callTimeout; an Exa call, either role, and a direct fetch by
+// fetchTimeout. CHIRON_FETCH_ALLOW_LOOPBACK is read only when Chiron fetches
+// pages itself. When both roles use Exa they share one client.
 func buildWeb(ctx context.Context, fc config.FleetConfig, resolver secret.Resolver, callTimeout, fetchTimeout time.Duration) (web.Searcher, web.Fetcher, io.Closer, error) {
-	if err := requireWeb(fc); err != nil {
-		return nil, nil, nil, err
-	}
 	var exaKey, searchKey string
 	var err error
 	if fc.UsesExa() {
@@ -74,15 +69,18 @@ func buildWeb(ctx context.Context, fc config.FleetConfig, resolver secret.Resolv
 
 	var exaClient *exa.Client
 	if fc.UsesExa() {
-		// fleet.max_page_bytes bounds the text in bytes after the worker
-		// reduces it; Exa bounds it in characters, which is never fewer.
-		exaClient, err = exa.New(exa.Options{
+		opts := exa.Options{
 			Endpoint:       fc.ExaEndpoint,
 			APIKey:         exaKey,
 			RequestTimeout: fetchTimeout,
-			MaxCharacters:  fc.MaxPageBytes,
 			SendObjective:  fc.SearchSendObjective,
-		})
+		}
+		if fc.FetchProviderOrDefault() == config.FetchExa {
+			// fleet.max_page_bytes bounds the text in bytes after the worker
+			// reduces it; Exa bounds it in characters, which is never fewer.
+			opts.MaxCharacters = fc.MaxPageBytes
+		}
+		exaClient, err = exa.New(opts)
 		if err != nil {
 			return nil, nil, nil, err
 		}

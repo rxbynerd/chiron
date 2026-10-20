@@ -2,6 +2,8 @@ package cli
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -243,5 +245,68 @@ func TestWorkerExaRefusals(t *testing.T) {
 	}
 	if len(exaSrv.Requests()) != 0 || searchSrv.CallCount() != 0 || modelSrv.CallCount() != 0 {
 		t.Error("a refused configuration must not dial anything")
+	}
+}
+
+// TestResearchConfigRefusesSendObjective: the objective switch cannot
+// travel through a pipeline, since the next stage refuses it in a base.
+func TestResearchConfigRefusesSendObjective(t *testing.T) {
+	stdout, _, err := execute(t, "research-config", "--agent", "worker", "--fleet-search-provider", "exa", "--fleet-search-send-objective")
+	if err == nil || !strings.Contains(err.Error(), "--fleet-search-send-objective") || !strings.Contains(err.Error(), "final chiron research stage") {
+		t.Fatalf("err = %v, want the flag refused", err)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing emitted", stdout)
+	}
+}
+
+// TestWorkerExaSearchWithDirectFetchThroughCLI: Exa searches while Chiron
+// fetches pages itself. A page bound above Exa's character limit is valid,
+// since Exa fetches nothing; the endpoints event has no fetch entry; the
+// tool list qualifies only search; and the loopback switch is still read.
+func TestWorkerExaSearchWithDirectFetchThroughCLI(t *testing.T) {
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("Rayleigh scattering."))
+	}))
+	defer page.Close()
+	exaSrv := exatest.NewFakeServer(exatest.WithResults([]web.Result{{Title: "Sky", URL: page.URL, Snippet: "scattering"}}))
+	defer exaSrv.Close()
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page.URL + `"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"` + page.URL + `","title":"Sky"}]}`, FinishReason: "stop"},
+	)
+	defer modelSrv.Close()
+	clearEndpointEnv(t)
+	t.Setenv("MODEL_KEY", "test-model-key")
+	t.Setenv("EXA_KEY", exaTestKey)
+	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "1")
+
+	args := []string{
+		"research", "--query", "why is the sky blue", "--agent", "worker", "-o", "text",
+		"--fleet-model-endpoint", modelSrv.URL(), "--fleet-model-name", "test-model", "--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-search-provider", "exa", "--fleet-exa-endpoint", exaSrv.URL(), "--fleet-exa-key-ref", "secret://EXA_KEY",
+		"--fleet-max-page-bytes", "2000000",
+	}
+	stdout, stderr, err := execute(t, args...)
+	if err != nil {
+		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+	}
+	if reqs := exaSrv.Requests(); len(reqs) != 1 || reqs[0].Path != "/search" {
+		t.Errorf("Exa requests = %+v, want the one search", reqs)
+	}
+	events := endpointsEvents(t, stderr)
+	want := `{"endpoints":{"model":"` + modelSrv.URL() + `","search":"` + exaSrv.URL() + `"}}`
+	if len(events) != 1 || events[0] != want {
+		t.Errorf("endpoints events = %q, want %s", events, want)
+	}
+	if !strings.Contains(stdout, "tools: ['web_search:exa', web_fetch]") || !strings.Contains(stdout, "["+"Sky]("+page.URL+")") {
+		t.Errorf("report lacks the tool list or the fetched source:\n%s", stdout)
+	}
+
+	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "yes")
+	if _, _, err := execute(t, args...); err == nil || !strings.Contains(err.Error(), "CHIRON_FETCH_ALLOW_LOOPBACK") {
+		t.Errorf("err = %v, want the loopback switch read and refused for the direct fetch", err)
 	}
 }

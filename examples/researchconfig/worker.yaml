@@ -39,7 +39,8 @@ fleet:
   # search_provider: exa              # or mcp (default)
   # fetch_provider: exa               # or direct (default)
   # exa_key_ref: secret://EXA_KEY     # one key for both roles
-  # search_send_objective: true       # also send the research question
+  # Sending the research question with each search is per run only:
+  # pass --fleet-search-send-objective; a config file cannot set it.
   max_turns: 8
   max_tokens: 400000
   worker_timeout: 5m

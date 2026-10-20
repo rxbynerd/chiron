@@ -2515,14 +2515,23 @@ covers both.
 
 **No default endpoint.** `exa.DefaultEndpoint` is documentation only. The
 operator names `https://api.exa.ai` with `--fleet-exa-endpoint` or
-`CHIRON_FLEET_EXA_ENDPOINT`, exactly as for the model endpoint. With a code
-default, a shared base config could select `exa` and a key reference and
-thereby choose where queries, URLs and a key go, which the 2026-09-25
-provenance decision closed for every other destination. The Exa endpoint
-joins `FleetEndpoints`, so `DecodeBase` refuses it and `research-config`
-refuses its flag. Each table row now carries `Needed`, so a variable is read
-only when its endpoint is used: the search variable is ignored when Exa
-searches, and the Exa variable unless a role uses Exa.
+`CHIRON_FLEET_EXA_ENDPOINT`, exactly as for the model endpoint. The Exa
+endpoint joins `FleetEndpoints`, so `DecodeBase` refuses it and
+`research-config` refuses its flag. Each table row now carries `Needed`, so
+a variable is read only when its endpoint is used: the search variable is
+ignored when Exa searches, and the Exa variable unless a role uses Exa.
+This does not stop a base config choosing Exa. When the deployment exports
+`CHIRON_FLEET_EXA_ENDPOINT`, a base config may set either provider to `exa`
+and name any `exa_key_ref`, which moves queries and fetched URLs from the
+operator's MCP server and Chiron's own fetch to Exa and sends the referenced
+secret there. That is the exposure the knowledge pair already has when
+`CHIRON_FLEET_KNOWLEDGE_ENDPOINT` is exported, and the destination is still
+one the operator named and the endpoints event shows. Operators who do not
+want that should set the variable per invocation rather than ambiently.
+Sending the research question is the one Exa setting a base config cannot
+make: `DecodeBase` refuses `search_send_objective: true` and
+`research-config` refuses `--fleet-search-send-objective`, so only the final
+stage's flag can turn it on.
 
 **Spend.** `types.Usage` gains `WebCostUSD` and `WebCostUnknownCalls`.
 GBP stays model spend only and the two currencies are never summed. The

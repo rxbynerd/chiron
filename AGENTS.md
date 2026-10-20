@@ -221,11 +221,16 @@ endpoint.
   requires `--fleet-exa-endpoint https://api.exa.ai` or
   `CHIRON_FLEET_EXA_ENDPOINT` when either role uses Exa, and the pair must
   be unset otherwise. The endpoint follows the same provenance rule as the
-  model endpoint.
+  model endpoint, but the provider selection and key reference may come
+  from a base config: with the variable exported, a base config can route
+  queries and fetched URLs to Exa and choose which secret is sent there, as
+  it can for the knowledge pair. Export the variable per invocation where
+  that matters.
 - `fleet.search_send_objective` — off by default; when set, each Exa
   search also carries the research question (cut to 4,000 UTF-16 units),
   which otherwise never leaves the process. Rejected unless search is
-  `exa`.
+  `exa`. Only `--fleet-search-send-objective` can set it: `DecodeBase`
+  refuses it in a base config and `research-config` refuses the flag.
 - `fleet.model_name` is required for `worker`/`fleet`; the model client
   never sends an empty identifier.
 - Spend caps: `fleet.max_turns`, `fleet.max_tokens` and

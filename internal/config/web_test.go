@@ -161,3 +161,16 @@ func TestDecodeBaseRejectsExaEndpoint(t *testing.T) {
 		t.Errorf("error echoes the endpoint: %v", err)
 	}
 }
+
+// TestDecodeBaseRefusesSendObjective: a shared config cannot choose to send
+// the research question to a search provider; only the flag can.
+func TestDecodeBaseRefusesSendObjective(t *testing.T) {
+	_, err := DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  search_send_objective: true\n"))
+	if err == nil || !strings.Contains(err.Error(), "fleet.search_send_objective: must not come from a base config") ||
+		!strings.Contains(err.Error(), "--"+FlagSearchSendObjective) {
+		t.Fatalf("err = %v, want the objective refused with its flag named", err)
+	}
+	if _, err := DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  search_send_objective: false\n")); err != nil {
+		t.Errorf("a base leaving the objective off was refused: %v", err)
+	}
+}

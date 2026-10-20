@@ -253,8 +253,11 @@ chiron research --agent worker \
 
 Every search query, and every fetched URL with its query string, goes to
 Exa; the research question goes too only with
-`--fleet-search-send-objective`. Exa has no built-in endpoint: name it with
-`--fleet-exa-endpoint` or `CHIRON_FLEET_EXA_ENDPOINT`, as for the model.
+`--fleet-search-send-objective`, which only the final stage's flag can set.
+Exa has no built-in endpoint: name it with `--fleet-exa-endpoint` or
+`CHIRON_FLEET_EXA_ENDPOINT`, as for the model. While the variable is
+exported, any base config can select Exa, so export it only for the runs
+that should use it.
 URLs carrying credentials or naming internal or local hosts are refused
 before anything is sent. The report's front matter records the provider
 (`tools: ['web_search:exa', 'web_fetch:exa']`) and Exa's reported cost as

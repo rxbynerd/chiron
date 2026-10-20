@@ -17,6 +17,11 @@ const (
 	FetchExa    = "exa"
 )
 
+// FlagSearchSendObjective is the only source of fleet.search_send_objective:
+// a base config may not set it, because sending the research question to a
+// third party is the operator's choice per run.
+const FlagSearchSendObjective = "fleet-search-send-objective"
+
 // EnvFleetExaEndpoint supplies fleet.exa_endpoint when its flag is unset.
 const EnvFleetExaEndpoint = "CHIRON_FLEET_EXA_ENDPOINT"
 
@@ -111,7 +116,7 @@ func registerWebFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-fetch-provider", "", fmt.Sprintf("web fetch provider: %q (Chiron fetches pages itself; default) or %q", FetchDirect, FetchExa))
 	fs.String("fleet-exa-endpoint", "", "Exa API base URL, normally https://api.exa.ai (absolute https://, http:// loopback only; overrides "+EnvFleetExaEndpoint+"; refused in a base config)")
 	fs.String("fleet-exa-key-ref", "", "secret:// reference to the Exa key (never a literal; serves both roles)")
-	fs.Bool("fleet-search-send-objective", false, "send the research objective to the search provider with each query (exa only)")
+	fs.Bool(FlagSearchSendObjective, false, "send the research objective to the search provider with each query (exa only; refused in a base config)")
 }
 
 // applyWebFlag overlays name onto cfg when it is an explicitly set web
@@ -126,7 +131,7 @@ func applyWebFlag(cfg *ResearchConfig, fs *pflag.FlagSet, name string) {
 		cfg.Fleet.ExaEndpoint = mustString(fs, name)
 	case "fleet-exa-key-ref":
 		cfg.Fleet.ExaKeyRef = mustString(fs, name)
-	case "fleet-search-send-objective":
+	case FlagSearchSendObjective:
 		cfg.Fleet.SearchSendObjective = mustBool(fs, name)
 	}
 }

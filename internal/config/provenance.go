@@ -47,8 +47,8 @@ func FleetEndpoints(f *FleetConfig) []FleetEndpoint {
 }
 
 // DecodeBase strictly decodes a base config (a --config file or piped stdin,
-// JSON or YAML) over the defaults and refuses one naming any fleet endpoint,
-// whatever its agent. Flags overlay the base afterwards, so a flag setting
+// JSON or YAML) over the defaults and refuses one naming any fleet endpoint
+// or turning on fleet.search_send_objective, whatever its agent. Flags overlay the base afterwards, so a flag setting
 // the same endpoint cannot rescue it. The error never echoes the value.
 func DecodeBase(r io.Reader) (ResearchConfig, error) {
 	cfg, err := decode(r)
@@ -60,6 +60,10 @@ func DecodeBase(r io.Reader) (ResearchConfig, error) {
 			return ResearchConfig{}, fmt.Errorf("%s: must not come from a base config (--config or piped stdin), because a shared config must not choose where credentials are sent; pass --%s or set %s instead",
 				e.Field, e.Flag, e.Env)
 		}
+	}
+	if cfg.Fleet.SearchSendObjective {
+		return ResearchConfig{}, fmt.Errorf("fleet.search_send_objective: must not come from a base config (--config or piped stdin), because a shared config must not choose to send the research question to a search provider; pass --%s instead",
+			FlagSearchSendObjective)
 	}
 	return cfg, nil
 }
