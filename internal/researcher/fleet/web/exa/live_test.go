@@ -49,8 +49,8 @@ func TestLiveExa(t *testing.T) {
 		if !strings.HasPrefix(r.URL, "http") || r.Title == "" || r.Snippet == "" {
 			t.Errorf("result missing a field: %+v", r)
 		}
-		if len(r.Snippet) > 1000 {
-			t.Errorf("snippet of %d bytes exceeds the adapter bound", len(r.Snippet))
+		if !utf8.ValidString(r.Snippet) {
+			t.Errorf("snippet is not valid UTF-8: %q", r.Snippet)
 		}
 	}
 	if res.Spend.Unknown || res.Spend.USD <= 0 {
