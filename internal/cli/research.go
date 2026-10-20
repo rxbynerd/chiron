@@ -219,7 +219,6 @@ func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver se
 		{"fleet.model_endpoint", fc.ModelEndpoint != "", "; pass --fleet-model-endpoint or set " + config.EnvFleetModelEndpoint},
 		{"fleet.model_name", fc.ModelName != "", ""},
 		{"fleet.model_key_ref", fc.ModelKeyRef != "", ""},
-		{"fleet.search_endpoint", fc.SearchEndpoint != "" || fc.SearchProviderOrDefault() != config.SearchMCP, "; pass --fleet-search-endpoint or set " + config.EnvFleetSearchEndpoint},
 	} {
 		if !required.set {
 			return fleet.WorkerDeps{}, nil, fmt.Errorf("research --agent %s: %s is required%s", cfg.Agent, required.field, required.hint)

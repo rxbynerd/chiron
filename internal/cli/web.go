@@ -16,10 +16,15 @@ import (
 )
 
 // requireWeb checks the web provider fields the composition root needs
-// before anything is resolved or dialled: a role served by Exa needs the Exa
-// endpoint and key. The MCP search endpoint is required with the other
-// endpoints. Config validation has already checked their form.
+// before anything is resolved or dialled: MCP search needs its endpoint, and
+// a role served by Exa needs the Exa endpoint and key. Config validation has
+// already checked their form and refused the MCP search fields beside Exa
+// search.
 func requireWeb(fc config.FleetConfig) error {
+	if fc.SearchProviderOrDefault() == config.SearchMCP && fc.SearchEndpoint == "" {
+		return fmt.Errorf("research: fleet.search_endpoint is required when fleet.search_provider is %s; pass --fleet-search-endpoint or set %s",
+			config.SearchMCP, config.EnvFleetSearchEndpoint)
+	}
 	if !fc.UsesExa() {
 		return nil
 	}
