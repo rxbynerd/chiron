@@ -16,6 +16,9 @@ var (
 	// x-goog-api-key header or assignment, however quoted.
 	reGoogHeader = regexp.MustCompile(`(?i)(x-goog-api-key\b['"]?\s*[:=]\s*['"]?)[A-Za-z0-9._~+/=-]+`)
 
+	// x-api-key header or assignment, however quoted.
+	reAPIKeyHeader = regexp.MustCompile(`(?i)\b(x-api-key\b['"]?\s*[:=]\s*['"]?)[A-Za-z0-9._~+/=-]+`)
+
 	// RFC 6750 bearer credentials.
 	reBearer = regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*`)
 
@@ -49,6 +52,7 @@ var (
 // logs or traces.
 func Scrub(s string) string {
 	s = reGoogHeader.ReplaceAllString(s, "${1}[REDACTED:x-goog-api-key]")
+	s = reAPIKeyHeader.ReplaceAllString(s, "${1}[REDACTED:x-api-key]")
 	s = reBearer.ReplaceAllString(s, "${1}[REDACTED:bearer-token]")
 	s = reBasicAuth.ReplaceAllStringFunc(s, func(match string) string {
 		sub := reBasicAuth.FindStringSubmatch(match)

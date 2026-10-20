@@ -44,6 +44,8 @@ func TestScrubPatterns(t *testing.T) {
 		{"bearer lowercase", "authorization: bearer " + fakeToken, fakeToken},
 		{"x-goog-api-key header", "x-goog-api-key: " + fakeGoogleKey, fakeGoogleKey},
 		{"x-goog-api-key json", `{"x-goog-api-key":"` + fakeGoogleKey + `"}`, fakeGoogleKey},
+		{"x-api-key header lowercase uuid", "x-api-key: 3f2b9c1e-5a7d-4e8f-9b0a-1c2d3e4f5a6b", "3f2b9c1e-5a7d-4e8f-9b0a-1c2d3e4f5a6b"},
+		{"x-api-key json", `{"X-Api-Key":"3f2b9c1e-5a7d-4e8f-9b0a-1c2d3e4f5a6b"}`, "3f2b9c1e-5a7d-4e8f-9b0a-1c2d3e4f5a6b"},
 		{"high entropy token", "got credential " + fakeToken + " from resolver", fakeToken},
 		{"hex token", "session 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
 	}
