@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/httpx"
@@ -190,15 +191,21 @@ func (c *Client) validRequestID(id string) bool {
 	return requestIDPattern.MatchString(id) && c.scrub(id) == id
 }
 
-// redactText flattens msg to one line and replaces each of redact, as sent
-// and as flattened, when it is at least minRedactedBytes long.
+// redactText flattens msg to one line of printable text and replaces each of
+// redact, as sent and as flattened, when it is at least minRedactedBytes
+// long.
 func redactText(msg string, redact []string) string {
 	for _, r := range redact {
 		if len(r) >= minRedactedBytes {
 			msg = strings.ReplaceAll(msg, r, "[REDACTED:request-text]")
 		}
 	}
-	msg = oneLine(msg)
+	msg = oneLine(strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, strings.ToValidUTF8(msg, "�")))
 	for _, r := range redact {
 		if r = oneLine(r); len(r) >= minRedactedBytes {
 			msg = strings.ReplaceAll(msg, r, "[REDACTED:request-text]")

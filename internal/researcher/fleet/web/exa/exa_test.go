@@ -767,3 +767,52 @@ func TestFetchTruncationCountsUTF16Units(t *testing.T) {
 		})
 	}
 }
+
+// TestErrorsFromHostileEnvelopes: a malformed tag or request id is dropped,
+// the message reaches the caller as one bounded line of printable text, and
+// an envelope cut off by the error-body bound contributes only its status.
+func TestErrorsFromHostileEnvelopes(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		check  func(t *testing.T, e *exa.APIError)
+	}{
+		{"malformed tag", 400, `{"requestId":"r1","error":"bad","tag":"bad-tag!"}`, func(t *testing.T, e *exa.APIError) {
+			if e.Tag != "" || e.Message != "bad" {
+				t.Errorf("APIError = %+v, want the tag dropped and the message kept", e)
+			}
+		}},
+		{"request id with control characters", 400, `{"requestId":"r1\u001b[31m","error":"bad","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
+			if e.RequestID != "" {
+				t.Errorf("RequestID = %q, want it dropped", e.RequestID)
+			}
+		}},
+		{"message with newlines and escapes", 400, `{"error":"line one\nline two \u001b[31mred\u001b[0m\u0007","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
+			if e.Message != "line one line two [31mred[0m" {
+				t.Errorf("Message = %q, want one line without control characters", e.Message)
+			}
+		}},
+		{"multibyte message over the bound", 400, `{"error":"` + strings.Repeat("é", 600) + `","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
+			if len(e.Message) > 512 || !utf8.ValidString(e.Message) {
+				t.Errorf("Message is %d bytes (valid UTF-8: %v), want at most 512", len(e.Message), utf8.ValidString(e.Message))
+			}
+		}},
+		{"envelope past the body bound", 401, `{"error":"` + strings.Repeat("x", 10<<10) + `","tag":"INVALID_API_KEY"}`, func(t *testing.T, e *exa.APIError) {
+			if e.Tag != "" || e.Message != "" {
+				t.Errorf("APIError = %+v, want the status alone", e)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, tt.body))
+			defer fake.Close()
+			_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+			var apiErr *exa.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != tt.status {
+				t.Fatalf("err = %v, want an APIError %d", err, tt.status)
+			}
+			tt.check(t, apiErr)
+		})
+	}
+}
