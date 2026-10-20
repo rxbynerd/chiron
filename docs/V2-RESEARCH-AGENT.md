@@ -214,6 +214,20 @@ The worker must not expose generic tools to the model. It dispatches only the tw
 known read-only actions above. Unknown or side-effecting actions fail the worker
 and are pinned by tests.
 
+### Web providers
+
+The worker reaches the web only through the `internal/researcher/fleet/web`
+seam: a `Searcher` and a `Fetcher`, each returning the spend of every call.
+`fleet.search_provider` selects the search MCP client (`mcp`, the default) or
+Exa (`exa`); `fleet.fetch_provider` selects Chiron's own SSRF-guarded client
+(`direct`, the default) or Exa (`exa`). The model's actions do not change with
+the provider, and both search and fetch stay read-only. Exa's endpoint and key
+(`fleet.exa_endpoint`, `fleet.exa_key_ref`) follow the endpoint provenance
+rule, with no built-in default. Web spend is reported in USD beside the GBP
+model estimate, never summed with it, and a provider account that refuses
+every call ends the worker at once. The design and its security posture are in
+docs/DECISIONS.md, 2026-10-20 "Web seam and the Exa provider".
+
 ### Mapping to Chiron types
 
 For `--agent worker`, map the final finding to one `types.Interaction`:

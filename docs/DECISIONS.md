@@ -2458,3 +2458,139 @@ against the Gemini Deep Research baseline (issue #25) has not been built.
 Until the fleet meets or beats that baseline, `deep-research` stays the
 default agent, `worker` stays the single-loop in-process path, and
 `--agent fleet` is opt-in.
+
+## 2026-10-20 — Web seam and the Exa provider
+
+The worker's two web tools were bound to concrete clients: an MCP search
+client and Chiron's own SSRF-guarded fetch client. Operators need a hosted
+provider for either role, because egress from some deployments is
+restricted and many sites answer datacentre fetches with bot walls. Exa
+serves both roles over one REST API. A study of the next providers (Brave,
+Firecrawl, Tavily, Parallel, Jina) found that they differ in capability
+(search only, fetch only, both), cost reporting (USD, credits, tokens or
+nothing) and failure semantics (per-item errors inside a 200, billed error
+pages), so the worker now depends on a seam rather than on any one of them.
+No new dependency was introduced.
+
+**The seam.** `internal/researcher/fleet/web` is a stdlib-only leaf, laid
+out like `internal/memory`: it declares `Searcher` and `Fetcher`, and
+adapters live beside or beneath it (`search`, `fetch`, `web/exa`). `Search`
+takes a `Query` (text and an optional objective) and returns results, notes
+for the model and the call's `Spend`; `Fetch` returns a `Page` with its
+`Spend`. Spend is returned per call, valid even beside an error as
+`io.Reader`'s count is, because the lead and every fleet worker share one
+client: a client-held total could not be attributed to one finding without
+racing. The zero `Spend` means nothing was billed, so the MCP search and the
+direct fetch report nothing and need no change. `ErrRefusedDestination` and
+`ErrAccountUnusable` are seam sentinels; `fetch.ErrRefusedDestination` is
+the same value. The internal-address table moved unchanged from the fetch
+guard to `httpx.InternalAddr`, so a provider that sends URLs to a third
+party refuses the same addresses the direct client refuses at dial time.
+`search.Result` and `fetch.Page` are aliases of the seam types for now.
+
+**REST, not Exa's hosted MCP server.** The existing MCP search client
+cannot use `mcp.exa.ai`: its search tool requires an `objective` argument
+and forbids unknown ones, while the client sends only the query; it replies
+in prose, so the client would degrade to one URL-less snippet; it expects
+`x-api-key`, not the client's bearer header; selecting tools needs a query
+string, which `httpx.ParseEndpoint` refuses; and it reports no cost.
+`web/exa` is a hand-rolled `net/http` client for `POST /search` and
+`POST /contents`.
+
+**Selectors by role, endpoint and key by provider.**
+`fleet.search_provider` (`mcp`, the default, or `exa`) and
+`fleet.fetch_provider` (`direct`, the default, or `exa`) choose who serves
+each role, which a search-only or fetch-only provider needs. The Exa
+endpoint and key are named for the provider instead
+(`fleet.exa_endpoint`, `fleet.exa_key_ref`, one key for both roles), so a
+key is bound by name to the destination it is sent to: with role-keyed
+fields, a deployment's `CHIRON_FLEET_SEARCH_ENDPOINT` would receive the Exa
+key the moment a run switched its search provider. The cost is one field
+pair per provider, kept in the one `FleetEndpoints` table. When both roles
+use Exa the composition root builds one client, so a per-provider limit
+added later covers both.
+
+**No default endpoint.** `exa.DefaultEndpoint` is documentation only. The
+operator names `https://api.exa.ai` with `--fleet-exa-endpoint` or
+`CHIRON_FLEET_EXA_ENDPOINT`, exactly as for the model endpoint. With a code
+default, a shared base config could select `exa` and a key reference and
+thereby choose where queries, URLs and a key go, which the 2026-09-25
+provenance decision closed for every other destination. The Exa endpoint
+joins `FleetEndpoints`, so `DecodeBase` refuses it and `research-config`
+refuses its flag. Each table row now carries `Needed`, so a variable is read
+only when its endpoint is used: the search variable is ignored when Exa
+searches, and the Exa variable unless a role uses Exa.
+
+**Spend.** `types.Usage` gains `WebCostUSD` and `WebCostUnknownCalls`.
+GBP stays model spend only and the two currencies are never summed. The
+worker folds each call's spend into its usage before inspecting the error
+and rounds the sum to the micro-dollar; an `Unknown` spend increments the
+counter, making `web_cost_usd` a lower bound. Exa's cost is
+`costDollars.total`; a billed reply that omits it, a 5xx other than 503, and
+a transport failure after the request was written are `Unknown`; a 4xx or
+503 costs nothing. The fleet rollup moved to `types.Usage.Add`, pinned by a
+reflection test so no field can drop out of it. There is no USD ceiling:
+`fleet.ceiling_gbp` is a model-token ceiling and its help now says so. The
+bound is structural. At most `max_turns` web calls run per worker, so web
+spend is at most `max_turns × $0.007` for searches of ten results plus
+`$0.001` per fetched page, times `max_workers` in a fleet. A later
+`Caps` field can add a USD ceiling from the per-call spend.
+
+**Account failures end the run.** A 401, a 402 for no credit or an
+exhausted key or team budget, and a 403 `TEAM_BLOCKED` match
+`web.ErrAccountUnusable`, and the worker ends the run Failed on the turn
+that met one. Feeding it back would cost up to two more paid model turns
+for a call that cannot succeed. A 402 `X402_PAYMENT_REQUIRED` is Exa's
+answer to a request without a key; `exa.New` refuses an empty key, so that
+tag means a client fault and stays an ordinary error.
+
+**One re-send.** No Exa POST is retried, except that a 503 whose body is
+Exa's JSON envelope with tag `SERVICE_OVERLOADED` is sent once more at
+once. Exa documents that reply as not processed and not billed, the same
+unambiguous case as the MCP session 404, and failing it would cost a tool
+strike, a paid model turn worth more than the search. A 503 without the
+envelope, such as an edge proxy's page, is not re-sent, because nothing
+says the request was not processed.
+
+**What the smoke run settled.** An authenticated run against the live API
+on 2026-10-20 showed: `highlights.maxCharacters` is a hint (567 runes came
+back for 300), so the adapter cuts each snippet to 1,000 bytes and the
+worker cuts every provider's snippet to the same bound; `/contents` echoes
+each requested URL verbatim as its status id and reports no final URL after
+a redirect, so `Fetch` sends one URL, requires exactly one status with that
+id, and reports the URL it sent; a URL Exa cannot retrieve is a 200 with an
+error status and costs nothing; without a text view `/contents` returns the
+whole page and bills it, so a bounded text view is always requested;
+`maxCharacters` counts characters, not bytes; and Exa accepted and echoed
+userinfo and fragments.
+
+**Security posture.** Exa, not Chiron, dials the pages, so there is no
+dial-time guard; the SSRF question becomes one of disclosure. Before
+anything is sent, `Fetch` refuses a URL with userinfo, drops its fragment,
+caps it at 2,048 bytes, and refuses a host that is an internal address, a
+single-label or local name (`localhost`, `.localhost`, `.local`,
+`.internal`, `.home.arpa`, `.lan`), or a name whose last label is numeric or
+not ASCII, which a WHATWG parser may read as an address. The worker's rule
+that only URLs from search results are fetched still applies first. Exa
+receives every search query, the research objective only when
+`fleet.search_send_objective` is set (off by default), and every fetched
+URL including its query string. Exa's retention and training terms for API
+traffic depend on the customer agreement; reviewing them and signing a data
+processing agreement is the operator's job. Target sites see Exa's
+`ExaUser` agent, not Chiron's identifying user agent. The key travels only
+in `x-api-key`, redirects are refused, and errors are scrubbed of the key
+by exact match before `secret.Scrub`, which gains an `x-api-key` header
+rule, because the heuristics are not known to recognise Exa's key format.
+The Interaction's tool list records `web_search:exa` and `web_fetch:exa`,
+and the endpoints event names Exa's origin for search and adds a `fetch`
+key when fetching sends a credential.
+
+**Not yet measured or built.** Whether Exa fetches pages that bot-wall
+Chiron's own requests is unmeasured: Exa's crawler documentation says it
+does not bypass logins, paywalls or CAPTCHAs, and no provider publishes a
+success rate from datacentre callers. Accepting Exa fetch as the remedy for
+bot walls needs a trial against a list of known bot-walled URLs. Request
+pacing is deferred: Exa limits a team to 10 searches per second, which one
+worker cannot reach, and a shared per-provider limiter belongs with the
+fleet's concurrent workers. `proto/chiron/v1` `Usage` gains `recall_count`,
+`web_cost_usd` and `web_cost_unknown_calls`.

@@ -174,12 +174,17 @@ chiron research --agent worker \
 | `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
 | `--fleet-search-tool` | `search` | MCP tool the search client invokes; change it for a search server that names its tool differently. |
 | `--fleet-search-query-arg` | `query` | Argument key the search query is passed under; change it to match the configured tool. |
+| `--fleet-search-provider` | `mcp` | Who runs web searches: `mcp` (the server at `--fleet-search-endpoint`) or `exa`. |
+| `--fleet-fetch-provider` | `direct` | Who fetches pages: `direct` (Chiron's own SSRF-guarded client) or `exa`. |
+| `--fleet-exa-endpoint` | — | Exa API base URL, normally `https://api.exa.ai`; same scheme rule. Required when either provider is `exa`, from this flag or `CHIRON_FLEET_EXA_ENDPOINT`, never a base config. |
+| `--fleet-exa-key-ref` | — | `secret://` reference to the Exa key, which serves both roles. Required when either provider is `exa`. |
+| `--fleet-search-send-objective` | `false` | Send the research question to Exa with each search (`exa` search only). |
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
-| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags. |
+| `--fleet-ceiling` | `0` | Model-token cost cap in GBP; needs both price flags. Web-provider spend is not counted. |
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
-| `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
+| `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction; with Exa fetch, also the page's character bound (at most 1,000,000). |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
 | `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider, from this flag or `CHIRON_FLEET_KNOWLEDGE_ENDPOINT`, never a base config. |
 | `--fleet-knowledge-key-ref` | — | `secret://` reference to the knowledge store key; required for `alexandria`, optional for `billet`. |
@@ -227,6 +232,37 @@ first model call the run names its destinations on stderr, by scheme and
 host only, in one `delta` event:
 `{"endpoints":{"model":"https://api.openai.com","search":"https://search.example.com"}}`,
 with a `knowledge` entry when a knowledge store is configured.
+
+#### Searching and fetching through Exa
+
+Exa can serve either web role, or both, instead of an MCP search server and
+Chiron's own page fetches. Exa crawls the pages from its own infrastructure,
+so target sites see Exa's agent, not Chiron's.
+
+```sh
+export MODEL_KEY=... EXA_KEY=...
+export CHIRON_FLEET_EXA_ENDPOINT=https://api.exa.ai
+chiron research --agent worker \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-provider exa --fleet-fetch-provider exa \
+  --fleet-exa-key-ref secret://EXA_KEY \
+  --query "Competitive landscape of 10BASE-T1L PHY vendors" --out report.md
+```
+
+Every search query, and every fetched URL with its query string, goes to
+Exa; the research question goes too only with
+`--fleet-search-send-objective`. Exa has no built-in endpoint: name it with
+`--fleet-exa-endpoint` or `CHIRON_FLEET_EXA_ENDPOINT`, as for the model.
+URLs carrying credentials or naming internal or local hosts are refused
+before anything is sent. The report's front matter records the provider
+(`tools: ['web_search:exa', 'web_fetch:exa']`) and Exa's reported cost as
+`web_cost_usd`, separate from the GBP model estimate; when a call's cost
+was not reported, `web_cost_unknown_calls` counts it and `web_cost_usd` is
+a lower bound. A rejected key or an exhausted Exa balance ends the run
+`failed` at once. The endpoints event names Exa's origin for `search` and
+adds a `fetch` entry.
 
 #### Organisational knowledge (Billet, Alexandria)
 
@@ -358,8 +394,8 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | `GEMINI_API_KEY` | The API key, read via the default `secret://GEMINI_API_KEY` reference. Any `secret://env/NAME` or `secret://file/<absolute path>` reference works instead. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
-| `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
-| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` | The worker's model, search and knowledge store endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. The knowledge variable is read only with a knowledge provider. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
+| `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's direct `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Read only with `--fleet-fetch-provider direct`. Never set it in production. |
+| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` / `CHIRON_FLEET_EXA_ENDPOINT` | The worker's model, search, knowledge store and Exa endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. Each is read only when the run uses its endpoint: the search variable with MCP search, the knowledge variable with a knowledge provider, the Exa variable when a web role uses Exa. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
 
 ## Documents
 
