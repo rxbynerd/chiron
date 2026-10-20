@@ -2505,10 +2505,13 @@ endpoint and key are named for the provider instead
 (`fleet.exa_endpoint`, `fleet.exa_key_ref`, one key for both roles), so a
 key is bound by name to the destination it is sent to: with role-keyed
 fields, a deployment's `CHIRON_FLEET_SEARCH_ENDPOINT` would receive the Exa
-key the moment a run switched its search provider. The cost is one field
-pair per provider, kept in the one `FleetEndpoints` table. When both roles
-use Exa the composition root builds one client, so a per-provider limit
-added later covers both.
+key the moment a run switched its search provider. A new provider
+therefore costs a leaf adapter package under `fleet/web`, one enum value for
+each role it serves, and, when it carries a credential, a provider-scoped
+endpoint and key pair (fields, flags and validation) plus one
+`FleetEndpoints` row for its endpoint variable. When both roles use Exa the
+composition root builds one client, so a per-provider limit added later
+covers both.
 
 **No default endpoint.** `exa.DefaultEndpoint` is documentation only. The
 operator names `https://api.exa.ai` with `--fleet-exa-endpoint` or
