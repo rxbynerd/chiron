@@ -495,11 +495,8 @@ func withoutFragment(rawURL string) string {
 	return u
 }
 
-// addSpend folds one web call's spend into the run's usage. It runs before
-// the call's error is inspected, because a failed call may still be billed.
-// The sum is rounded to the micro-dollar here, the one place web spend
-// accumulates within a run. A non-finite amount counts as unknown and a
-// negative one as nothing, so a provider's figure cannot offset other spend.
+// addSpend runs before the error check, because a failed call may be billed.
+// A non-finite amount counts as unknown and a negative one as nothing.
 func (w *workerRun) addSpend(s web.Spend) {
 	switch {
 	case s.Unknown, math.IsNaN(s.USD), math.IsInf(s.USD, 0):

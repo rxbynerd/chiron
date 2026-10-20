@@ -294,7 +294,7 @@ func (f *FakeServer) record(rec FakeRequest) {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("exatest: encoding response: %v", err))
+		panic(fmt.Sprintf("fake: encoding response: %v", err))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)

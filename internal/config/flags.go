@@ -60,7 +60,11 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
 	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
 	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet, --agent worker only)")
-	registerWebFlags(fs)
+	fs.String("fleet-search-provider", "", fmt.Sprintf("web search provider: %q (an MCP server at --fleet-search-endpoint; default) or %q", SearchMCP, SearchExa))
+	fs.String("fleet-fetch-provider", "", fmt.Sprintf("web fetch provider: %q (Chiron fetches pages itself; default) or %q", FetchDirect, FetchExa))
+	fs.String("fleet-exa-endpoint", "", "Exa API base URL, normally https://api.exa.ai (absolute https://, http:// loopback only; overrides "+EnvFleetExaEndpoint+"; refused in a base config)")
+	fs.String("fleet-exa-key-ref", "", "secret:// reference to the Exa key (never a literal; serves both roles)")
+	fs.Bool(FlagSearchSendObjective, false, "send the research objective to the search provider with each query (exa only; refused in a base config)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -167,8 +171,16 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.KnowledgeLimit, _ = fs.GetInt(f.Name)
 		case "fleet-knowledge-remember":
 			cfg.Fleet.KnowledgeRemember = mustBool(fs, f.Name)
-		default:
-			applyWebFlag(cfg, fs, f.Name)
+		case "fleet-search-provider":
+			cfg.Fleet.SearchProvider = mustString(fs, f.Name)
+		case "fleet-fetch-provider":
+			cfg.Fleet.FetchProvider = mustString(fs, f.Name)
+		case "fleet-exa-endpoint":
+			cfg.Fleet.ExaEndpoint = mustString(fs, f.Name)
+		case "fleet-exa-key-ref":
+			cfg.Fleet.ExaKeyRef = mustString(fs, f.Name)
+		case FlagSearchSendObjective:
+			cfg.Fleet.SearchSendObjective = mustBool(fs, f.Name)
 		}
 	})
 

@@ -7,11 +7,12 @@
 // configured, validated endpoint — web_fetch dials hosts chosen by an upstream
 // search result and carries NO Chiron credential, so the dominant risk is
 // Server-Side Request Forgery (SSRF, CWE-918). The guard refuses internal
-// destinations (see httpx.InternalAddr) when the connection is dialled: the transport
-// resolves the host itself, refuses if any address is internal, and connects
-// only to the addresses it checked, so neither DNS rebinding nor a redirect
-// reaches an unchecked address. The transport never uses a proxy. The same
-// check runs before the request and on every redirect to fail fast.
+// destinations (see httpx.InternalAddr) when the connection is dialled: the
+// transport resolves the host itself, refuses if any address is internal,
+// and connects only to the addresses it checked, so neither DNS rebinding
+// nor a redirect reaches an unchecked address. The transport never uses a
+// proxy. The same check runs before the request and on every redirect to
+// fail fast.
 //
 // Reads are bounded, redirects are capped, and each call has a timeout that
 // yields to a tighter caller deadline. A body over the bound is

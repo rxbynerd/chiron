@@ -2538,9 +2538,10 @@ GBP stays model spend only and the two currencies are never summed. The
 worker folds each call's spend into its usage before inspecting the error
 and rounds the sum to the micro-dollar; an `Unknown` spend increments the
 counter, making `web_cost_usd` a lower bound. Exa's cost is
-`costDollars.total`; a billed reply that omits it, a 5xx other than 503, and
-a transport failure after the request was written are `Unknown`; a 4xx or
-503 costs nothing. The fleet rollup moved to `types.Usage.Add`, pinned by a
+`costDollars.total`; a billed reply that omits it, a 5xx other than Exa's
+enveloped `SERVICE_OVERLOADED` 503, a refused redirect, and a transport
+failure after the request was written are `Unknown`; a 4xx and that 503
+cost nothing. The fleet rollup moved to `types.Usage.Add`, pinned by a
 reflection test so no field can drop out of it. There is no USD ceiling:
 `fleet.ceiling_gbp` is a model-token ceiling and its help now says so. The
 bound is structural. At most `max_turns` web calls run per worker, so web
@@ -2552,9 +2553,13 @@ spend is at most `max_turns × $0.007` for searches of ten results plus
 exhausted key or team budget, and a 403 `TEAM_BLOCKED` match
 `web.ErrAccountUnusable`, and the worker ends the run Failed on the turn
 that met one. Feeding it back would cost up to two more paid model turns
-for a call that cannot succeed. A 402 `X402_PAYMENT_REQUIRED` is Exa's
-answer to a request without a key; `exa.New` refuses an empty key, so that
-tag means a client fault and stays an ordinary error.
+for a call that cannot succeed. The finding records the cause, and the
+fleet's pool then starts none of its queued briefs, each of which would pay
+a model turn to meet the same refusal; workers already running finish. A
+402 `X402_PAYMENT_REQUIRED` is Exa's answer to a request without a key;
+`exa.New` refuses an empty key, so that tag means a client fault and stays
+an ordinary error. A 401 ends the run whatever its body, while a 402 or 403
+without Exa's envelope does not, since its cause is unknown.
 
 **One re-send.** No Exa POST is retried, except that a 503 whose body is
 Exa's JSON envelope with tag `SERVICE_OVERLOADED` is sent once more at
@@ -2566,23 +2571,32 @@ says the request was not processed.
 
 **What the smoke run settled.** An authenticated run against the live API
 on 2026-10-20 showed: `highlights.maxCharacters` is a hint (567 runes came
-back for 300), so the adapter cuts each snippet to 1,000 bytes and the
-worker cuts every provider's snippet to the same bound; `/contents` echoes
-each requested URL verbatim as its status id and reports no final URL after
-a redirect, so `Fetch` sends one URL, requires exactly one status with that
-id, and reports the URL it sent; a URL Exa cannot retrieve is a 200 with an
+back for 300), so the worker bounds every provider's snippet, title, URL
+and notes itself; `/contents` echoes each requested URL verbatim as its
+status id and reports no final URL after a redirect, so `Fetch` sends one
+URL, requires exactly one status (whatever form its id takes), and reports
+the URL it sent; a URL Exa cannot retrieve is a 200 with an
 error status and costs nothing; without a text view `/contents` returns the
 whole page and bills it, so a bounded text view is always requested;
-`maxCharacters` counts characters, not bytes; and Exa accepted and echoed
-userinfo and fragments.
+`maxCharacters` counts characters, not bytes, so a page reads as truncated
+when it reaches the bound counted as runes or as UTF-16 units; and Exa
+accepted and echoed userinfo and fragments.
 
 **Security posture.** Exa, not Chiron, dials the pages, so there is no
 dial-time guard; the SSRF question becomes one of disclosure. Before
 anything is sent, `Fetch` refuses a URL with userinfo, drops its fragment,
-caps it at 2,048 bytes, and refuses a host that is an internal address, a
-single-label or local name (`localhost`, `.localhost`, `.local`,
-`.internal`, `.home.arpa`, `.lan`), or a name whose last label is numeric or
-not ASCII, which a WHATWG parser may read as an address. The worker's rule
+caps it at 2,048 bytes, and refuses a host that is an internal address
+(`httpx.InternalAddr`, which also refuses Teredo), `localhost`, a name with
+an empty or non-ASCII label, a single-label name, a name under a
+special-use, reserved or commonly private suffix (`.localhost`, `.local`,
+`.localdomain`, `.internal`, `.intranet`, `.private`, `.corp`, `.home`,
+`.lan`, `.home.arpa`, the reverse-DNS `.arpa` zones, `.test`, `.invalid`,
+`.example`, `.onion`), or a name whose last label is numeric, which a WHATWG
+parser may read as an address. Non-ASCII names are refused, punycode forms
+admitted, because IDNA mapping can delete characters and turn a name into
+one the suffix check would refuse. The checks are syntactic: a public name
+that resolves to an internal address is admitted, which discloses only the
+name, because Exa resolves it from its own network. The worker's rule
 that only URLs from search results are fetched still applies first. Exa
 receives every search query, the research objective only when
 `fleet.search_send_objective` is set (off by default), and every fetched
@@ -2593,6 +2607,8 @@ processing agreement is the operator's job. Target sites see Exa's
 in `x-api-key`, redirects are refused, and errors are scrubbed of the key
 by exact match before `secret.Scrub`, which gains an `x-api-key` header
 rule, because the heuristics are not known to recognise Exa's key format.
+The query and objective are redacted from Exa's error messages by exact
+match.
 The Interaction's tool list records `web_search:exa` and `web_fetch:exa`,
 and the endpoints event names Exa's origin for search and adds a `fetch`
 key when fetching sends a credential.
@@ -2603,6 +2619,7 @@ does not bypass logins, paywalls or CAPTCHAs, and no provider publishes a
 success rate from datacentre callers. Accepting Exa fetch as the remedy for
 bot walls needs a trial against a list of known bot-walled URLs. Request
 pacing is deferred: Exa limits a team to 10 searches per second, which one
-worker cannot reach, and a shared per-provider limiter belongs with the
-fleet's concurrent workers. `proto/chiron/v1` `Usage` gains `recall_count`,
+worker cannot reach, and a shared per-provider limiter, honouring a 429's
+`Retry-After`, belongs with the fleet's concurrent workers; until then a 429
+is an ordinary tool failure. `proto/chiron/v1` `Usage` gains `recall_count`,
 `web_cost_usd` and `web_cost_unknown_calls`.

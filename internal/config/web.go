@@ -1,10 +1,6 @@
 package config
 
-import (
-	"fmt"
-
-	"github.com/spf13/pflag"
-)
+import "fmt"
 
 // Web providers for the in-process research agents' two web roles. Search
 // defaults to an MCP search server (fleet.search_endpoint) and fetch to
@@ -21,9 +17,6 @@ const (
 // a base config may not set it, because sending the research question to a
 // third party is the operator's choice per run.
 const FlagSearchSendObjective = "fleet-search-send-objective"
-
-// EnvFleetExaEndpoint supplies fleet.exa_endpoint when its flag is unset.
-const EnvFleetExaEndpoint = "CHIRON_FLEET_EXA_ENDPOINT"
 
 // maxExaPageCharacters is Exa's limit on one page's text, in characters.
 const maxExaPageCharacters = 1_000_000
@@ -108,30 +101,4 @@ func (f FleetConfig) validateWeb() error {
 		return err
 	}
 	return validKeyRef("fleet.exa_key_ref", f.ExaKeyRef)
-}
-
-// registerWebFlags registers the web provider flags.
-func registerWebFlags(fs *pflag.FlagSet) {
-	fs.String("fleet-search-provider", "", fmt.Sprintf("web search provider: %q (an MCP server at --fleet-search-endpoint; default) or %q", SearchMCP, SearchExa))
-	fs.String("fleet-fetch-provider", "", fmt.Sprintf("web fetch provider: %q (Chiron fetches pages itself; default) or %q", FetchDirect, FetchExa))
-	fs.String("fleet-exa-endpoint", "", "Exa API base URL, normally https://api.exa.ai (absolute https://, http:// loopback only; overrides "+EnvFleetExaEndpoint+"; refused in a base config)")
-	fs.String("fleet-exa-key-ref", "", "secret:// reference to the Exa key (never a literal; serves both roles)")
-	fs.Bool(FlagSearchSendObjective, false, "send the research objective to the search provider with each query (exa only; refused in a base config)")
-}
-
-// applyWebFlag overlays name onto cfg when it is an explicitly set web
-// provider flag.
-func applyWebFlag(cfg *ResearchConfig, fs *pflag.FlagSet, name string) {
-	switch name {
-	case "fleet-search-provider":
-		cfg.Fleet.SearchProvider = mustString(fs, name)
-	case "fleet-fetch-provider":
-		cfg.Fleet.FetchProvider = mustString(fs, name)
-	case "fleet-exa-endpoint":
-		cfg.Fleet.ExaEndpoint = mustString(fs, name)
-	case "fleet-exa-key-ref":
-		cfg.Fleet.ExaKeyRef = mustString(fs, name)
-	case FlagSearchSendObjective:
-		cfg.Fleet.SearchSendObjective = mustBool(fs, name)
-	}
 }

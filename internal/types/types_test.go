@@ -69,8 +69,7 @@ func TestInteractionJSONRoundTrip(t *testing.T) {
 }
 
 // TestUsageAddSumsEveryField sets every field of Usage to one and checks
-// that Add doubles each, so a field added later cannot be dropped from the
-// fleet's rollup.
+// that Add doubles each.
 func TestUsageAddSumsEveryField(t *testing.T) {
 	var u Usage
 	v := reflect.ValueOf(&u).Elem()

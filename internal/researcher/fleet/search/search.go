@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
@@ -113,7 +114,7 @@ var _ web.Searcher = (*Client)(nil)
 // caller that wants to retry a failed search does so knowingly. After Close,
 // Search fails with an error matching mcpclient.ErrClosed.
 func (c *Client) Search(ctx context.Context, q web.Query) (web.SearchResponse, error) {
-	if q.Text == "" {
+	if strings.TrimSpace(q.Text) == "" {
 		return web.SearchResponse{}, errors.New("search: query must not be empty")
 	}
 	result, err := c.mcp.CallTool(ctx, c.toolName, map[string]any{c.queryArgKey: q.Text})

@@ -19,6 +19,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/secret"
+	"github.com/rxbynerd/chiron/internal/types"
 )
 
 const (
@@ -216,7 +217,7 @@ func spendFrom(cost *costEnvelope) web.Spend {
 	if math.IsNaN(total) || math.IsInf(total, 0) || total < 0 {
 		return web.Spend{Unknown: true}
 	}
-	return web.Spend{USD: math.Round(total*1e6) / 1e6}
+	return web.Spend{USD: types.RoundUSD(total)}
 }
 
 // scrub redacts the key by exact match, which does not depend on it

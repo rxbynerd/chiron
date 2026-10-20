@@ -1,19 +1,9 @@
 // Package exa is the Exa provider for the web seam: one Client serves both
-// web.Searcher, over POST /search, and web.Fetcher, over POST /contents, on
-// Exa's REST API with a hand-rolled net/http client.
-//
-// Security follows the other credential-bearing clients. The endpoint must
-// pass httpx.ParseEndpoint, the key travels only in the x-api-key header,
-// redirects are never followed because net/http forwards that header to any
-// target, response bodies are bounded, and every error is scrubbed of the
-// key by exact match and then by secret.Scrub. Exa, not Chiron, dials the
-// pages Fetch asks for, so no dial-time guard applies; instead Fetch refuses
-// a URL that is malformed, carries credentials or names an internal host
-// before it is sent to Exa (checkURL).
-//
-// A POST is never retried, with one exception: a 503 whose body is Exa's
-// SERVICE_OVERLOADED envelope, which Exa documents as not processed and not
-// billed, is sent once more.
+// web.Searcher (POST /search) and web.Fetcher (POST /contents). The key
+// travels only in x-api-key, redirects are refused, bodies are bounded,
+// Fetch refuses internal or credential-bearing URLs before sending them,
+// and no POST is retried except one re-send of an overloaded 503
+// (docs/DECISIONS.md, 2026-10-20).
 package exa
 
 import (

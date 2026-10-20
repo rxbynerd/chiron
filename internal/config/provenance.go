@@ -11,6 +11,7 @@ const (
 	EnvFleetModelEndpoint     = "CHIRON_FLEET_MODEL_ENDPOINT"
 	EnvFleetSearchEndpoint    = "CHIRON_FLEET_SEARCH_ENDPOINT"
 	EnvFleetKnowledgeEndpoint = "CHIRON_FLEET_KNOWLEDGE_ENDPOINT"
+	EnvFleetExaEndpoint       = "CHIRON_FLEET_EXA_ENDPOINT"
 )
 
 // FleetEndpoint is one credential-bearing fleet endpoint with the flag and
@@ -42,7 +43,7 @@ func FleetEndpoints(f *FleetConfig) []FleetEndpoint {
 		{Field: "fleet.knowledge_endpoint", Flag: "fleet-knowledge-endpoint", Env: EnvFleetKnowledgeEndpoint, Value: &f.KnowledgeEndpoint,
 			Needed: func(f *FleetConfig) bool { return f.KnowledgeProvider != "" }},
 		{Field: "fleet.exa_endpoint", Flag: "fleet-exa-endpoint", Env: EnvFleetExaEndpoint, Value: &f.ExaEndpoint,
-			Needed: (*FleetConfig).UsesExa},
+			Needed: func(f *FleetConfig) bool { return f.UsesExa() }},
 	}
 }
 

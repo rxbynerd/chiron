@@ -309,7 +309,7 @@ func TestFetchMapsFixtures(t *testing.T) {
 		t.Run(tt.fixture, func(t *testing.T) {
 			raw := fixture(t, tt.fixture)
 			if tt.fixture == "contents-slash.json" {
-				// The smoke call asked for two URLs; the client sends one.
+				// The fixture records a two-URL request; the client sends one.
 				raw = strings.Replace(raw, `,{"id":"https://go.dev/doc","status":"success","source":"cached"}`, "", 1)
 			}
 			fake := exatest.NewFakeServer(exatest.WithRawBody(raw))
