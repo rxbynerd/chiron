@@ -16,8 +16,9 @@ var (
 	// x-goog-api-key header or assignment, however quoted.
 	reGoogHeader = regexp.MustCompile(`(?i)(x-goog-api-key\b['"]?\s*[:=]\s*['"]?)[A-Za-z0-9._~+/=-]+`)
 
-	// x-api-key header or assignment, however quoted.
-	reAPIKeyHeader = regexp.MustCompile(`(?i)\b(x-api-key\b['"]?\s*[:=]\s*['"]?)[A-Za-z0-9._~+/=-]+`)
+	// x-api-key header or assignment, however quoted, including Go's
+	// header-map form (X-Api-Key:[value]) and a value with a Bearer prefix.
+	reAPIKeyHeader = regexp.MustCompile(`(?i)\b(x-api-key\b['"]?\s*[:=]\s*[\['"]?\s*(?:bearer\s+)?)[A-Za-z0-9._~+/=-]+`)
 
 	// RFC 6750 bearer credentials.
 	reBearer = regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*`)

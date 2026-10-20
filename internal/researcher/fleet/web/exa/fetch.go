@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/rxbynerd/chiron/internal/httpx"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
@@ -21,9 +22,14 @@ const (
 	statusError     = "error"
 )
 
-// localSuffixes are special-use and local-network name suffixes whose hosts
-// are never public, so a URL naming one is never disclosed to Exa.
-var localSuffixes = []string{".localhost", ".local", ".internal", ".home.arpa", ".lan"}
+// localSuffixes are special-use, reserved and commonly private name
+// suffixes whose hosts are not public, so a URL naming one is never
+// disclosed to Exa.
+var localSuffixes = []string{
+	".localhost", ".local", ".localdomain", ".internal", ".intranet", ".private",
+	".corp", ".home", ".lan", ".home.arpa", ".in-addr.arpa", ".ip6.arpa",
+	".test", ".invalid", ".example", ".onion",
+}
 
 // FetchError reports that Exa answered but could not retrieve the page: the
 // requested URL's status was an error. Tag is Exa's reason, such as
@@ -50,8 +56,9 @@ func (e *FetchError) Error() string {
 // returns it as Markdown. The URL is checked first (checkURL); a refusal
 // wraps web.ErrRefusedDestination and sends nothing. Page.URL is the URL as
 // sent, without its fragment: Exa reports no final URL after redirects.
-// Truncated is set when the text reached MaxCharacters, so a page of exactly
-// that length also reads as truncated. A URL Exa could not retrieve is a
+// Truncated is set when the text reached MaxCharacters counted as runes or
+// as UTF-16 units, Exa's unit being undocumented, so a page of exactly that
+// length also reads as truncated. A URL Exa could not retrieve is a
 // *FetchError; the returned Page still carries the reply's reported spend.
 func (c *Client) Fetch(ctx context.Context, rawURL string) (web.Page, error) {
 	target, err := checkURL(rawURL)
@@ -67,7 +74,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (web.Page, error) {
 		return web.Page{}, fmt.Errorf("exa: encoding contents request: %w", err)
 	}
 
-	data, spend, err := c.post(ctx, contentsPath, payload)
+	data, spend, err := c.post(ctx, contentsPath, payload, target)
 	if err != nil {
 		return web.Page{Spend: spend}, err
 	}
@@ -77,7 +84,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (web.Page, error) {
 	}
 	spend = spendFrom(env.CostDollars)
 
-	if len(env.Statuses) != 1 || env.Statuses[0].ID != target {
+	if len(env.Statuses) != 1 {
 		return web.Page{Spend: spend}, fmt.Errorf("exa: the contents reply has no single status for %s", c.scrub(target))
 	}
 	switch st := env.Statuses[0]; st.Status {
@@ -91,7 +98,7 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (web.Page, error) {
 		return web.Page{Spend: spend}, fmt.Errorf("exa: %s returned an empty page", c.scrub(target))
 	}
 
-	text, truncated := runeCut(strings.ToValidUTF8(env.Results[0].Text, "�"), c.maxCharacters)
+	text, truncated := cutCharacters(strings.ToValidUTF8(env.Results[0].Text, "�"), c.maxCharacters)
 	return web.Page{
 		URL:         target,
 		ContentType: pageContentType,
@@ -121,9 +128,11 @@ func (c *Client) fetchError(target string, ce *ContentError) *FetchError {
 // web.ErrRefusedDestination. It admits only an http or https URL without
 // userinfo, of at most maxURLBytes once its fragment is dropped, whose host
 // is a public-looking name or a public address. Refused hosts are internal
-// addresses (httpx.InternalAddr), localhost, single-label names, names under
-// localSuffixes, and names whose last label is numeric or not ASCII, which a
-// WHATWG URL parser may read as an IPv4 address.
+// addresses (httpx.InternalAddr), localhost, names with an empty or
+// non-ASCII label, single-label names, names under localSuffixes, and names
+// whose last label is numeric, which a WHATWG URL parser may read as an IPv4
+// address. Non-ASCII names are refused because IDNA mapping can remove
+// characters and so turn a name into one the suffix check would refuse.
 func checkURL(rawURL string) (string, error) {
 	refuse := func(reason string) error {
 		return fmt.Errorf("exa: %w: %s", web.ErrRefusedDestination, reason)
@@ -138,7 +147,7 @@ func checkURL(rawURL string) (string, error) {
 	if u.User != nil {
 		return "", refuse("the URL carries userinfo")
 	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	host := strings.TrimRight(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
 		return "", refuse("the URL has no host")
 	}
@@ -165,6 +174,14 @@ func hostRefusal(host string) string {
 		return "the host is local"
 	}
 	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if label == "" {
+			return "the host has an empty label"
+		}
+		if !asciiLabel(label) {
+			return "the host is not ASCII"
+		}
+	}
 	if len(labels) < 2 {
 		return "the host is a single-label name"
 	}
@@ -173,8 +190,8 @@ func hostRefusal(host string) string {
 			return "the host is a special-use or local-network name"
 		}
 	}
-	if last := labels[len(labels)-1]; numericLabel(last) || !asciiLabel(last) {
-		return "the host's last label is numeric or not ASCII"
+	if numericLabel(labels[len(labels)-1]) {
+		return "the host's last label is numeric"
 	}
 	return ""
 }
@@ -210,14 +227,16 @@ func asciiLabel(label string) bool {
 	return true
 }
 
-// runeCut cuts s to at most n runes and reports whether s held n or more.
-func runeCut(s string, n int) (string, bool) {
-	count := 0
-	for i := range s {
-		if count == n {
+// cutCharacters cuts s to at most n runes and reports whether s reached n
+// characters counted either as runes or as UTF-16 units.
+func cutCharacters(s string, n int) (string, bool) {
+	runes, units := 0, 0
+	for i, r := range s {
+		if runes == n {
 			return s[:i], true
 		}
-		count++
+		runes++
+		units += utf16.RuneLen(r)
 	}
-	return s, count >= n
+	return s, runes >= n || units >= n
 }

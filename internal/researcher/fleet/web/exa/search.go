@@ -7,28 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 const (
 	// highlightCharacters asks for short highlights. Exa treats it as a
-	// hint, so maxSnippetBytes is the bound that holds.
+	// hint; the worker bounds every snippet it renders.
 	highlightCharacters = 400
-	maxSnippetBytes     = 1000
 	snippetSeparator    = " … "
 	// maxObjectiveUnits keeps the objective under Exa's 4096-character
 	// limit, counted in UTF-16 code units so either counting rule passes.
 	maxObjectiveUnits = 4000
-	maxNotes          = 5
-	maxNoteBytes      = 500
 )
 
 // Search runs one auto-type search for q.Text, asking for highlights as the
 // snippet, and returns at most NumResults results. q.Objective is sent, cut
 // to fit Exa's limit, only when SendObjective is set. Exa's notices become
 // Notes; its warnings are ignored. Spend is the reported cost, Unknown when
-// a billed reply did not report one.
+// a billed reply did not report one. An error message Exa returns has the
+// query and objective redacted.
 func (c *Client) Search(ctx context.Context, q web.Query) (web.SearchResponse, error) {
 	if strings.TrimSpace(q.Text) == "" {
 		return web.SearchResponse{}, errors.New("exa: query must not be empty")
@@ -47,16 +46,20 @@ func (c *Client) Search(ctx context.Context, q web.Query) (web.SearchResponse, e
 		return web.SearchResponse{}, fmt.Errorf("exa: encoding search request: %w", err)
 	}
 
-	data, spend, err := c.post(ctx, searchPath, payload)
+	data, spend, err := c.post(ctx, searchPath, payload, q.Text, body.Objective)
 	if err != nil {
 		return web.SearchResponse{Spend: spend}, err
 	}
-	env, err := decodeSearch(data)
-	if err != nil {
+	var env searchEnvelope
+	if err := decodeObject(data, &env); err != nil {
 		return web.SearchResponse{Spend: web.Spend{Unknown: true}}, fmt.Errorf("exa: decoding search response: %s", c.scrub(err.Error()))
 	}
+	spend = spendFrom(env.CostDollars)
+	if env.Results == nil {
+		return web.SearchResponse{Spend: spend}, errors.New("exa: decoding search response: no results array")
+	}
 
-	resp := web.SearchResponse{Spend: spendFrom(env.CostDollars), Notes: notes(env.Notices)}
+	resp := web.SearchResponse{Spend: spend, Notes: notes(env.Notices)}
 	for _, r := range *env.Results {
 		if len(resp.Results) == c.numResults {
 			break
@@ -64,18 +67,6 @@ func (c *Client) Search(ctx context.Context, q web.Query) (web.SearchResponse, e
 		resp.Results = append(resp.Results, web.Result{Title: r.Title, URL: r.URL, Snippet: snippet(r)})
 	}
 	return resp, nil
-}
-
-// decodeSearch requires a JSON object carrying a results array.
-func decodeSearch(data []byte) (searchEnvelope, error) {
-	var env searchEnvelope
-	if err := decodeObject(data, &env); err != nil {
-		return env, err
-	}
-	if env.Results == nil {
-		return env, errors.New("response has no results array")
-	}
-	return env, nil
 }
 
 // decodeObject decodes data, which must be a JSON object, into v.
@@ -87,7 +78,7 @@ func decodeObject(data []byte, v any) error {
 }
 
 // snippet is a result's highlights joined, falling back to its text and
-// then its summary, cut to maxSnippetBytes.
+// then its summary.
 func snippet(r SearchResult) string {
 	var parts []string
 	for _, h := range r.Highlights {
@@ -102,17 +93,14 @@ func snippet(r SearchResult) string {
 	if s == "" {
 		s = strings.TrimSpace(r.Summary)
 	}
-	return boundBytes(strings.ToValidUTF8(s, "�"), maxSnippetBytes)
+	return strings.ToValidUTF8(s, "�")
 }
 
-// notes maps Exa's notices to one-line, bounded notes, at most maxNotes.
+// notes returns the non-blank messages of Exa's notices.
 func notes(notices []Notice) []string {
 	var out []string
 	for _, n := range notices {
-		if len(out) == maxNotes {
-			break
-		}
-		if m := boundBytes(oneLine(strings.ToValidUTF8(n.Message, "�")), maxNoteBytes); m != "" {
+		if m := strings.TrimSpace(strings.ToValidUTF8(n.Message, "�")); m != "" {
 			out = append(out, m)
 		}
 	}
@@ -123,10 +111,7 @@ func notes(notices []Notice) []string {
 func cutUTF16(s string, n int) string {
 	units := 0
 	for i, r := range s {
-		w := 1
-		if r >= 0x10000 {
-			w = 2
-		}
+		w := utf16.RuneLen(r)
 		if units+w > n {
 			return s[:i]
 		}

@@ -57,6 +57,8 @@ func TestInternalAddr(t *testing.T) {
 		{"nat64 loopback", "64:ff9b::7f00:1", true, true},
 		{"nat64 public", "64:ff9b::808:808", false, false},
 		{"local-use nat64", "64:ff9b:1::808:808", true, true},
+		{"teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2", true, true},
+		{"documentation beside teredo", "2001:db8::1", false, false},
 		{"6to4 metadata", "2002:a9fe:a9fe::1", true, true},
 		{"6to4 rfc1918", "2002:a00:1::1", true, true},
 		{"6to4 public", "2002:808:808::1", false, false},

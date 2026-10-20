@@ -16,6 +16,7 @@ var internalPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/4"),    // multicast
 	netip.MustParsePrefix("240.0.0.0/4"),    // reserved, incl. 255.255.255.255 broadcast
 	netip.MustParsePrefix("64:ff9b:1::/48"), // local-use NAT64
+	netip.MustParsePrefix("2001::/32"),      // Teredo, which tunnels to an obfuscated IPv4 client
 	netip.MustParsePrefix("fc00::/7"),       // unique local
 	netip.MustParsePrefix("fe80::/10"),      // link-local
 	netip.MustParsePrefix("fec0::/10"),      // deprecated site-local

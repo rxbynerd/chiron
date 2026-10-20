@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -25,6 +27,10 @@ const (
 	maxErrorBodyBytes = 8 << 10
 	maxMessageBytes   = 512
 	tagOverloaded     = "SERVICE_OVERLOADED"
+	// minRedactedBytes is the shortest request text redacted from an error
+	// message; replacing a shorter one would mangle the message for little
+	// gain.
+	minRedactedBytes = 4
 )
 
 // tagPattern and requestIDPattern admit the server-supplied identifiers an
@@ -86,20 +92,22 @@ func (e *APIError) Is(target error) bool {
 // post sends payload to path and returns the 2xx body. Every outcome carries
 // the spend it implies: zero when nothing can have been billed, Unknown when
 // the request may have been billed and its cost is unreadable. A 503 with
-// Exa's SERVICE_OVERLOADED envelope is re-sent once; nothing else is.
-func (c *Client) post(ctx context.Context, path string, payload []byte) ([]byte, web.Spend, error) {
+// Exa's SERVICE_OVERLOADED envelope is re-sent once; nothing else is. Each
+// of redact, request text the payload carries, is removed from an error
+// message Exa returns.
+func (c *Client) post(ctx context.Context, path string, payload []byte, redact ...string) ([]byte, web.Spend, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
-	data, spend, overloaded, err := c.attempt(ctx, path, payload)
+	data, spend, overloaded, err := c.attempt(ctx, path, payload, redact)
 	if overloaded {
-		data, spend, _, err = c.attempt(ctx, path, payload)
+		data, spend, _, err = c.attempt(ctx, path, payload, redact)
 	}
 	return data, spend, err
 }
 
 // attempt makes one request. overloaded reports a 503 that Exa says it did
 // not process.
-func (c *Client) attempt(ctx context.Context, path string, payload []byte) (data []byte, spend web.Spend, overloaded bool, err error) {
+func (c *Client) attempt(ctx context.Context, path string, payload []byte, redact []string) (data []byte, spend web.Spend, overloaded bool, err error) {
 	// The transport reports the write from its own goroutine.
 	var wrote atomic.Bool
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -117,14 +125,21 @@ func (c *Client) attempt(ctx context.Context, path string, payload []byte) (data
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		// A request that reached Exa may have been processed and billed.
-		return nil, web.Spend{Unknown: wrote.Load()}, false, fmt.Errorf("exa: POST %s: %s", path, c.scrub(err.Error()))
+		// The *url.Error layer names the last URL requested, which for a
+		// refused redirect is the redirect target, so only its cause is kept.
+		cause := err
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			cause = ue.Err
+		}
+		return nil, web.Spend{Unknown: wrote.Load()}, false, fmt.Errorf("exa: POST %s: %s", path, c.scrub(cause.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		apiErr, enveloped := c.errorFromResponse(resp)
+		apiErr, enveloped := c.errorFromResponse(resp, redact)
 		overloaded = resp.StatusCode == http.StatusServiceUnavailable && enveloped && apiErr.Tag == tagOverloaded
-		return nil, errorSpend(resp.StatusCode), overloaded, apiErr
+		return nil, errorSpend(resp.StatusCode, overloaded), overloaded, apiErr
 	}
 	data, err = httpx.ReadAllBounded(resp.Body, c.maxBodyBytes)
 	if err != nil {
@@ -133,18 +148,20 @@ func (c *Client) attempt(ctx context.Context, path string, payload []byte) (data
 	return data, web.Spend{}, false, nil
 }
 
-// errorSpend is the spend a non-2xx reply implies. Exa documents a 503 as
-// not billed and a 4xx rejects the request before work; any other 5xx may
-// follow work already done.
-func errorSpend(status int) web.Spend {
-	return web.Spend{Unknown: status >= 500 && status != http.StatusServiceUnavailable}
+// errorSpend is the spend a non-2xx reply implies. A 4xx rejects the request
+// before work, and Exa documents its SERVICE_OVERLOADED 503 as not billed;
+// any other 5xx, an edge proxy's 503 included, may follow work already done.
+func errorSpend(status int, overloaded bool) web.Spend {
+	return web.Spend{Unknown: status >= 500 && !overloaded}
 }
 
 // errorFromResponse builds the APIError for a non-2xx reply from a bounded
 // read of its body. enveloped reports that the body was Exa's JSON error
 // envelope; a body that is not (an edge proxy's HTML page, say) contributes
-// nothing but the status.
-func (c *Client) errorFromResponse(resp *http.Response) (*APIError, bool) {
+// nothing but the status. The message has the key and each of redact
+// removed, and the request id is dropped unless it survives the key scrub
+// unchanged.
+func (c *Client) errorFromResponse(resp *http.Response, redact []string) (*APIError, bool) {
 	apiErr := &APIError{Status: resp.StatusCode}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	var env ErrorResponse
@@ -154,16 +171,39 @@ func (c *Client) errorFromResponse(resp *http.Response) (*APIError, bool) {
 		if tagPattern.MatchString(env.Tag) {
 			apiErr.Tag = env.Tag
 		}
-		apiErr.Message = boundBytes(c.scrub(oneLine(env.Error)), maxMessageBytes)
+		apiErr.Message = boundBytes(c.scrub(redactText(env.Error, redact)), maxMessageBytes)
 		apiErr.RequestID = env.RequestID
 	}
-	if !requestIDPattern.MatchString(apiErr.RequestID) {
+	if !c.validRequestID(apiErr.RequestID) {
 		apiErr.RequestID = resp.Header.Get("x-request-id")
 	}
-	if !requestIDPattern.MatchString(apiErr.RequestID) {
+	if !c.validRequestID(apiErr.RequestID) {
 		apiErr.RequestID = ""
 	}
 	return apiErr, enveloped
+}
+
+// validRequestID reports whether id has the shape of a request id and is
+// unchanged by the key scrub.
+func (c *Client) validRequestID(id string) bool {
+	return requestIDPattern.MatchString(id) && c.scrub(id) == id
+}
+
+// redactText flattens msg to one line and replaces each of redact, as sent
+// and as flattened, when it is at least minRedactedBytes long.
+func redactText(msg string, redact []string) string {
+	for _, r := range redact {
+		if len(r) >= minRedactedBytes {
+			msg = strings.ReplaceAll(msg, r, "[REDACTED:request-text]")
+		}
+	}
+	msg = oneLine(msg)
+	for _, r := range redact {
+		if r = oneLine(r); len(r) >= minRedactedBytes {
+			msg = strings.ReplaceAll(msg, r, "[REDACTED:request-text]")
+		}
+	}
+	return msg
 }
 
 // spendFrom reads a 200 reply's reported cost, rounded to the micro-dollar.

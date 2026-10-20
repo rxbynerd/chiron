@@ -178,8 +178,8 @@ func TestSearchMapsFixtures(t *testing.T) {
 				if r.URL != tt.wantURLs[i] || r.Title == "" || r.Snippet == "" {
 					t.Errorf("result %d = %+v, want %s with a title and snippet", i, r, tt.wantURLs[i])
 				}
-				if len(r.Snippet) > 1000 || !utf8.ValidString(r.Snippet) {
-					t.Errorf("result %d snippet is %d bytes (valid UTF-8: %v), want at most 1000", i, len(r.Snippet), utf8.ValidString(r.Snippet))
+				if !utf8.ValidString(r.Snippet) {
+					t.Errorf("result %d snippet is not valid UTF-8", i)
 				}
 			}
 		})
@@ -213,7 +213,7 @@ func TestSearchResultMapping(t *testing.T) {
 			t.Errorf("result %d snippet = %q, want %q", i, resp.Results[i].Snippet, want)
 		}
 	}
-	wantNotes := []string{"site: restriction relaxed", "2", "3", "4", "5"}
+	wantNotes := []string{"site: restriction\nrelaxed", "2", "3", "4", "5", "6"}
 	if strings.Join(resp.Notes, "|") != strings.Join(wantNotes, "|") {
 		t.Errorf("notes = %q, want %q", resp.Notes, wantNotes)
 	}
@@ -232,7 +232,7 @@ func TestSearchSpendAndShapeFailures(t *testing.T) {
 		{"cost missing", `{"results":[]}`, false, web.Spend{Unknown: true}},
 		{"cost total missing", `{"results":[],"costDollars":{}}`, false, web.Spend{Unknown: true}},
 		{"negative cost", `{"results":[],"costDollars":{"total":-1}}`, false, web.Spend{Unknown: true}},
-		{"no results array", `{"costDollars":{"total":0.007}}`, true, web.Spend{Unknown: true}},
+		{"no results array", `{"costDollars":{"total":0.007}}`, true, web.Spend{USD: 0.007}},
 		{"not an object", `[]`, true, web.Spend{Unknown: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -377,7 +377,6 @@ func TestFetchRefusesInconsistentReplies(t *testing.T) {
 		wantSpend web.Spend
 	}{
 		{"no status", `{"results":[{"url":"` + u + `","text":"x"}],"statuses":[],"costDollars":{"total":0.001}}`, web.Spend{USD: 0.001}},
-		{"status for another URL", `{"results":[{"url":"` + u + `","text":"x"}],"statuses":[{"id":"https://example.com/b","status":"success"}],"costDollars":{"total":0.001}}`, web.Spend{USD: 0.001}},
 		{"two statuses", `{"results":[],"statuses":[{"id":"` + u + `","status":"success"},{"id":"` + u + `","status":"success"}],"costDollars":{"total":0.002}}`, web.Spend{USD: 0.002}},
 		{"unknown status", `{"results":[],"statuses":[{"id":"` + u + `","status":"pending"}],"costDollars":{"total":0}}`, web.Spend{}},
 		{"success without a result", `{"results":[],"statuses":[{"id":"` + u + `","status":"success"}],"costDollars":{"total":0.001}}`, web.Spend{USD: 0.001}},
@@ -429,6 +428,32 @@ func TestFetchURLHygiene(t *testing.T) {
 		{"non-ascii last label", "http://example.中国/"},
 		{"full-width dots", "http://127。0。0。1/"},
 		{"too long", "https://example.com/" + strings.Repeat("a", 2048)},
+		{"one byte too long", "https://example.com/" + strings.Repeat("a", 2049-len("https://example.com/"))},
+		{"double trailing dot", "http://localhost../"},
+		{"local with double trailing dot", "http://printer.local../"},
+		{"internal with double trailing dot", "http://wiki.internal../"},
+		{"loopback with trailing dots", "http://127.0.0.1../"},
+		{"empty inner label", "http://a..com/"},
+		{"soft hyphen in a local suffix", "http://foo.ho\u00adme.arpa/"},
+		{"zero-width space", "http://wiki\u200b.example.com/"},
+		{"uppercase local", "http://PRINTER.LOCAL/"},
+		{".localdomain", "http://host.localdomain/"},
+		{".corp", "http://wiki.corp/"},
+		{".home", "http://nas.home/"},
+		{".intranet", "http://portal.intranet/"},
+		{".private", "http://db.private/"},
+		{".test", "http://app.test/"},
+		{".invalid", "http://x.invalid/"},
+		{".example", "http://www.example/"},
+		{".onion", "http://abcdefghijklmnop.onion/"},
+		{".in-addr.arpa", "http://1.0.0.127.in-addr.arpa/"},
+		{".ip6.arpa", "http://1.0.0.0.ip6.arpa/"},
+		{"mapped loopback", "http://[::ffff:127.0.0.1]/"},
+		{"cgnat", "http://100.64.0.1/"},
+		{"short loopback", "http://127.1/"},
+		{"decimal loopback", "http://2130706433/"},
+		{"octal loopback", "http://0177.0.0.1/"},
+		{"teredo", "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := exatest.NewFakeServer()
@@ -446,7 +471,8 @@ func TestFetchURLHygiene(t *testing.T) {
 		})
 	}
 
-	for _, ok := range []string{"https://8.8.8.8/dns", "https://xn--fiqs8s.example.com/", "http://example.com:8080/a?b=c"} {
+	exact := "https://example.com/" + strings.Repeat("a", 2048-len("https://example.com/"))
+	for _, ok := range []string{"https://8.8.8.8/dns", "https://xn--fiqs8s.example.com/", "http://example.com:8080/a?b=c", "http://example.com./a", exact} {
 		fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{ok: "text"}))
 		if _, err := newClient(t, fake.URL()).Fetch(context.Background(), ok); err != nil {
 			t.Errorf("Fetch(%s): %v, want it admitted", ok, err)
@@ -475,7 +501,7 @@ func TestErrorsClassifyAccountFailures(t *testing.T) {
 		{"rate limited", 429, `{"requestId":"r1","error":"slow down","tag":"RATE_LIMIT_EXCEEDED"}`, "RATE_LIMIT_EXCEEDED", false, web.Spend{}},
 		{"server error", 500, `{"requestId":"r1","error":"boom","tag":"INTERNAL_ERROR"}`, "INTERNAL_ERROR", false, web.Spend{Unknown: true}},
 		{"deadline", 504, `<html>gateway timeout</html>`, "", false, web.Spend{Unknown: true}},
-		{"edge overload", 503, `<html>overloaded</html>`, "", false, web.Spend{}},
+		{"edge overload", 503, `<html>overloaded</html>`, "", false, web.Spend{Unknown: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			body := tt.body
@@ -510,19 +536,38 @@ func TestErrorsClassifyAccountFailures(t *testing.T) {
 }
 
 func TestErrorsNeverCarryTheKeyOrRequestBody(t *testing.T) {
-	body := `{"requestId":"r1","error":"bad key ` + testKey + ` for x-api-key: ` + testKey + `","tag":"INVALID_API_KEY"}`
+	const query = "the secret research question"
+	const objective = "a confidential  objective"
+	body := `{"requestId":"r1","error":"bad key ` + testKey + ` for x-api-key: ` + testKey +
+		` while searching \"` + query + `\" towards a confidential objective","tag":"INVALID_API_KEY"}`
 	fake := exatest.NewFakeServer(exatest.WithStatus(401, body))
 	defer fake.Close()
 
-	_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "the secret research question"})
+	c := newClient(t, fake.URL(), func(o *exa.Options) { o.SendObjective = true })
+	_, err := c.Search(context.Background(), web.Query{Text: query, Objective: objective})
 	if err == nil {
 		t.Fatal("Search succeeded, want an error")
 	}
-	if strings.Contains(err.Error(), testKey) || strings.Contains(err.Error(), "secret research question") {
-		t.Errorf("error leaks the key or the query: %v", err)
+	for _, leak := range []string{testKey, query, "confidential objective"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error leaks %q: %v", leak, err)
+		}
 	}
-	if !strings.Contains(err.Error(), "(request r1)") {
-		t.Errorf("error = %v, want the request id", err)
+	if !strings.Contains(err.Error(), "[REDACTED:request-text]") || !strings.Contains(err.Error(), "(request r1)") {
+		t.Errorf("error = %v, want the redaction marker and the request id", err)
+	}
+}
+
+// TestErrorRequestIDCarryingTheKeyIsDropped: a request id that is the key
+// itself is never echoed.
+func TestErrorRequestIDCarryingTheKeyIsDropped(t *testing.T) {
+	const key = "abc123def456"
+	fake := exatest.NewFakeServer(exatest.WithStatus(500, `{"requestId":"`+key+`","error":"boom","tag":"INTERNAL_ERROR"}`))
+	defer fake.Close()
+	_, err := newClient(t, fake.URL(), func(o *exa.Options) { o.APIKey = key }).Search(context.Background(), web.Query{Text: "q"})
+	var apiErr *exa.APIError
+	if !errors.As(err, &apiErr) || apiErr.RequestID != "" || strings.Contains(err.Error(), key) {
+		t.Errorf("err = %v, want the request id dropped", err)
 	}
 }
 
@@ -598,14 +643,21 @@ func TestRedirectIsNeverFollowed(t *testing.T) {
 		}
 	}))
 	defer target.Close()
-	fake := exatest.NewFakeServer(exatest.WithRedirect(target.URL + "/search"))
+	fake := exatest.NewFakeServer(exatest.WithRedirect(target.URL + "/search?token=redirect-secret"))
 	defer fake.Close()
 
-	if _, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"}); err == nil {
+	resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+	if err == nil {
 		t.Fatal("Search followed a redirect")
 	}
 	if leaked.Load() {
 		t.Error("the key reached the redirect target")
+	}
+	if strings.Contains(err.Error(), "redirect-secret") {
+		t.Errorf("error echoes the redirect target's URL: %v", err)
+	}
+	if resp.Spend != (web.Spend{Unknown: true}) {
+		t.Errorf("spend = %+v, want unknown: the request reached Exa before it redirected", resp.Spend)
 	}
 }
 
@@ -667,5 +719,51 @@ func TestFakeChallengesAKeylessRequest(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&env)
 	if resp.StatusCode != http.StatusPaymentRequired || env.Tag != "X402_PAYMENT_REQUIRED" {
 		t.Errorf("reply = %d %s, want 402 X402_PAYMENT_REQUIRED", resp.StatusCode, env.Tag)
+	}
+}
+
+// TestFetchAcceptsNormalisedStatusID: the one status in a reply belongs to
+// the one URL sent, even when Exa reports it in a normalised form.
+func TestFetchAcceptsNormalisedStatusID(t *testing.T) {
+	const sent = "https://example.com/docs"
+	raw := `{"results":[{"id":"` + sent + `/","url":"` + sent + `/","text":"page text"}],` +
+		`"statuses":[{"id":"` + sent + `/","status":"success"}],"costDollars":{"total":0.001}}`
+	fake := exatest.NewFakeServer(exatest.WithRawBody(raw))
+	defer fake.Close()
+
+	page, err := newClient(t, fake.URL()).Fetch(context.Background(), sent)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if page.URL != sent || string(page.Content) != "page text" {
+		t.Errorf("page = %s %q, want the URL as sent and the text", page.URL, page.Content)
+	}
+}
+
+// TestFetchTruncationCountsUTF16Units: a page cut at the bound in UTF-16
+// units, fewer runes than the bound when it holds astral characters, still
+// reads as truncated.
+func TestFetchTruncationCountsUTF16Units(t *testing.T) {
+	const u = "https://example.com/emoji"
+	for _, tt := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"cut in UTF-16 units", strings.Repeat("\U0001F600", 5), true},
+		{"cut in runes", strings.Repeat("a", 10), true},
+		{"short page", strings.Repeat("a", 9), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{u: tt.text}))
+			defer fake.Close()
+			page, err := newClient(t, fake.URL(), func(o *exa.Options) { o.MaxCharacters = 10 }).Fetch(context.Background(), u)
+			if err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if page.Truncated != tt.want {
+				t.Errorf("Truncated = %v, want %v", page.Truncated, tt.want)
+			}
+		})
 	}
 }
