@@ -216,13 +216,21 @@ func defang(s string) string {
 	return b.String()
 }
 
-// maxSnippetBytes bounds one search result's snippet in the transcript,
-// whichever provider supplied it.
-const maxSnippetBytes = 1000
+// Bounds on search-provider text in the transcript, whichever provider
+// supplied it. A result whose URL exceeds maxResultURLBytes is dropped
+// before it is rendered or becomes fetchable.
+const (
+	maxTitleBytes     = 300
+	maxResultURLBytes = 2048
+	maxSnippetBytes   = 1000
+	maxNotes          = 5
+	maxNoteBytes      = 500
+)
 
-// searchResultsMessage renders search results, and any provider notes after
-// them, as the next user turn. Notes are provider text, so they sit inside
-// the fence, defanged and flattened to one line each.
+// searchResultsMessage renders search results, and at most maxNotes provider
+// notes after them, as the next user turn. Every provider field sits inside
+// the fence, defanged and bounded; titles, URLs and notes are flattened to
+// one line each.
 func searchResultsMessage(query string, results []web.Result, notes []string) model.Message {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Search results for %q:\n%s\n", query, toolResultOpen)
@@ -231,14 +239,14 @@ func searchResultsMessage(query string, results []web.Result, notes []string) mo
 	}
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. ", i+1)
-		if r.Title != "" {
-			b.WriteString(defang(r.Title))
+		if title := oneLine(r.Title); title != "" {
+			b.WriteString(boundBytes(defang(title), maxTitleBytes))
 		} else {
 			b.WriteString("(untitled)")
 		}
 		b.WriteString("\n")
-		if r.URL != "" {
-			fmt.Fprintf(&b, "   URL: %s\n", defang(r.URL))
+		if u := oneLine(r.URL); u != "" {
+			fmt.Fprintf(&b, "   URL: %s\n", boundBytes(defang(u), maxResultURLBytes))
 		} else {
 			b.WriteString("   URL: (none; this result cannot be fetched)\n")
 		}
@@ -246,9 +254,14 @@ func searchResultsMessage(query string, results []web.Result, notes []string) mo
 			fmt.Fprintf(&b, "   %s\n", boundBytes(defang(r.Snippet), maxSnippetBytes))
 		}
 	}
+	rendered := 0
 	for _, n := range notes {
+		if rendered == maxNotes {
+			break
+		}
 		if n = oneLine(n); n != "" {
-			fmt.Fprintf(&b, "Search provider note: %s\n", defang(n))
+			fmt.Fprintf(&b, "Search provider note: %s\n", boundBytes(defang(n), maxNoteBytes))
+			rendered++
 		}
 	}
 	b.WriteString(toolResultClose)

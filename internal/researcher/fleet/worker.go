@@ -64,6 +64,10 @@ type Finding struct {
 	// Turns is the number of model turns the loop started, counting a turn
 	// whose model call failed.
 	Turns int
+	// AccountUnusable reports that the run failed because a web provider
+	// will refuse every further call on its account, so another worker on
+	// the same providers would fail the same way.
+	AccountUnusable bool
 }
 
 // Progress is one best-effort report from a worker turn, made after the
@@ -154,9 +158,8 @@ const maxDetailBytes = 2048
 
 // WorkerDeps are the shared collaborators a worker loop uses: the model
 // client, the web search and fetch providers, the optional knowledge store
-// halves, a tracer for best-effort observability, and the caps. Model and
-// Search are required; Fetch is required for the loop to honour a fetch
-// action; the rest may be nil.
+// halves, a tracer for best-effort observability, and the caps. Model,
+// Search and Fetch are required (checkWorkerDeps); the rest may be nil.
 type WorkerDeps struct {
 	Model  *model.Client
 	Search web.Searcher
@@ -384,7 +387,13 @@ func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 	}
 	w.toolFailures = 0
 	w.usage.SearchCount++
+	results := resp.Results[:0:0]
 	for _, r := range resp.Results {
+		if len(r.URL) <= maxResultURLBytes {
+			results = append(results, r)
+		}
+	}
+	for _, r := range results {
 		if r.URL != "" {
 			w.seenURLs[r.URL] = true
 			if _, ok := w.titles[r.URL]; !ok && r.Title != "" {
@@ -392,7 +401,7 @@ func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 			}
 		}
 	}
-	w.transcript = append(w.transcript, searchResultsMessage(act.Query, resp.Results, resp.Notes))
+	w.transcript = append(w.transcript, searchResultsMessage(act.Query, results, resp.Notes))
 	return false, Finding{}
 }
 
@@ -408,7 +417,7 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 			fmt.Sprintf("the URL %q did not appear in any search result, so it cannot be fetched.", act.URL)))
 		return false, Finding{}
 	}
-	if w.deps.Fetch == nil {
+	if isNil(w.deps.Fetch) {
 		return true, w.failed("fetch requested but no fetch client is configured")
 	}
 
@@ -424,9 +433,15 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	w.toolFailures = 0
 
 	// A fetched page is a source the worker read, so it is citable under its
-	// final URL as well as the requested one.
+	// final URL as well as the requested one. It is cited under the
+	// requested URL when the two differ only by a fragment, so the model
+	// citing the URL it fetched does not list the page twice.
 	w.seenURLs[page.URL] = true
-	w.addCitation(page.URL, w.titles[act.URL])
+	citeURL := page.URL
+	if withoutFragment(page.URL) == withoutFragment(act.URL) {
+		citeURL = act.URL
+	}
+	w.addCitation(citeURL, w.titles[act.URL])
 
 	w.transcript = append(w.transcript, fetchedPageMessage(page.URL, page.ContentType, rendered.text, page.Truncated || rendered.truncated))
 	return false, Finding{}
@@ -467,9 +482,17 @@ func (w *workerRun) doRecall(ctx context.Context, act action) (bool, Finding) {
 func (w *workerRun) webFailure(ctx context.Context, prefix string, err error) (bool, Finding) {
 	detail := prefix + w.scrub(err.Error())
 	if errors.Is(err, web.ErrAccountUnusable) && ctx.Err() == nil {
-		return true, w.failed(detail)
+		f := w.failed(detail)
+		f.AccountUnusable = true
+		return true, f
 	}
 	return w.toolFailure(ctx, detail)
+}
+
+// withoutFragment returns rawURL up to any '#'.
+func withoutFragment(rawURL string) string {
+	u, _, _ := strings.Cut(rawURL, "#")
+	return u
 }
 
 // addSpend folds one web call's spend into the run's usage. It runs before

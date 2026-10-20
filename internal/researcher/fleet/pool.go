@@ -76,8 +76,9 @@ const (
 	// dispositionDropped: the brief was past the worker cap, or its target
 	// has no route, so no worker ran it.
 	dispositionDropped briefDisposition = "dropped"
-	// dispositionNotStarted: the run's context ended before a worker slot
-	// was free for the brief.
+	// dispositionNotStarted: the run's context ended, or a worker found a
+	// web provider account unusable, before a worker slot was free for the
+	// brief.
 	dispositionNotStarted briefDisposition = "not_started"
 )
 
@@ -101,6 +102,8 @@ type briefResult struct {
 	// Detail is the Finding's detail, followed by the store error when the
 	// finding was not stored; for a brief no worker ran, the reason.
 	Detail string
+	// AccountUnusable is the Finding's AccountUnusable.
+	AccountUnusable bool
 }
 
 // poolResult is one briefResult per planned brief, in plan order, and the
@@ -144,8 +147,11 @@ func newPool(deps poolDeps) (*pool, error) {
 // with at most Concurrency running and at most MaxWorkers started; a brief
 // past the cap is dropped, never queued. Once ctx ends no further worker
 // starts, running workers stop at their next context check, and each brief
-// still waiting is reported not started. A non-nil progressGate holds every
-// worker's progress deliveries until it is closed.
+// still waiting is reported not started. Once a worker reports a web
+// provider account unusable, no further worker starts either, since each
+// would pay a model turn to meet the same refusal; running workers finish.
+// A non-nil progressGate holds every worker's progress deliveries until it
+// is closed.
 //
 // run returns only after every worker goroutine it started has returned and
 // stored its finding; if dispatching panics, it cancels those workers first.
@@ -155,6 +161,11 @@ func (p *pool) run(ctx context.Context, briefs []plannedBrief, progressGate <-ch
 	ctx, cancel := context.WithCancel(ctx)
 	results := make([]briefResult, len(briefs))
 	slots := make(chan struct{}, p.deps.Concurrency)
+	// unusable is closed once a worker reports an unusable account;
+	// unusableBy, written before the close, names that worker.
+	unusable := make(chan struct{})
+	var unusableOnce sync.Once
+	var unusableBy string
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
@@ -171,16 +182,28 @@ func (p *pool) run(ctx context.Context, briefs []plannedBrief, progressGate <-ch
 			results[i] = p.skip(ctx, pb, dispositionDropped, "dropped: "+err.Error())
 			continue
 		}
-		if !acquireSlot(ctx, slots) {
-			results[i] = p.skip(ctx, pb, dispositionNotStarted,
-				"not started: the run ended before a worker slot was free: "+ctx.Err().Error())
+		if !acquireSlot(ctx, slots, unusable) {
+			reason := "not started: the run ended before a worker slot was free"
+			if err := ctx.Err(); err != nil {
+				reason += ": " + err.Error()
+			} else {
+				reason = "not started: " + unusableBy + " found a web provider account unusable"
+			}
+			results[i] = p.skip(ctx, pb, dispositionNotStarted, reason)
 			continue
 		}
+		workerID := fmt.Sprintf("worker-%d", i+1)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			results[i] = p.runBrief(ctx, fmt.Sprintf("worker-%d", i+1), pb, dispatch, progressGate)
+			results[i] = p.runBrief(ctx, workerID, pb, dispatch, progressGate)
+			if results[i].AccountUnusable {
+				unusableOnce.Do(func() {
+					unusableBy = workerID
+					close(unusable)
+				})
+			}
 		}()
 	}
 	wg.Wait()
@@ -192,14 +215,27 @@ func (p *pool) run(ctx context.Context, briefs []plannedBrief, progressGate <-ch
 	return out
 }
 
-// acquireSlot takes a worker slot, or reports false once ctx has ended. A
-// slot won in the same instant ctx ends is handed back, so a cancelled run
-// starts nothing.
-func acquireSlot(ctx context.Context, slots chan struct{}) bool {
+// acquireSlot takes a worker slot, or reports false once ctx has ended or
+// stop is closed. A slot won in the same instant either happens is handed
+// back, so a stopped run starts nothing.
+func acquireSlot(ctx context.Context, slots chan struct{}, stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return false
+	default:
+	}
 	select {
 	case slots <- struct{}{}:
 	case <-ctx.Done():
 		return false
+	case <-stop:
+		return false
+	}
+	select {
+	case <-stop:
+		<-slots
+		return false
+	default:
 	}
 	if ctx.Err() != nil {
 		<-slots
@@ -236,14 +272,15 @@ func (p *pool) runBrief(ctx context.Context, workerID string, pb plannedBrief, d
 
 	f := p.dispatchSafely(ctx, dispatch, p.workerDeps(workerID), pb.Brief, progressGate)
 	res := briefResult{
-		BriefID:       pb.ID,
-		WorkerID:      workerID,
-		Disposition:   dispositionRan,
-		Status:        f.Status,
-		Usage:         f.Usage,
-		Turns:         f.Turns,
-		CitationCount: len(f.Citations),
-		Detail:        f.Detail,
+		BriefID:         pb.ID,
+		WorkerID:        workerID,
+		Disposition:     dispositionRan,
+		Status:          f.Status,
+		Usage:           f.Usage,
+		Turns:           f.Turns,
+		CitationCount:   len(f.Citations),
+		Detail:          f.Detail,
+		AccountUnusable: f.AccountUnusable,
 	}
 	ref, err := p.storeFinding(ctx, workerID, pb.ID, f)
 	stored := err == nil
@@ -325,6 +362,9 @@ type findingRecord struct {
 	Status    types.Status     `json:"status"`
 	Detail    string           `json:"detail,omitempty"`
 	Turns     int              `json:"turns"`
+	// AccountUnusable is omitted when false, so a stored finding without it
+	// reads back unchanged.
+	AccountUnusable bool `json:"account_unusable,omitempty"`
 }
 
 // storeFinding writes f to the run's session under its own timeout,
