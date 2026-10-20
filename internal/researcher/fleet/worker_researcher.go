@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -97,14 +98,29 @@ func checkWorkerDeps(deps WorkerDeps) error {
 	switch {
 	case deps.Model == nil:
 		return errWorkerNoModel
-	case deps.Search == nil:
+	case isNil(deps.Search):
 		return errors.New("fleet: worker requires a search client")
-	case deps.Fetch == nil:
+	case isNil(deps.Fetch):
 		return errors.New("fleet: worker requires a fetch client")
 	case deps.Caps.MaxTurns <= 0:
 		return fmt.Errorf("fleet: worker requires a positive turn cap, got %d", deps.Caps.MaxTurns)
 	}
 	return nil
+}
+
+// isNil reports whether v is nil or an interface holding a nil pointer, so a
+// provider bound as a typed nil is refused at construction rather than
+// panicking on its first call.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // Start implements researcher.Researcher. It builds a Brief from the query,

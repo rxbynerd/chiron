@@ -12,9 +12,8 @@ import (
 	"unicode"
 
 	"github.com/rxbynerd/chiron/internal/memory"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/secret"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
@@ -152,14 +151,15 @@ const maxProgressDetailRunes = 200
 // and the detail is copied into the report front matter and traces.
 const maxDetailBytes = 2048
 
-// WorkerDeps are the shared collaborators a worker loop uses: the three
-// clients, the optional knowledge store halves, a tracer for best-effort
-// observability, and the caps. Model and Search are required; Fetch is
-// required for the loop to honour a fetch action; the rest may be nil.
+// WorkerDeps are the shared collaborators a worker loop uses: the model
+// client, the web search and fetch providers, the optional knowledge store
+// halves, a tracer for best-effort observability, and the caps. Model and
+// Search are required; Fetch is required for the loop to honour a fetch
+// action; the rest may be nil.
 type WorkerDeps struct {
 	Model  *model.Client
-	Search *search.Client
-	Fetch  *fetch.Client
+	Search web.Searcher
+	Fetch  web.Fetcher
 	// Knowledge, when non-nil, adds the recall action. nil omits recall from
 	// the loop's schema, prompt and tool list.
 	Knowledge memory.Recaller
@@ -189,15 +189,6 @@ type WorkerDeps struct {
 	// progressTimeoutOverride replaces progressTimeout when positive, so
 	// tests can shorten it.
 	progressTimeoutOverride time.Duration
-}
-
-// fetchedPage is the loop's view of a fetched document: the subset of
-// fetch.Page the transcript renders.
-type fetchedPage struct {
-	URL         string
-	ContentType string
-	Content     []byte
-	Truncated   bool
 }
 
 // RunWorker runs the bounded worker loop for one brief and returns a Finding.
@@ -377,13 +368,13 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 // records every returned URL as fetchable and citable. A search failure is
 // fed back to the model unless the consecutive-failure bound is reached.
 func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
-	results, err := w.deps.Search.Search(ctx, act.Query)
+	resp, err := w.deps.Search.Search(ctx, web.Query{Text: act.Query, Objective: w.brief.Objective})
 	if err != nil {
 		return w.toolFailure(ctx, "search failed: "+w.scrub(err.Error()))
 	}
 	w.toolFailures = 0
 	w.usage.SearchCount++
-	for _, r := range results {
+	for _, r := range resp.Results {
 		if r.URL != "" {
 			w.seenURLs[r.URL] = true
 			if _, ok := w.titles[r.URL]; !ok && r.Title != "" {
@@ -391,7 +382,7 @@ func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 			}
 		}
 	}
-	w.transcript = append(w.transcript, searchResultsMessage(act.Query, results))
+	w.transcript = append(w.transcript, searchResultsMessage(act.Query, resp.Results, resp.Notes))
 	return false, Finding{}
 }
 
@@ -415,15 +406,9 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	if err != nil {
 		return w.toolFailure(ctx, "fetch failed: "+w.scrub(err.Error()))
 	}
-	fp := fetchedPage{
-		URL:         page.URL,
-		ContentType: page.ContentType,
-		Content:     page.Content,
-		Truncated:   page.Truncated,
-	}
-	rendered, ok := pageText(fp, w.maxPageBytes())
+	rendered, ok := pageText(page, w.maxPageBytes())
 	if !ok {
-		return w.toolFailure(ctx, fmt.Sprintf("the content at %s (%s) is not text and cannot be read.", fp.URL, fp.ContentType))
+		return w.toolFailure(ctx, fmt.Sprintf("the content at %s (%s) is not text and cannot be read.", page.URL, page.ContentType))
 	}
 	w.toolFailures = 0
 
@@ -432,7 +417,7 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	w.seenURLs[page.URL] = true
 	w.addCitation(page.URL, w.titles[act.URL])
 
-	w.transcript = append(w.transcript, fetchedPageMessage(fp.URL, fp.ContentType, rendered.text, fp.Truncated || rendered.truncated))
+	w.transcript = append(w.transcript, fetchedPageMessage(page.URL, page.ContentType, rendered.text, page.Truncated || rendered.truncated))
 	return false, Finding{}
 }
 

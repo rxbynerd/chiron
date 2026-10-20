@@ -3,6 +3,8 @@ package fleet
 import (
 	"strings"
 	"testing"
+
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 func TestHTMLToText(t *testing.T) {
@@ -54,7 +56,7 @@ func TestPageText(t *testing.T) {
 		{"invalid utf8 replaced", "text/plain", "a\xffb", 1024, true, "a�b", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := pageText(fetchedPage{ContentType: tt.contentType, Content: []byte(tt.content)}, tt.maxBytes)
+			got, ok := pageText(web.Page{ContentType: tt.contentType, Content: []byte(tt.content)}, tt.maxBytes)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

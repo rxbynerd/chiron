@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 const (
@@ -93,19 +94,17 @@ func New(opts Options) (*Client, error) {
 	return c, nil
 }
 
-// Result is one search hit. The three fields are the ones the worker loop
-// needs to reason about a candidate source and later fetch it; the assumed
-// tool-result shape carrying them is documented on parseResults and in
-// docs/DECISIONS.md.
-type Result struct {
-	Title   string
-	URL     string
-	Snippet string
-}
+// Result is one search hit. The assumed tool-result shape carrying its
+// fields is documented on parseResults and in docs/DECISIONS.md.
+type Result = web.Result
 
-// Search calls the configured search tool once and returns the parsed
-// results. The exchange is bounded by RequestTimeout (a tighter caller
-// deadline wins) and MaxBodyBytes.
+var _ web.Searcher = (*Client)(nil)
+
+// Search calls the configured search tool once with q.Text and returns the
+// parsed results. q.Objective is never sent: the tool takes one query
+// argument. The response carries no notes and zero Spend, because an MCP
+// search reports no cost. The exchange is bounded by RequestTimeout (a
+// tighter caller deadline wins) and MaxBodyBytes.
 //
 // Nothing is retried: tools/call may invoke a billable upstream search, so it
 // is single-attempt like the model adapter's paid POST. The one exception is
@@ -113,18 +112,18 @@ type Result struct {
 // expired was not processed, and is sent once more on a fresh session. A
 // caller that wants to retry a failed search does so knowingly. After Close,
 // Search fails with an error matching mcpclient.ErrClosed.
-func (c *Client) Search(ctx context.Context, query string) ([]Result, error) {
-	if query == "" {
-		return nil, errors.New("search: query must not be empty")
+func (c *Client) Search(ctx context.Context, q web.Query) (web.SearchResponse, error) {
+	if q.Text == "" {
+		return web.SearchResponse{}, errors.New("search: query must not be empty")
 	}
-	result, err := c.mcp.CallTool(ctx, c.toolName, map[string]any{c.queryArgKey: query})
+	result, err := c.mcp.CallTool(ctx, c.toolName, map[string]any{c.queryArgKey: q.Text})
 	if err != nil {
-		return nil, fmt.Errorf("search: %w", err)
+		return web.SearchResponse{}, fmt.Errorf("search: %w", err)
 	}
 	if result.IsError {
-		return nil, fmt.Errorf("search: tool reported an error: %s", mcpclient.FirstText(result.Content))
+		return web.SearchResponse{}, fmt.Errorf("search: tool reported an error: %s", mcpclient.FirstText(result.Content))
 	}
-	return parseResults(result), nil
+	return web.SearchResponse{Results: parseResults(result)}, nil
 }
 
 // Close ends the search session, when the server issued one, with a

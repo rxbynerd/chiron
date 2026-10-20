@@ -12,6 +12,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/mcpclient"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 const testKey = "sk-search-0123456789abcdefABCDEF"
@@ -31,6 +32,12 @@ func newClient(t *testing.T, endpoint string, mutate ...func(*search.Options)) *
 	return c
 }
 
+// searchText runs one search for text and returns its results.
+func searchText(c *search.Client, text string) ([]search.Result, error) {
+	resp, err := c.Search(context.Background(), web.Query{Text: text})
+	return resp.Results, err
+}
+
 func TestSearchHappyPath(t *testing.T) {
 	want := []search.Result{
 		{Title: "Rayleigh scattering", URL: "https://example.com/rayleigh", Snippet: "why the sky is blue"},
@@ -40,7 +47,7 @@ func TestSearchHappyPath(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := c.Search(context.Background(), "why is the sky blue")
+	got, err := searchText(c, "why is the sky blue")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -79,6 +86,26 @@ func TestSearchHappyPath(t *testing.T) {
 	}
 }
 
+// TestSearchNeverSendsObjective: the tool takes one query argument, so the
+// objective stays local, and an MCP search reports no notes and no spend.
+func TestSearchNeverSendsObjective(t *testing.T) {
+	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
+	defer fake.Close()
+
+	c := newClient(t, fake.URL())
+	resp, err := c.Search(context.Background(), web.Query{Text: "hello", Objective: "the whole research question"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	call := fake.Requests()[2]
+	if len(call.Arguments) != 1 || call.Arguments["query"] != "hello" {
+		t.Errorf("arguments = %+v, want only the query", call.Arguments)
+	}
+	if resp.Notes != nil || resp.Spend != (web.Spend{}) {
+		t.Errorf("notes = %v, spend = %+v, want none", resp.Notes, resp.Spend)
+	}
+}
+
 func TestSearchCustomToolAndArgKey(t *testing.T) {
 	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
@@ -87,7 +114,7 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 		o.ToolName = "web_search"
 		o.QueryArgKey = "q"
 	})
-	if _, err := c.Search(context.Background(), "hello"); err != nil {
+	if _, err := searchText(c, "hello"); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	call := fake.Requests()[2]
@@ -108,7 +135,7 @@ func TestSearchWrongQueryArgKeyIsToolError(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if err == nil {
 		t.Fatal("Search should fail when the tool rejects the query argument key")
 	}
@@ -129,7 +156,7 @@ func TestSearchSessionReused(t *testing.T) {
 
 	c := newClient(t, fake.URL())
 	for range 2 {
-		if _, err := c.Search(context.Background(), "q"); err == nil {
+		if _, err := searchText(c, "q"); err == nil {
 			t.Fatal("Search should fail when the tool reports isError")
 		}
 	}
@@ -158,7 +185,7 @@ func TestSearchProtocolVersionHeader(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Search(context.Background(), "q"); err != nil {
+	if _, err := searchText(c, "q"); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	reqs := fake.Requests()
@@ -181,7 +208,7 @@ func TestSearchReinitialisesAfterSessionExpiry(t *testing.T) {
 
 	c := newClient(t, fake.URL())
 	for range 2 {
-		if _, err := c.Search(context.Background(), "q"); err != nil {
+		if _, err := searchText(c, "q"); err != nil {
 			t.Fatalf("Search: %v", err)
 		}
 	}
@@ -189,7 +216,7 @@ func TestSearchReinitialisesAfterSessionExpiry(t *testing.T) {
 		t.Fatalf("initialize count = %d after two searches, want 1", n)
 	}
 	fake.ExpireSession()
-	got, err := c.Search(context.Background(), "q")
+	got, err := searchText(c, "q")
 	if err != nil {
 		t.Fatalf("Search after the session expired: %v", err)
 	}
@@ -214,7 +241,7 @@ func TestSearchClose(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Search(context.Background(), "q"); err != nil {
+	if _, err := searchText(c, "q"); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	for range 2 {
@@ -233,7 +260,7 @@ func TestSearchClose(t *testing.T) {
 	if end.Authorization != "Bearer "+testKey || end.ProtocolVersion != mcpclient.ProtocolVersion {
 		t.Errorf("DELETE Authorization %q version %q, want the bearer key and %q", end.Authorization, end.ProtocolVersion, mcpclient.ProtocolVersion)
 	}
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if !errors.Is(err, mcpclient.ErrClosed) || !strings.HasPrefix(err.Error(), "search: ") {
 		t.Errorf("Search after Close = %v, want ErrClosed under the search: prefix", err)
 	}
@@ -249,7 +276,7 @@ func TestSearchUnsupportedProtocolVersion(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if !errors.Is(err, mcpclient.ErrUnsupportedProtocolVersion) {
 		t.Fatalf("error = %v, want ErrUnsupportedProtocolVersion", err)
 	}
@@ -269,7 +296,7 @@ func TestSearchOverSSE(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := c.Search(context.Background(), "q")
+	got, err := searchText(c, "q")
 	if err != nil {
 		t.Fatalf("Search over SSE: %v", err)
 	}
@@ -286,7 +313,7 @@ func TestSearchStructuredContent(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := c.Search(context.Background(), "q")
+	got, err := searchText(c, "q")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -303,7 +330,7 @@ func TestSearchGracefulDegradationOnUnexpectedShape(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := c.Search(context.Background(), "q")
+	got, err := searchText(c, "q")
 	if err != nil {
 		t.Fatalf("Search should degrade gracefully, got error: %v", err)
 	}
@@ -326,7 +353,7 @@ func TestSearchEmptyResultsIsSuccess(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	got, err := c.Search(context.Background(), "q")
+	got, err := searchText(c, "q")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -342,7 +369,7 @@ func TestSearchToolError(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if err == nil {
 		t.Fatal("Search should fail when the tool reports isError")
 	}
@@ -358,7 +385,7 @@ func TestSearchToolCallNotRetried(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	_, _ = c.Search(context.Background(), "q")
+	_, _ = searchText(c, "q")
 	if n := fake.ToolCallCount(); n != 1 {
 		t.Errorf("tools/call count = %d, want exactly 1 — the billable call must not be retried", n)
 	}
@@ -372,7 +399,7 @@ func TestSearchOversizedBodyBounded(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if err == nil {
 		t.Fatal("Search should fail when the response exceeds MaxBodyBytes")
 	}
@@ -389,7 +416,7 @@ func TestSearchOversizedSSEBounded(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if err == nil {
 		t.Fatal("Search over SSE should fail when the stream exceeds MaxBodyBytes")
 	}
@@ -442,7 +469,7 @@ func TestSearchErrorNeverLeaksKey(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL)
-	_, err := c.Search(context.Background(), "q")
+	_, err := searchText(c, "q")
 	if err == nil {
 		t.Fatal("Search should fail on a 401")
 	}
@@ -459,7 +486,7 @@ func TestSearchEmptyQueryRejected(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Search(context.Background(), ""); err == nil {
+	if _, err := searchText(c, ""); err == nil {
 		t.Fatal("Search with an empty query should fail")
 	}
 	if fake.CallCount() != 0 {
@@ -473,7 +500,7 @@ func TestSearchKeylessServer(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.APIKey = "" })
-	if _, err := c.Search(context.Background(), "q"); err != nil {
+	if _, err := searchText(c, "q"); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	for i, req := range fake.Requests() {

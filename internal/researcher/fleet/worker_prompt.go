@@ -7,7 +7,7 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 // systemPromptTemplate is the worker's system prompt. The four %s slots are
@@ -216,8 +216,10 @@ func defang(s string) string {
 	return b.String()
 }
 
-// searchResultsMessage renders search results as the next user turn.
-func searchResultsMessage(query string, results []search.Result) model.Message {
+// searchResultsMessage renders search results, and any provider notes after
+// them, as the next user turn. Notes are provider text, so they sit inside
+// the fence, defanged and flattened to one line each.
+func searchResultsMessage(query string, results []web.Result, notes []string) model.Message {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Search results for %q:\n%s\n", query, toolResultOpen)
 	if len(results) == 0 {
@@ -238,6 +240,11 @@ func searchResultsMessage(query string, results []search.Result) model.Message {
 		}
 		if r.Snippet != "" {
 			fmt.Fprintf(&b, "   %s\n", defang(r.Snippet))
+		}
+	}
+	for _, n := range notes {
+		if n = oneLine(n); n != "" {
+			fmt.Fprintf(&b, "Search provider note: %s\n", defang(n))
 		}
 	}
 	b.WriteString(toolResultClose)

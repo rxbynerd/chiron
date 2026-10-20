@@ -7,7 +7,7 @@
 // configured, validated endpoint — web_fetch dials hosts chosen by an upstream
 // search result and carries NO Chiron credential, so the dominant risk is
 // Server-Side Request Forgery (SSRF, CWE-918). The guard refuses internal
-// destinations (see isInternal) when the connection is dialled: the transport
+// destinations (see httpx.InternalAddr) when the connection is dialled: the transport
 // resolves the host itself, refuses if any address is internal, and connects
 // only to the addresses it checked, so neither DNS rebinding nor a redirect
 // reaches an unchecked address. The transport never uses a proxy. The same
@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 // Defaults, all overridable via Options.
@@ -137,15 +139,13 @@ func New(opts Options) (*Client, error) {
 
 // Page is a fetched document. Content is the body read (up to
 // MaxContentBytes); Truncated reports whether the source exceeded the bound
-// and Content is therefore a prefix. URL is the requested URL with any
-// userinfo credentials stripped, so it is safe to log or cite. ContentType is
-// the response's Content-Type header verbatim.
-type Page struct {
-	URL         string
-	ContentType string
-	Content     []byte
-	Truncated   bool
-}
+// and Content is therefore a prefix. URL is the final URL after redirects
+// with any userinfo credentials stripped, so it is safe to log or cite.
+// ContentType is the response's Content-Type header verbatim. Spend is
+// always zero: a direct fetch bills nothing.
+type Page = web.Page
+
+var _ web.Fetcher = (*Client)(nil)
 
 // validateScheme accepts only http and https. javascript:, file:, ftp:,
 // data:, gopher: and the rest are rejected — web_fetch retrieves web pages,

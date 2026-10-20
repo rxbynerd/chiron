@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 // renderedPage is a fetched page reduced to transcript text.
@@ -20,7 +22,7 @@ type renderedPage struct {
 // the loop feeds that back to the model instead of inlining bytes. The result
 // is valid UTF-8, whitespace-collapsed, and cut at maxBytes on a rune
 // boundary.
-func pageText(page fetchedPage, maxBytes int) (renderedPage, bool) {
+func pageText(page web.Page, maxBytes int) (renderedPage, bool) {
 	mediaType, _, _ := mime.ParseMediaType(page.ContentType)
 	if mediaType == "" {
 		mediaType, _, _ = mime.ParseMediaType(http.DetectContentType(page.Content))
