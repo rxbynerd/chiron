@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -13,6 +15,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa/exatest"
+	"github.com/rxbynerd/chiron/internal/secret"
 )
 
 const (
@@ -308,5 +311,198 @@ func TestWorkerExaSearchWithDirectFetchThroughCLI(t *testing.T) {
 	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "yes")
 	if _, _, err := execute(t, args...); err == nil || !strings.Contains(err.Error(), "CHIRON_FETCH_ALLOW_LOOPBACK") {
 		t.Errorf("err = %v, want the loopback switch read and refused for the direct fetch", err)
+	}
+}
+
+// TestExaEndpointFromEnvironment: CHIRON_FLEET_EXA_ENDPOINT supplies the Exa
+// endpoint when its flag is unset, a set flag wins, and the variable is
+// neither read nor validated when no role uses Exa.
+func TestExaEndpointFromEnvironment(t *testing.T) {
+	withoutExaEndpoint := func(args []string) []string {
+		var out []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--fleet-exa-endpoint" {
+				i++
+				continue
+			}
+			out = append(out, args[i])
+		}
+		return out
+	}
+	searchOnce := func() *modeltest.FakeServer {
+		return modeltest.NewFakeServer(
+			modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+			finalReply,
+		)
+	}
+
+	t.Run("env supplies the endpoint", func(t *testing.T) {
+		exaSrv := exatest.NewFakeServer()
+		defer exaSrv.Close()
+		modelSrv := searchOnce()
+		defer modelSrv.Close()
+		clearEndpointEnv(t)
+		t.Setenv(config.EnvFleetExaEndpoint, exaSrv.URL())
+		t.Setenv("MODEL_KEY", "test-model-key")
+		t.Setenv("EXA_KEY", exaTestKey)
+
+		_, stderr, err := execute(t, withoutExaEndpoint(exaWorkerArgs(modelSrv, exaSrv, "-o", "none"))...)
+		if err != nil {
+			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+		}
+		if n := len(exaSrv.Requests()); n != 1 {
+			t.Errorf("Exa requests = %d, want the search through the env-named endpoint", n)
+		}
+	})
+
+	t.Run("flag wins over env", func(t *testing.T) {
+		flagSrv := exatest.NewFakeServer()
+		defer flagSrv.Close()
+		envSrv := exatest.NewFakeServer()
+		defer envSrv.Close()
+		modelSrv := searchOnce()
+		defer modelSrv.Close()
+		clearEndpointEnv(t)
+		t.Setenv(config.EnvFleetExaEndpoint, envSrv.URL())
+		t.Setenv("MODEL_KEY", "test-model-key")
+		t.Setenv("EXA_KEY", exaTestKey)
+
+		if _, stderr, err := execute(t, exaWorkerArgs(modelSrv, flagSrv, "-o", "none")...); err != nil {
+			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
+		}
+		if len(flagSrv.Requests()) != 1 || len(envSrv.Requests()) != 0 {
+			t.Errorf("requests: flag endpoint %d, env endpoint %d; want the flag to win", len(flagSrv.Requests()), len(envSrv.Requests()))
+		}
+	})
+
+	t.Run("env unread without an exa role", func(t *testing.T) {
+		modelSrv := modeltest.NewFakeServer(finalReply)
+		defer modelSrv.Close()
+		searchSrv := searchtest.NewFakeServer(nil)
+		defer searchSrv.Close()
+		clearEndpointEnv(t)
+		t.Setenv(config.EnvFleetExaEndpoint, "http://exa.invalid/not-loopback")
+		t.Setenv("MODEL_KEY", "test-model-key")
+
+		if _, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "none")...); err != nil {
+			t.Fatalf("an unused Exa variable failed the run: %v\nstderr: %s", err, stderr)
+		}
+	})
+}
+
+// TestEndpointsEventPrecedesTheFirstExaRequest: the run names Exa's origin
+// on stderr before its first request reaches Exa.
+func TestEndpointsEventPrecedesTheFirstExaRequest(t *testing.T) {
+	exaSrv := exatest.NewFakeServer()
+	defer exaSrv.Close()
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		finalReply,
+	)
+	defer modelSrv.Close()
+	stderr := &syncBuffer{}
+	exaProbe := newFirstRequestProbe(t, "exa", stderr, exaSrv.URL())
+	defer exaProbe.Close()
+	clearEndpointEnv(t)
+	t.Setenv("MODEL_KEY", "test-model-key")
+	t.Setenv("EXA_KEY", exaTestKey)
+
+	args := []string{
+		"research", "--query", "why is the sky blue", "--agent", "worker", "-o", "none",
+		"--fleet-model-endpoint", modelSrv.URL(), "--fleet-model-name", "test-model", "--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-search-provider", "exa", "--fleet-exa-endpoint", exaProbe.URL(), "--fleet-exa-key-ref", "secret://EXA_KEY",
+	}
+	if _, err := executeWith(t, secret.Default(), strings.NewReader(""), stderr, args...); err != nil {
+		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
+	}
+	at, ok := exaProbe.stderrAtFirstRequest()
+	if !ok {
+		t.Fatal("Exa was never called")
+	}
+	want := `{"endpoints":{"model":"` + modelSrv.URL() + `","search":"` + exaProbe.URL() + `"}}`
+	if got := endpointsEvents(t, at); len(got) != 1 || got[0] != want {
+		t.Errorf("endpoints events when Exa was first called = %q, want [%s]", got, want)
+	}
+}
+
+// TestFleetAgentWithExaThroughCLI: --agent fleet with Exa in both roles
+// sends every worker's search to Exa, records the provider on the report,
+// and rolls each worker's web spend into the run's.
+func TestFleetAgentWithExaThroughCLI(t *testing.T) {
+	fm := newCLIFleetModel(t, 3)
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
+	exaSrv := exatest.NewFakeServer(exatest.WithResults(fleetSources), exatest.WithCostDollars(0.007))
+	defer exaSrv.Close()
+	clearEndpointEnv(t)
+	t.Setenv("MODEL_KEY", "test-model-key")
+	t.Setenv("EXA_KEY", exaTestKey)
+
+	stdout, stderr, err := execute(t,
+		"research", "--query", "How do heat pumps compare with gas boilers?", "-o", "text",
+		"--agent", "fleet", "--fleet-memory", "inmemory", "--fleet-max-workers", "3", "--fleet-concurrency", "2",
+		"--fleet-model-endpoint", modelSrv.URL, "--fleet-model-name", "test-model", "--fleet-model-key-ref", "secret://MODEL_KEY",
+		"--fleet-search-provider", "exa", "--fleet-fetch-provider", "exa",
+		"--fleet-exa-endpoint", exaSrv.URL(), "--fleet-exa-key-ref", "secret://EXA_KEY",
+	)
+	if err != nil {
+		t.Fatalf("research --agent fleet: %v\nstderr: %s", err, stderr)
+	}
+	for _, want := range []string{"agent: fleet", "status: completed", "tools: ['web_search:exa', 'web_fetch:exa']", "web_cost_usd: 0.021"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("report lacks %q:\n%s", want, stdout)
+		}
+	}
+	reqs := exaSrv.Requests()
+	if len(reqs) != 3 {
+		t.Fatalf("Exa requests = %d, want one search per worker", len(reqs))
+	}
+	for _, r := range reqs {
+		if r.Path != "/search" || r.APIKey != exaTestKey {
+			t.Errorf("Exa request = %s with key %q, want a keyed search", r.Path, r.APIKey)
+		}
+	}
+}
+
+// failingResolver refuses every reference.
+type failingResolver struct{}
+
+func (failingResolver) Resolve(context.Context, string) (string, error) {
+	return "", errors.New("secret: not available")
+}
+
+// TestBuildWebFailures: a key that does not resolve or a client that cannot
+// be built fails buildWeb before anything is dialled. A direct fetch client
+// cannot fail here, since buildWeb passes it no custom transport.
+func TestBuildWebFailures(t *testing.T) {
+	exaSrv := exatest.NewFakeServer()
+	defer exaSrv.Close()
+	for _, tt := range []struct {
+		name     string
+		fc       config.FleetConfig
+		resolver secret.Resolver
+		want     string
+	}{
+		{"unresolvable exa key", config.FleetConfig{SearchProvider: config.SearchExa, ExaEndpoint: exaSrv.URL(), ExaKeyRef: "secret://EXA_KEY"},
+			failingResolver{}, "secret: not available"},
+		{"unresolvable search key", config.FleetConfig{SearchEndpoint: "https://search.example", SearchKeyRef: "secret://SEARCH_KEY"},
+			failingResolver{}, "secret: not available"},
+		{"exa client refused", config.FleetConfig{FetchProvider: config.FetchExa, SearchEndpoint: "https://search.example", ExaEndpoint: "http://exa.example", ExaKeyRef: "secret://EXA_KEY"},
+			&countingResolver{}, "exa: endpoint"},
+		{"search client refused", config.FleetConfig{SearchEndpoint: "http://search.example"},
+			&countingResolver{}, "search:"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			searcher, fetcher, closer, err := buildWeb(context.Background(), tt.fc, tt.resolver, time.Second, time.Second)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+			if searcher != nil || fetcher != nil || closer != nil {
+				t.Errorf("buildWeb returned providers beside its error: %v %v %v", searcher, fetcher, closer)
+			}
+		})
+	}
+	if n := len(exaSrv.Requests()); n != 0 {
+		t.Errorf("Exa requests = %d, want none", n)
 	}
 }

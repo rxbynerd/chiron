@@ -5,13 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/memory"
+	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
@@ -80,8 +84,8 @@ func TestRunWorkerPassesObjectiveAndRendersNotes(t *testing.T) {
 	}
 }
 
-// TestNewWorkerRefusesTypedNilProviders: a nil pointer bound as a Searcher
-// or Fetcher is refused at construction like an unset field.
+// TestNewWorkerRefusesTypedNilProviders: an unset Searcher or Fetcher, or a
+// nil pointer bound as one, is refused at construction.
 func TestNewWorkerRefusesTypedNilProviders(t *testing.T) {
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
@@ -96,6 +100,8 @@ func TestNewWorkerRefusesTypedNilProviders(t *testing.T) {
 		name   string
 		mutate func(*WorkerDeps)
 	}{
+		{"untyped nil search", func(d *WorkerDeps) { d.Search = nil }},
+		{"untyped nil fetch", func(d *WorkerDeps) { d.Fetch = nil }},
 		{"typed nil search", func(d *WorkerDeps) { d.Search = nilSearcher }},
 		{"typed nil fetch", func(d *WorkerDeps) { d.Fetch = fetcherFunc(nil) }},
 	} {
@@ -404,5 +410,145 @@ func TestRunWorkerRefusesATypedNilFetcher(t *testing.T) {
 	}, Brief{Objective: "q"})
 	if finding.Status != types.StatusFailed || !strings.Contains(finding.Detail, "no fetch client") {
 		t.Errorf("finding = %s (%s), want failed for the missing fetch client", finding.Status, finding.Detail)
+	}
+}
+
+// TestFleetRollsUpWebSpend: each worker's web spend reaches the fleet's one
+// Usage through the pool and the lead's rollup.
+func TestFleetRollsUpWebSpend(t *testing.T) {
+	modelSrv := httptest.NewServer(syntheticFleetModel(t))
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	f := newTestFleet(t, modelSrv.URL, searchSrv, newSessionStore(), func(d *FleetDeps) {
+		d.Worker.Search = &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+			return web.SearchResponse{Results: syntheticSearchResults, Spend: web.Spend{USD: 0.007}}, nil
+		}}
+	})
+
+	ctx := context.Background()
+	id, err := f.Start(ctx, researcher.Task{Query: testQuery})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := f.Await(ctx, id); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	in, err := f.Result(ctx, id)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if in.Usage.WebCostUSD != 0.021 || in.Usage.WebCostUnknownCalls != 0 {
+		t.Errorf("web spend = %v USD, %d unknown; want 0.021 from three searches", in.Usage.WebCostUSD, in.Usage.WebCostUnknownCalls)
+	}
+}
+
+// TestFleetNamesAnUnusableAccount: a fleet whose first worker meets an
+// unusable account starts no other worker, makes no lead call after the
+// plan, and says why in its detail.
+func TestFleetNamesAnUnusableAccount(t *testing.T) {
+	fm := syntheticFleetModel(t)
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(nil)
+	defer searchSrv.Close()
+	f := newTestFleet(t, modelSrv.URL, searchSrv, newSessionStore(), func(d *FleetDeps) {
+		d.Concurrency = 1
+		d.Worker.Search = &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+			return web.SearchResponse{}, fmt.Errorf("exa: HTTP 402 NO_MORE_CREDITS: %w", web.ErrAccountUnusable)
+		}}
+	})
+
+	ctx := context.Background()
+	id, err := f.Start(ctx, researcher.Task{Query: testQuery})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := f.Await(ctx, id); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	in, err := f.Result(ctx, id)
+	if err != nil {
+		t.Fatalf("Result: %v", err)
+	}
+	if in.Status != types.StatusFailed || !strings.Contains(in.StatusDetail, "NO_MORE_CREDITS") ||
+		!strings.Contains(in.StatusDetail, "worker-1 found a web provider account unusable") {
+		t.Errorf("status = %s (%s), want failed naming the unusable account", in.Status, in.StatusDetail)
+	}
+	if n := len(fm.requestsOf(kindWorker)); n != 1 {
+		t.Errorf("worker model requests = %d, want the first worker's one turn", n)
+	}
+	if n := len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite)); n != 0 {
+		t.Errorf("lead calls after the plan = %d, want none", n)
+	}
+}
+
+// TestRunWorkerSpendEdgeCases: addSpend counts a non-finite amount as
+// unknown, ignores a negative or zero one, and records a known amount
+// reported beside an error.
+func TestRunWorkerSpendEdgeCases(t *testing.T) {
+	const page = "https://example.com/a"
+	spends := []web.Spend{{USD: math.NaN()}, {USD: math.Inf(1)}, {USD: -1}, {USD: 0}}
+	calls := 0
+	searcher := &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+		s := spends[calls]
+		calls++
+		return web.SearchResponse{Results: []web.Result{{Title: "A", URL: page}}, Spend: s}, nil
+	}}
+	fetcher := fetcherFunc(func(string) (web.Page, error) {
+		return web.Page{Spend: web.Spend{USD: 0.001}}, errors.New("exa: could not retrieve " + page + ": CRAWL_TIMEOUT")
+	})
+	var replies []modeltest.FakeReply
+	for range spends {
+		replies = append(replies, modeltest.FakeReply{Content: `{"action":"search","query":"a"}`, FinishReason: "stop"})
+	}
+	replies = append(replies,
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page + `"}`, FinishReason: "stop"},
+		finalReply("# Answer\n\nNone."))
+	modelSrv := modeltest.NewFakeServer(replies...)
+	defer modelSrv.Close()
+
+	finding := RunWorker(context.Background(), WorkerDeps{
+		Model: newModelClient(t, modelSrv), Search: searcher, Fetch: fetcher, Caps: caps(),
+	}, Brief{Objective: "q"})
+	if finding.Status != types.StatusCompleted {
+		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
+	}
+	if finding.Usage.WebCostUSD != 0.001 || finding.Usage.WebCostUnknownCalls != 2 {
+		t.Errorf("web spend = %v USD, %d unknown; want the failed fetch's 0.001 and the two non-finite searches", finding.Usage.WebCostUSD, finding.Usage.WebCostUnknownCalls)
+	}
+}
+
+// TestRunWorkerUnusableAccountAfterCancellationIsIncomplete: when the run's
+// context has ended, an unusable-account error is a stop, not a failure.
+func TestRunWorkerUnusableAccountAfterCancellationIsIncomplete(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{Content: `{"action":"search","query":"a"}`, FinishReason: "stop"})
+	defer modelSrv.Close()
+	finding := RunWorker(ctx, WorkerDeps{
+		Model: newModelClient(t, modelSrv),
+		Search: &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+			cancel()
+			return web.SearchResponse{}, fmt.Errorf("exa: HTTP 401: %w", web.ErrAccountUnusable)
+		}},
+		Fetch: fetcherFunc(func(string) (web.Page, error) { return web.Page{}, nil }),
+		Caps:  caps(),
+	}, Brief{Objective: "q"})
+	if finding.Status != types.StatusIncomplete || finding.AccountUnusable {
+		t.Errorf("finding = %s (%s), unusable %v; want incomplete", finding.Status, finding.Detail, finding.AccountUnusable)
+	}
+}
+
+// TestSearchResultsMessageCutsMultibyteTextOnRuneBoundaries: every bounded
+// provider field stays valid UTF-8 when the cut falls inside a rune.
+func TestSearchResultsMessageCutsMultibyteTextOnRuneBoundaries(t *testing.T) {
+	wide := strings.Repeat("\u00e9", 2*maxSnippetBytes)
+	msg := searchResultsMessage("q", []web.Result{{Title: wide, URL: "https://example.com/" + wide[:600], Snippet: wide}}, []string{wide}).Content
+	if !utf8.ValidString(msg) {
+		t.Fatal("the rendered results are not valid UTF-8")
+	}
+	if n := strings.Count(msg, truncatedMarker); n != 3 {
+		t.Errorf("truncation markers = %d, want title, snippet and note cut", n)
 	}
 }

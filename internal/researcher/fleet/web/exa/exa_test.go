@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -473,11 +475,13 @@ func TestFetchURLHygiene(t *testing.T) {
 
 	exact := "https://example.com/" + strings.Repeat("a", 2048-len("https://example.com/"))
 	for _, ok := range []string{"https://8.8.8.8/dns", "https://xn--fiqs8s.example.com/", "http://example.com:8080/a?b=c", "http://example.com./a", exact} {
-		fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{ok: "text"}))
-		if _, err := newClient(t, fake.URL()).Fetch(context.Background(), ok); err != nil {
-			t.Errorf("Fetch(%s): %v, want it admitted", ok, err)
-		}
-		fake.Close()
+		t.Run("admits "+ok[:min(len(ok), 40)], func(t *testing.T) {
+			fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{ok: "text"}))
+			defer fake.Close()
+			if _, err := newClient(t, fake.URL()).Fetch(context.Background(), ok); err != nil {
+				t.Errorf("Fetch(%s): %v, want it admitted", ok, err)
+			}
+		})
 	}
 }
 
@@ -581,57 +585,74 @@ func TestErrorRequestIDFallsBackToHeader(t *testing.T) {
 	}
 }
 
-// overloadServer answers with the scripted statuses in order, then 200 with
-// an empty search reply, and counts requests.
-func overloadServer(t *testing.T, replies ...func(http.ResponseWriter)) (*httptest.Server, *atomic.Int32) {
-	t.Helper()
-	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		i := int(n.Add(1)) - 1
-		if i < len(replies) {
-			replies[i](w)
-			return
-		}
-		_, _ = w.Write([]byte(`{"results":[],"costDollars":{"total":0.007}}`))
-	}))
-	return srv, &n
-}
-
-func status(code int, body string) func(http.ResponseWriter) {
-	return func(w http.ResponseWriter) {
-		w.WriteHeader(code)
-		_, _ = w.Write([]byte(body))
-	}
-}
-
+// TestOverloadedRequestIsSentOnceMore: only Exa's enveloped
+// SERVICE_OVERLOADED 503 is re-sent, once, with the same body and key, on
+// either endpoint.
 func TestOverloadedRequestIsSentOnceMore(t *testing.T) {
+	const page = "https://example.com/a"
 	const overloaded = `{"requestId":"r1","error":"over capacity","tag":"SERVICE_OVERLOADED"}`
-	for _, tt := range []struct {
-		name      string
-		replies   []func(http.ResponseWriter)
-		wantCalls int32
-		wantErr   bool
-	}{
-		{"overloaded then served", []func(http.ResponseWriter){status(503, overloaded)}, 2, false},
-		{"overloaded twice", []func(http.ResponseWriter){status(503, overloaded), status(503, overloaded)}, 2, true},
-		{"edge 503 is not re-sent", []func(http.ResponseWriter){status(503, "<html>busy</html>")}, 1, true},
-		{"other 503 tag is not re-sent", []func(http.ResponseWriter){status(503, `{"error":"x","tag":"MAINTENANCE"}`)}, 1, true},
-		{"500 is not re-sent", []func(http.ResponseWriter){status(500, `{"error":"x","tag":"SERVICE_OVERLOADED"}`)}, 1, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			srv, calls := overloadServer(t, tt.replies...)
-			defer srv.Close()
-			resp, err := newClient(t, srv.URL).Search(context.Background(), web.Query{Text: "q"})
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err = %v, want error %v", err, tt.wantErr)
-			}
-			if got := calls.Load(); got != tt.wantCalls {
-				t.Errorf("requests = %d, want %d", got, tt.wantCalls)
-			}
-			if !tt.wantErr && resp.Spend != (web.Spend{USD: 0.007}) {
-				t.Errorf("spend = %+v, want the served reply's cost", resp.Spend)
-			}
-		})
+	served := map[string]string{
+		"/search":   `{"results":[],"costDollars":{"total":0.007}}`,
+		"/contents": `{"results":[{"url":"` + page + `","text":"t"}],"statuses":[{"id":"` + page + `","status":"success"}],"costDollars":{"total":0.001}}`,
+	}
+	type reply struct {
+		code int
+		body string
+	}
+	for _, path := range []string{"/search", "/contents"} {
+		for _, tt := range []struct {
+			name      string
+			replies   []reply
+			wantCalls int
+			wantErr   bool
+		}{
+			{"overloaded then served", []reply{{503, overloaded}}, 2, false},
+			{"overloaded twice", []reply{{503, overloaded}, {503, overloaded}}, 2, true},
+			{"edge 503 is not re-sent", []reply{{503, "<html>busy</html>"}}, 1, true},
+			{"other 503 tag is not re-sent", []reply{{503, `{"error":"x","tag":"MAINTENANCE"}`}}, 1, true},
+			{"500 is not re-sent", []reply{{500, `{"error":"x","tag":"SERVICE_OVERLOADED"}`}}, 1, true},
+		} {
+			t.Run(path+"/"+tt.name, func(t *testing.T) {
+				var mu sync.Mutex
+				var bodies, keys []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, _ := io.ReadAll(r.Body)
+					mu.Lock()
+					n := len(bodies)
+					bodies = append(bodies, string(body))
+					keys = append(keys, r.Header.Get("x-api-key"))
+					mu.Unlock()
+					if n < len(tt.replies) {
+						w.WriteHeader(tt.replies[n].code)
+						_, _ = io.WriteString(w, tt.replies[n].body)
+						return
+					}
+					_, _ = io.WriteString(w, served[r.URL.Path])
+				}))
+				defer srv.Close()
+
+				c := newClient(t, srv.URL)
+				var err error
+				if path == "/search" {
+					_, err = c.Search(context.Background(), web.Query{Text: "q"})
+				} else {
+					_, err = c.Fetch(context.Background(), page)
+				}
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if len(bodies) != tt.wantCalls {
+					t.Fatalf("requests = %d, want %d", len(bodies), tt.wantCalls)
+				}
+				for i := 1; i < len(bodies); i++ {
+					if bodies[i] != bodies[0] || keys[i] != testKey {
+						t.Errorf("re-sent request %d = %s with key %q, want the first request's body and key", i, bodies[i], keys[i])
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -814,5 +835,166 @@ func TestErrorsFromHostileEnvelopes(t *testing.T) {
 			}
 			tt.check(t, apiErr)
 		})
+	}
+}
+
+// TestFetchErrorReplies: a non-2xx reply to a contents call carries the
+// spend its status implies and classifies the account as search does.
+func TestFetchErrorReplies(t *testing.T) {
+	const u = "https://example.com/a"
+	for _, tt := range []struct {
+		name         string
+		status       int
+		body         string
+		wantSpend    web.Spend
+		wantUnusable bool
+	}{
+		{"enveloped server error", 500, `{"error":"boom","tag":"INTERNAL_ERROR"}`, web.Spend{Unknown: true}, false},
+		{"edge server error", 502, "<html>bad gateway</html>", web.Spend{Unknown: true}, false},
+		{"rate limited", 429, `{"error":"slow down","tag":"RATE_LIMIT_EXCEEDED"}`, web.Spend{}, false},
+		{"no credits", 402, `{"error":"out","tag":"NO_MORE_CREDITS"}`, web.Spend{}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, tt.body))
+			defer fake.Close()
+			page, err := newClient(t, fake.URL()).Fetch(context.Background(), u)
+			var apiErr *exa.APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != tt.status {
+				t.Fatalf("err = %v, want an APIError %d", err, tt.status)
+			}
+			if page.Spend != tt.wantSpend {
+				t.Errorf("spend = %+v, want %+v", page.Spend, tt.wantSpend)
+			}
+			if got := errors.Is(err, web.ErrAccountUnusable); got != tt.wantUnusable {
+				t.Errorf("unusable = %v, want %v", got, tt.wantUnusable)
+			}
+		})
+	}
+}
+
+// TestAccountClassificationWithoutEnvelope: a 401 is an authentication
+// failure whatever its body, so it ends the run; a 402 or 403 without Exa's
+// envelope names no cause and does not.
+func TestAccountClassificationWithoutEnvelope(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		want   bool
+	}{
+		{401, true},
+		{402, false},
+		{403, false},
+	} {
+		fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, "<html>denied</html>"))
+		_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+		fake.Close()
+		if got := errors.Is(err, web.ErrAccountUnusable); got != tt.want {
+			t.Errorf("HTTP %d without envelope: unusable = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+// TestFetchErrorRendering: a failed URL names its tag and target status
+// when Exa gives well-formed ones, and nothing more otherwise.
+func TestFetchErrorRendering(t *testing.T) {
+	const u = "https://example.com/a"
+	reply := func(errObj string) string {
+		return `{"results":[],"statuses":[{"id":"` + u + `","status":"error","error":` + errObj + `}],"costDollars":{"total":0}}`
+	}
+	for _, tt := range []struct {
+		name  string
+		error string
+		want  string
+	}{
+		{"tag and status", `{"tag":"CRAWL_NOT_FOUND","httpStatusCode":404}`, "exa: could not retrieve " + u + ": CRAWL_NOT_FOUND (the page answered HTTP 404)"},
+		{"malformed tag", `{"tag":"not a tag","httpStatusCode":404}`, "exa: could not retrieve " + u + " (the page answered HTTP 404)"},
+		{"out-of-range status", `{"tag":"CRAWL_UNKNOWN_ERROR","httpStatusCode":9999}`, "exa: could not retrieve " + u + ": CRAWL_UNKNOWN_ERROR"},
+		{"null error", `null`, "exa: could not retrieve " + u},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := exatest.NewFakeServer(exatest.WithRawBody(reply(tt.error)))
+			defer fake.Close()
+			_, err := newClient(t, fake.URL()).Fetch(context.Background(), u)
+			var fe *exa.FetchError
+			if !errors.As(err, &fe) || err.Error() != tt.want {
+				t.Errorf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewCopiesTheCallerClient: the caller's client is copied, not mutated,
+// and its redirect policy is replaced by the refusal.
+func TestNewCopiesTheCallerClient(t *testing.T) {
+	var followed atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
+	defer target.Close()
+	fake := exatest.NewFakeServer(exatest.WithRedirect(target.URL + "/search"))
+	defer fake.Close()
+
+	followAll := func(*http.Request, []*http.Request) error { return nil }
+	caller := &http.Client{CheckRedirect: followAll}
+	c := newClient(t, fake.URL(), func(o *exa.Options) { o.HTTPClient = caller })
+	if _, err := c.Search(context.Background(), web.Query{Text: "q"}); err == nil || followed.Load() {
+		t.Errorf("err = %v, followed = %v; want the redirect refused", err, followed.Load())
+	}
+	if caller.CheckRedirect == nil || caller.Transport != nil || caller.Timeout != 0 {
+		t.Errorf("the caller's client was mutated: %+v", caller)
+	}
+}
+
+func TestDefaultUserAgentAndBodyBound(t *testing.T) {
+	fake := exatest.NewFakeServer()
+	defer fake.Close()
+	if _, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if ua := fake.Requests()[0].UserAgent; ua != "chiron/2 (+https://github.com/rxbynerd/chiron; research-only)" {
+		t.Errorf("User-Agent = %q, want Chiron's default", ua)
+	}
+
+	// A million-character page bound raises the body bound past 6 MB, so a
+	// 2 MiB reply that the 1 MiB default refuses is read.
+	big := exatest.NewFakeServer(exatest.WithOversizedBody(2 << 20))
+	defer big.Close()
+	c := newClient(t, big.URL(), func(o *exa.Options) { o.MaxCharacters = 1_000_000 })
+	if _, err := c.Search(context.Background(), web.Query{Text: "q"}); err != nil {
+		t.Errorf("Search with a large page bound: %v, want the 2 MiB reply read", err)
+	}
+}
+
+// TestClientIsSafeForConcurrentUse drives one client from several
+// goroutines in both roles; the race detector checks it.
+func TestClientIsSafeForConcurrentUse(t *testing.T) {
+	const u = "https://example.com/a"
+	fake := exatest.NewFakeServer(
+		exatest.WithResults([]web.Result{{Title: "t", URL: u, Snippet: "s"}}),
+		exatest.WithPages(map[string]string{u: "text"}),
+	)
+	defer fake.Close()
+	c := newClient(t, fake.URL())
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := range 8 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Search(context.Background(), web.Query{Text: "q" + strings.Repeat("x", i)}); err != nil {
+				errs <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := c.Fetch(context.Background(), u); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if n := len(fake.Requests()); n != 16 {
+		t.Errorf("requests = %d, want 16", n)
 	}
 }

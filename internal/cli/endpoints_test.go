@@ -344,6 +344,8 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 		{"userinfo search", config.EnvFleetSearchEndpoint, "https://user:" + token + "@search.example/mcp", "--fleet-search-endpoint", nil},
 		{"query knowledge", config.EnvFleetKnowledgeEndpoint, "https://kb.example/?key=" + token, "",
 			[]string{"--fleet-knowledge-provider", "billet"}},
+		{"userinfo exa", config.EnvFleetExaEndpoint, "https://user:" + token + "@exa.example", "",
+			[]string{"--fleet-fetch-provider", "exa", "--fleet-exa-key-ref", "secret://EXA_KEY"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clearEndpointEnv(t)
