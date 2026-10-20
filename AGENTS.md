@@ -120,9 +120,11 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   `memory.Recaller`/`memory.Rememberer`, never an adapter package, and
   against in-test `web.Searcher`/`web.Fetcher` adapters where a test needs
   spend or a failure no fake scripts.
-- `TestLiveBillet` is the one test that talks to a real server: it is
-  skipped unless `CHIRON_BILLET_BIN` names a `billet` binary, which it starts
-  on a free loopback port.
+- Two tests talk to a real server, both skipped by default. `TestLiveBillet`
+  runs only when `CHIRON_BILLET_BIN` names a `billet` binary, which it starts
+  on a free loopback port. `TestLiveExa` runs only when `CHIRON_EXA_LIVE_KEY`
+  holds an Exa API key; it makes three metered calls (about one cent) against
+  `api.exa.ai` and never prints the key.
 - For new SSE tests in any package, use an `sseWrite`-style helper
   (`t.Helper()`; calls `http.Flusher.Flush()` after writing) rather
   than raw `io.WriteString` literals, so a handler that keeps the
