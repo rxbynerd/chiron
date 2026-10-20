@@ -243,6 +243,21 @@ type FleetConfig struct {
 	// override for a vendor search server that names its argument
 	// differently.
 	SearchQueryArg string `json:"search_query_arg,omitempty" yaml:"search_query_arg,omitempty"`
+	// SearchProvider selects who runs web searches: empty or SearchMCP for
+	// the MCP server at SearchEndpoint, or SearchExa.
+	SearchProvider string `json:"search_provider,omitempty" yaml:"search_provider,omitempty"`
+	// FetchProvider selects who fetches pages: empty or FetchDirect for
+	// Chiron's own SSRF-guarded client, or FetchExa.
+	FetchProvider string `json:"fetch_provider,omitempty" yaml:"fetch_provider,omitempty"`
+	// ExaEndpoint is the Exa API base URL, validated like ModelEndpoint;
+	// the composition root requires it when either role uses Exa.
+	ExaEndpoint string `json:"exa_endpoint,omitempty" yaml:"exa_endpoint,omitempty"`
+	// ExaKeyRef is a secret:// reference to the Exa key, which serves both
+	// roles — never a literal.
+	ExaKeyRef string `json:"exa_key_ref,omitempty" yaml:"exa_key_ref,omitempty"`
+	// SearchSendObjective sends the research objective with each Exa
+	// search; off, only the model's query leaves the process.
+	SearchSendObjective bool `json:"search_send_objective,omitempty" yaml:"search_send_objective,omitempty"`
 }
 
 // Default returns the documented defaults (PROPOSAL §4.3). The Fleet
@@ -371,7 +386,7 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 		{"accept_plan", c.AcceptPlan, "the in-process agents have no plan phase"},
 		{"model", c.Model != "", "use fleet.model_name"},
 		{"visualise", c.Visualise, "the in-process agents produce no charts"},
-		{"tools", len(c.Tools) > 0, "the in-process agents use fleet.search_endpoint and web_fetch only"},
+		{"tools", len(c.Tools) > 0, "the in-process agents search and fetch through fleet.search_provider and fleet.fetch_provider only"},
 		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint or the fleet.knowledge_* fields"},
 		{"file_search", len(c.FileSearch) > 0, "the in-process agents search the external web only"},
 		{"inputs", len(c.Inputs) > 0, "the in-process agents take no input documents"},
@@ -455,6 +470,9 @@ func (f FleetConfig) validate(agent string) error {
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
 	}
 	if err := f.validateKnowledge(); err != nil {
+		return err
+	}
+	if err := f.validateWeb(); err != nil {
 		return err
 	}
 	if agent == AgentFleet && f.KnowledgeRemember {

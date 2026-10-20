@@ -21,9 +21,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/planner"
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/gemini"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/secret"
@@ -208,8 +206,9 @@ func buildFleet(ctx context.Context, cfg config.ResearchConfig, resolver secret.
 // buildWorkerDeps builds the clients and caps every in-process agent shares.
 // It resolves every key reference and loads any --template before any
 // request, so a misconfigured agent never emits a resume handle. WorkerTimeout
-// bounds each worker and each model, search and knowledge call. The returned
-// closer ends the clients' MCP sessions; on failure nothing is left open.
+// bounds each worker and each model, MCP search and knowledge call; buildWeb
+// bounds the other web calls. The returned closer ends the clients' MCP
+// sessions; on failure nothing is left open.
 func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver secret.Resolver, tracer trace.Tracer, stderr io.Writer, progress func(context.Context, fleet.Progress)) (_ fleet.WorkerDeps, _ io.Closer, err error) {
 	fc := cfg.Fleet
 	for _, required := range []struct {
@@ -220,13 +219,16 @@ func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver se
 		{"fleet.model_endpoint", fc.ModelEndpoint != "", "; pass --fleet-model-endpoint or set " + config.EnvFleetModelEndpoint},
 		{"fleet.model_name", fc.ModelName != "", ""},
 		{"fleet.model_key_ref", fc.ModelKeyRef != "", ""},
-		{"fleet.search_endpoint", fc.SearchEndpoint != "", "; pass --fleet-search-endpoint or set " + config.EnvFleetSearchEndpoint},
+		{"fleet.search_endpoint", fc.SearchEndpoint != "" || fc.SearchProviderOrDefault() != config.SearchMCP, "; pass --fleet-search-endpoint or set " + config.EnvFleetSearchEndpoint},
 	} {
 		if !required.set {
 			return fleet.WorkerDeps{}, nil, fmt.Errorf("research --agent %s: %s is required%s", cfg.Agent, required.field, required.hint)
 		}
 	}
 	if err := requireKnowledge(fc); err != nil {
+		return fleet.WorkerDeps{}, nil, err
+	}
+	if err := requireWeb(fc); err != nil {
 		return fleet.WorkerDeps{}, nil, err
 	}
 	var reportTemplate *fleet.ReportTemplate
@@ -242,21 +244,6 @@ func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver se
 	if err != nil {
 		return fleet.WorkerDeps{}, nil, err
 	}
-	// The search MCP may be keyless; resolve only when a reference is set, so
-	// an empty ref sends no Authorization header rather than failing.
-	var searchKey string
-	if fc.SearchKeyRef != "" {
-		searchKey, err = resolver.Resolve(ctx, fc.SearchKeyRef)
-		if err != nil {
-			return fleet.WorkerDeps{}, nil, err
-		}
-	}
-
-	allowLoopback, err := fetchAllowLoopbackFromEnv()
-	if err != nil {
-		return fleet.WorkerDeps{}, nil, err
-	}
-
 	var sessions closers
 	defer func() {
 		if err != nil {
@@ -279,17 +266,13 @@ func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver se
 	if err != nil {
 		return fleet.WorkerDeps{}, nil, err
 	}
-	searchClient, err := search.New(search.Options{
-		Endpoint:       fc.SearchEndpoint,
-		APIKey:         searchKey,
-		RequestTimeout: callTimeout,
-		ToolName:       fc.SearchTool,
-		QueryArgKey:    fc.SearchQueryArg,
-	})
+	searcher, fetcher, searchSession, err := buildWeb(ctx, fc, resolver, callTimeout, fetchTimeout)
 	if err != nil {
 		return fleet.WorkerDeps{}, nil, err
 	}
-	sessions = append(sessions, searchClient)
+	if searchSession != nil {
+		sessions = append(sessions, searchSession)
+	}
 	recaller, rememberer, knowledgeSession, err := buildKnowledge(ctx, fc, resolver, callTimeout)
 	if err != nil {
 		return fleet.WorkerDeps{}, nil, err
@@ -300,19 +283,12 @@ func buildWorkerDeps(ctx context.Context, cfg config.ResearchConfig, resolver se
 	if !fc.KnowledgeRemember {
 		rememberer = nil
 	}
-	fetchClient, err := fetch.New(fetch.Options{
-		RequestTimeout:  fetchTimeout,
-		MaxContentBytes: fetchMaxContentBytes,
-		AllowLoopback:   allowLoopback,
-	})
-	if err != nil {
-		return fleet.WorkerDeps{}, nil, err
-	}
-
 	return fleet.WorkerDeps{
 		Model:              modelClient,
-		Search:             searchClient,
-		Fetch:              fetchClient,
+		Search:             searcher,
+		Fetch:              fetcher,
+		SearchProvider:     webProviderName(fc.SearchProviderOrDefault(), config.SearchMCP),
+		FetchProvider:      webProviderName(fc.FetchProviderOrDefault(), config.FetchDirect),
 		Knowledge:          recaller,
 		Remember:           rememberer,
 		ReportTemplate:     reportTemplate,

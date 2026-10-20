@@ -161,6 +161,12 @@ type WorkerDeps struct {
 	Model  *model.Client
 	Search web.Searcher
 	Fetch  web.Fetcher
+	// SearchProvider and FetchProvider name a non-default web provider,
+	// such as "exa", so the Interaction's tool list records where queries
+	// and URLs were sent. Empty means the default MCP search and direct
+	// fetch.
+	SearchProvider string
+	FetchProvider  string
 	// Knowledge, when non-nil, adds the recall action. nil omits recall from
 	// the loop's schema, prompt and tool list.
 	Knowledge memory.Recaller

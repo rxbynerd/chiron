@@ -81,8 +81,8 @@ func TestDecodeBaseKeepsDecodeErrors(t *testing.T) {
 func TestFleetEndpointsMatchFlagsAndKeys(t *testing.T) {
 	var probe FleetConfig
 	endpoints := FleetEndpoints(&probe)
-	if len(endpoints) != 3 {
-		t.Fatalf("FleetEndpoints returned %d entries, want model, search and knowledge", len(endpoints))
+	if len(endpoints) != 4 {
+		t.Fatalf("FleetEndpoints returned %d entries, want model, search, knowledge and exa", len(endpoints))
 	}
 	for i, tt := range endpoints {
 		t.Run(tt.Flag, func(t *testing.T) {

@@ -26,15 +26,23 @@ type FleetEndpoint struct {
 	Env string
 	// Value points at the field in the FleetConfig passed to FleetEndpoints.
 	Value *string
+	// Needed reports whether a run configured as f uses this endpoint; nil
+	// means always. A variable whose endpoint is not needed is neither read
+	// nor validated.
+	Needed func(f *FleetConfig) bool
 }
 
-// FleetEndpoints returns f's credential-bearing endpoints: model, search and
-// knowledge, in that order.
+// FleetEndpoints returns f's credential-bearing endpoints: model, search,
+// knowledge and Exa, in that order.
 func FleetEndpoints(f *FleetConfig) []FleetEndpoint {
 	return []FleetEndpoint{
 		{Field: "fleet.model_endpoint", Flag: "fleet-model-endpoint", Env: EnvFleetModelEndpoint, Value: &f.ModelEndpoint},
-		{Field: "fleet.search_endpoint", Flag: "fleet-search-endpoint", Env: EnvFleetSearchEndpoint, Value: &f.SearchEndpoint},
-		{Field: "fleet.knowledge_endpoint", Flag: "fleet-knowledge-endpoint", Env: EnvFleetKnowledgeEndpoint, Value: &f.KnowledgeEndpoint},
+		{Field: "fleet.search_endpoint", Flag: "fleet-search-endpoint", Env: EnvFleetSearchEndpoint, Value: &f.SearchEndpoint,
+			Needed: func(f *FleetConfig) bool { return f.SearchProviderOrDefault() == SearchMCP }},
+		{Field: "fleet.knowledge_endpoint", Flag: "fleet-knowledge-endpoint", Env: EnvFleetKnowledgeEndpoint, Value: &f.KnowledgeEndpoint,
+			Needed: func(f *FleetConfig) bool { return f.KnowledgeProvider != "" }},
+		{Field: "fleet.exa_endpoint", Flag: "fleet-exa-endpoint", Env: EnvFleetExaEndpoint, Value: &f.ExaEndpoint,
+			Needed: (*FleetConfig).UsesExa},
 	}
 }
 

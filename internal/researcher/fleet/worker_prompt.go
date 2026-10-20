@@ -216,6 +216,10 @@ func defang(s string) string {
 	return b.String()
 }
 
+// maxSnippetBytes bounds one search result's snippet in the transcript,
+// whichever provider supplied it.
+const maxSnippetBytes = 1000
+
 // searchResultsMessage renders search results, and any provider notes after
 // them, as the next user turn. Notes are provider text, so they sit inside
 // the fence, defanged and flattened to one line each.
@@ -239,7 +243,7 @@ func searchResultsMessage(query string, results []web.Result, notes []string) mo
 			b.WriteString("   URL: (none; this result cannot be fetched)\n")
 		}
 		if r.Snippet != "" {
-			fmt.Fprintf(&b, "   %s\n", defang(r.Snippet))
+			fmt.Fprintf(&b, "   %s\n", boundBytes(defang(r.Snippet), maxSnippetBytes))
 		}
 	}
 	for _, n := range notes {

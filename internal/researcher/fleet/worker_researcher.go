@@ -290,11 +290,12 @@ func (w *Worker) state(id string) (*workerState, error) {
 const agentWorker = "worker"
 
 // workerTools is the tool set recorded on a worker Interaction: the read-only
-// web tools the loop dispatches, the knowledge store recall when configured,
-// and knowledge_remember when the finding is saved back, so an operator
-// reading the Interaction sees the write.
+// web tools the loop dispatches, qualified with a non-default provider, the
+// knowledge store recall when configured, and knowledge_remember when the
+// finding is saved back, so an operator reading the Interaction sees where
+// queries, URLs and findings went.
 func workerTools(deps WorkerDeps) []string {
-	tools := []string{"web_search", "web_fetch"}
+	tools := []string{qualifiedTool("web_search", deps.SearchProvider), qualifiedTool("web_fetch", deps.FetchProvider)}
 	if deps.Knowledge != nil {
 		tools = append(tools, "knowledge_recall")
 	}
@@ -302,6 +303,14 @@ func workerTools(deps WorkerDeps) []string {
 		tools = append(tools, "knowledge_remember")
 	}
 	return tools
+}
+
+// qualifiedTool names tool as tool:provider when provider is set.
+func qualifiedTool(tool, provider string) string {
+	if provider == "" {
+		return tool
+	}
+	return tool + ":" + provider
 }
 
 // Save-back bounds. rememberTimeout also bounds how long a slow store can

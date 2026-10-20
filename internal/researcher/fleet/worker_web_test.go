@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
@@ -215,5 +216,35 @@ func TestRunWorkerEndsAtOnceWhenAccountUnusable(t *testing.T) {
 				t.Errorf("detail = %q, want the %s failure named", finding.Detail, tt.name)
 			}
 		})
+	}
+}
+
+// TestWorkerToolsNameNonDefaultProviders: the tool list keeps the bare names
+// for the default providers and qualifies a provider the root selected.
+func TestWorkerToolsNameNonDefaultProviders(t *testing.T) {
+	for _, tt := range []struct {
+		search, fetch string
+		want          string
+	}{
+		{"", "", "web_search,web_fetch"},
+		{"exa", "exa", "web_search:exa,web_fetch:exa"},
+		{"", "exa", "web_search,web_fetch:exa"},
+	} {
+		got := strings.Join(workerTools(WorkerDeps{SearchProvider: tt.search, FetchProvider: tt.fetch}), ",")
+		if got != tt.want {
+			t.Errorf("workerTools(%q, %q) = %s, want %s", tt.search, tt.fetch, got, tt.want)
+		}
+	}
+}
+
+// TestSearchResultsMessageBoundsSnippets: a snippet of any provider is cut
+// to maxSnippetBytes on a rune boundary before it reaches the model.
+func TestSearchResultsMessageBoundsSnippets(t *testing.T) {
+	long := strings.Repeat("é", maxSnippetBytes)
+	msg := searchResultsMessage("q", []web.Result{{Title: "t", URL: "https://example.com", Snippet: long}}, nil).Content
+	line := lineContaining(msg, "é")
+	snippet := strings.TrimSpace(line)
+	if len(snippet) > maxSnippetBytes || !utf8.ValidString(snippet) || !strings.HasSuffix(snippet, truncatedMarker) {
+		t.Errorf("snippet is %d bytes (valid UTF-8: %v), want at most %d and marked truncated", len(snippet), utf8.ValidString(snippet), maxSnippetBytes)
 	}
 }
