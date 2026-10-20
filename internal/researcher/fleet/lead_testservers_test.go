@@ -223,7 +223,7 @@ func storedRun(t *testing.T, store memory.ContextStore, ns memory.Namespace, fin
 		n := i + 1
 		ref := putFinding(t, store, ns, fmt.Sprintf("worker-%d", n), fmt.Sprintf("brief-%d", n), f)
 		pooled.Briefs = append(pooled.Briefs, ranBrief(n, ref, f))
-		pooled.Usage = addUsage(pooled.Usage, f.Usage)
+		pooled.Usage = pooled.Usage.Add(f.Usage)
 	}
 	return plan, pooled
 }

@@ -72,6 +72,33 @@ func TestMarkdownFormat(t *testing.T) {
 			},
 		},
 		{
+			// An in-process run with web-provider spend: web_cost_usd and
+			// web_cost_unknown_calls follow estimated_cost_gbp, in their
+			// own currency, and the tool list names the provider.
+			name: "web-cost",
+			in: &types.Interaction{
+				ID:      "wkr_webcost",
+				Agent:   "worker",
+				Query:   "Why is the sky blue",
+				Tools:   []string{"web_search:exa", "web_fetch:exa"},
+				Status:  types.StatusCompleted,
+				Outputs: []types.Output{{Type: types.OutputText, Text: "# Sky\n\nRayleigh scattering."}},
+				Citations: []types.Citation{
+					{URI: "https://example.org/sky", Title: "Sky"},
+				},
+				Usage: types.Usage{
+					InputTokens:         1200,
+					OutputTokens:        300,
+					SearchCount:         2,
+					EstimatedCostGBP:    0.01,
+					WebCostUSD:          0.015,
+					WebCostUnknownCalls: 1,
+				},
+				CreatedAt:   started,
+				CompletedAt: finished,
+			},
+		},
+		{
 			// No citations and no images: no sources front matter, no
 			// Sources or Charts sections, no tokens block.
 			name: "no-citations",

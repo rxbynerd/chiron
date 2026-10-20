@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"regexp"
 	"strings"
@@ -245,6 +246,8 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <
 		span.SetAttr("input_tokens", finding.Usage.InputTokens)
 		span.SetAttr("output_tokens", finding.Usage.OutputTokens)
 		span.SetAttr("estimated_cost_gbp", finding.Usage.EstimatedCostGBP)
+		span.SetAttr("web_cost_usd", finding.Usage.WebCostUSD)
+		span.SetAttr("web_cost_unknown_calls", finding.Usage.WebCostUnknownCalls)
 		var spanErr error
 		if finding.Status == types.StatusFailed {
 			spanErr = errors.New(finding.Detail)
@@ -369,8 +372,9 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 // fed back to the model unless the consecutive-failure bound is reached.
 func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 	resp, err := w.deps.Search.Search(ctx, web.Query{Text: act.Query, Objective: w.brief.Objective})
+	w.addSpend(resp.Spend)
 	if err != nil {
-		return w.toolFailure(ctx, "search failed: "+w.scrub(err.Error()))
+		return w.webFailure(ctx, "search failed: ", err)
 	}
 	w.toolFailures = 0
 	w.usage.SearchCount++
@@ -403,8 +407,9 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 	}
 
 	page, err := w.deps.Fetch.Fetch(ctx, act.URL)
+	w.addSpend(page.Spend)
 	if err != nil {
-		return w.toolFailure(ctx, "fetch failed: "+w.scrub(err.Error()))
+		return w.webFailure(ctx, "fetch failed: ", err)
 	}
 	rendered, ok := pageText(page, w.maxPageBytes())
 	if !ok {
@@ -447,6 +452,32 @@ func (w *workerRun) doRecall(ctx context.Context, act action) (bool, Finding) {
 	}
 	w.transcript = append(w.transcript, recallResultsMessage(act.Query, hits, w.maxRecallBytes()))
 	return false, Finding{}
+}
+
+// webFailure handles a failed search or fetch. A provider account that will
+// refuse every further call ends the run Failed at once, because feeding the
+// failure back cannot help and each retry costs a model turn; anything else
+// is an ordinary tool failure.
+func (w *workerRun) webFailure(ctx context.Context, prefix string, err error) (bool, Finding) {
+	detail := prefix + w.scrub(err.Error())
+	if errors.Is(err, web.ErrAccountUnusable) && ctx.Err() == nil {
+		return true, w.failed(detail)
+	}
+	return w.toolFailure(ctx, detail)
+}
+
+// addSpend folds one web call's spend into the run's usage. It runs before
+// the call's error is inspected, because a failed call may still be billed.
+// The sum is rounded to the micro-dollar here, the one place web spend
+// accumulates within a run. A non-finite amount counts as unknown and a
+// negative one as nothing, so a provider's figure cannot offset other spend.
+func (w *workerRun) addSpend(s web.Spend) {
+	switch {
+	case s.Unknown, math.IsNaN(s.USD), math.IsInf(s.USD, 0):
+		w.usage.WebCostUnknownCalls++
+	case s.USD > 0:
+		w.usage.WebCostUSD = types.RoundUSD(w.usage.WebCostUSD + s.USD)
+	}
 }
 
 // toolFailure handles a failed search, fetch or recall: a context end is

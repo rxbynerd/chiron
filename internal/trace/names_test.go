@@ -37,6 +37,8 @@ func TestVocabularyIsStable(t *testing.T) {
 		{MetricEstimatedCostGBP, "estimated_cost_gbp"},
 		{MetricReconnectCount, "reconnect_count"},
 		{MetricFailures, "failures"},
+		{MetricWebCostUSD, "web_cost_usd"},
+		{MetricWebCostUnknownCalls, "web_cost_unknown_calls"},
 	} {
 		if tt.got != tt.want {
 			t.Errorf("vocabulary entry = %q, want %q", tt.got, tt.want)

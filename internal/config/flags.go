@@ -46,7 +46,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-search-query-arg", d.Fleet.SearchQueryArg, "argument key the search query is passed under")
 	fs.Int("fleet-max-turns", d.Fleet.MaxTurns, "per-worker search->read->synthesise turn cap")
 	fs.Int("fleet-max-tokens", d.Fleet.MaxTokens, "per-worker model token ceiling; 0 means uncapped")
-	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker estimated-cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags)")
+	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker model-token cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags; web-provider spend is not counted)")
 	fs.Float64("fleet-price-input", d.Fleet.PriceInputGBPPerMTok, "model price in GBP per million prompt tokens (for --fleet-ceiling)")
 	fs.Float64("fleet-price-output", d.Fleet.PriceOutputGBPPerMTok, "model price in GBP per million completion tokens (for --fleet-ceiling)")
 	fs.Int("fleet-max-page-bytes", d.Fleet.MaxPageBytes, "bound on one fetched page's text before it enters the transcript")

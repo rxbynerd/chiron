@@ -187,7 +187,7 @@ func (p *pool) run(ctx context.Context, briefs []plannedBrief, progressGate <-ch
 
 	out := poolResult{Briefs: results}
 	for _, r := range results {
-		out.Usage = addUsage(out.Usage, r.Usage)
+		out.Usage = out.Usage.Add(r.Usage)
 	}
 	return out
 }
@@ -267,6 +267,8 @@ func (p *pool) runBrief(ctx context.Context, workerID string, pb plannedBrief, d
 	span.SetAttr("input_tokens", f.Usage.InputTokens)
 	span.SetAttr("output_tokens", f.Usage.OutputTokens)
 	span.SetAttr("estimated_cost_gbp", f.Usage.EstimatedCostGBP)
+	span.SetAttr("web_cost_usd", f.Usage.WebCostUSD)
+	span.SetAttr("web_cost_unknown_calls", f.Usage.WebCostUnknownCalls)
 	if f.Detail != "" {
 		span.SetAttr("detail", f.Detail)
 	}
@@ -419,19 +421,4 @@ func joinDetail(detail, extra string) string {
 		return extra
 	}
 	return detail + "; " + extra
-}
-
-// addUsage sums two usages field by field.
-func addUsage(a, b types.Usage) types.Usage {
-	a.InputTokens += b.InputTokens
-	a.CachedTokens += b.CachedTokens
-	a.OutputTokens += b.OutputTokens
-	a.ToolUseTokens += b.ToolUseTokens
-	a.ThoughtTokens += b.ThoughtTokens
-	a.SearchCount += b.SearchCount
-	a.RecallCount += b.RecallCount
-	a.PollCount += b.PollCount
-	a.ReconnectCount += b.ReconnectCount
-	a.EstimatedCostGBP += b.EstimatedCostGBP
-	return a
 }

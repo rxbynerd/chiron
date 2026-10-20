@@ -209,6 +209,14 @@ message Usage {
   // poll_count and reconnect_count are runner-side telemetry.
   int64 poll_count = 7;
   int64 reconnect_count = 8;
-  // estimated_cost_gbp is the runner's estimate of the run's cost.
+  // estimated_cost_gbp is the runner's estimate of the run's model cost.
   double estimated_cost_gbp = 9;
+  // recall_count is the number of knowledge store recalls.
+  int64 recall_count = 10;
+  // web_cost_usd is the cost web search and fetch providers reported, in
+  // US dollars; it is never summed with estimated_cost_gbp.
+  double web_cost_usd = 11;
+  // web_cost_unknown_calls counts web calls whose cost was not reported;
+  // when it is above zero, web_cost_usd is a lower bound.
+  int64 web_cost_unknown_calls = 12;
 }

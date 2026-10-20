@@ -31,25 +31,28 @@ var _ Formatter = (*Markdown)(nil)
 
 // frontMatter is the YAML document at the head of the report. Field
 // names are part of Chiron's output contract; keep them stable. The
-// cost signals are the search and recall counts, token totals, and
-// estimated cost;
-// the tool set is the one the adapter resolved onto the create request
-// (PROPOSAL §4.4), recorded on the domain Interaction since the API
-// does not echo it back.
+// cost signals are the search and recall counts, token totals, the
+// estimated model cost in GBP and the web-provider cost in USD, which are
+// never summed; web_cost_unknown_calls, when present, counts web calls whose
+// cost was not reported, making web_cost_usd a lower bound. The tool set is
+// the one the adapter resolved onto the create request (PROPOSAL §4.4),
+// recorded on the domain Interaction since the API does not echo it back.
 type frontMatter struct {
-	Query            string       `yaml:"query,omitempty"`
-	Agent            string       `yaml:"agent,omitempty"`
-	Interaction      string       `yaml:"interaction,omitempty"`
-	Status           types.Status `yaml:"status,omitempty"`
-	StatusDetail     string       `yaml:"status_detail,omitempty"`
-	Started          string       `yaml:"started,omitempty"`
-	Completed        string       `yaml:"completed,omitempty"`
-	Searches         int          `yaml:"searches,omitempty"`
-	Recalls          int          `yaml:"recalls,omitempty"`
-	Tokens           *tokens      `yaml:"tokens,omitempty"`
-	EstimatedCostGBP float64      `yaml:"estimated_cost_gbp,omitempty"`
-	Tools            []string     `yaml:"tools,omitempty,flow"`
-	Sources          []source     `yaml:"sources,omitempty"`
+	Query               string       `yaml:"query,omitempty"`
+	Agent               string       `yaml:"agent,omitempty"`
+	Interaction         string       `yaml:"interaction,omitempty"`
+	Status              types.Status `yaml:"status,omitempty"`
+	StatusDetail        string       `yaml:"status_detail,omitempty"`
+	Started             string       `yaml:"started,omitempty"`
+	Completed           string       `yaml:"completed,omitempty"`
+	Searches            int          `yaml:"searches,omitempty"`
+	Recalls             int          `yaml:"recalls,omitempty"`
+	Tokens              *tokens      `yaml:"tokens,omitempty"`
+	EstimatedCostGBP    float64      `yaml:"estimated_cost_gbp,omitempty"`
+	WebCostUSD          float64      `yaml:"web_cost_usd,omitempty"`
+	WebCostUnknownCalls int          `yaml:"web_cost_unknown_calls,omitempty"`
+	Tools               []string     `yaml:"tools,omitempty,flow"`
+	Sources             []source     `yaml:"sources,omitempty"`
 }
 
 // tokens mirrors the usage block's token counts — per-run cost signals
@@ -197,19 +200,21 @@ func statusLabel(in *types.Interaction) string {
 // interaction's identity, timestamps, and cost signals.
 func buildFrontMatter(in *types.Interaction, sources []source) frontMatter {
 	return frontMatter{
-		Query:            in.Query,
-		Agent:            in.Agent,
-		Interaction:      in.ID,
-		Status:           in.Status,
-		StatusDetail:     in.StatusDetail,
-		Started:          stamp(in.CreatedAt),
-		Completed:        stamp(in.CompletedAt),
-		Searches:         in.Usage.SearchCount,
-		Recalls:          in.Usage.RecallCount,
-		Tokens:           tokensOf(in.Usage),
-		EstimatedCostGBP: in.Usage.EstimatedCostGBP,
-		Tools:            in.Tools,
-		Sources:          sources,
+		Query:               in.Query,
+		Agent:               in.Agent,
+		Interaction:         in.ID,
+		Status:              in.Status,
+		StatusDetail:        in.StatusDetail,
+		Started:             stamp(in.CreatedAt),
+		Completed:           stamp(in.CompletedAt),
+		Searches:            in.Usage.SearchCount,
+		Recalls:             in.Usage.RecallCount,
+		Tokens:              tokensOf(in.Usage),
+		EstimatedCostGBP:    in.Usage.EstimatedCostGBP,
+		WebCostUSD:          in.Usage.WebCostUSD,
+		WebCostUnknownCalls: in.Usage.WebCostUnknownCalls,
+		Tools:               in.Tools,
+		Sources:             sources,
 	}
 }
 

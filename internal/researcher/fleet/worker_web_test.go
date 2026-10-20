@@ -1,13 +1,17 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
+	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
@@ -98,6 +102,117 @@ func TestNewWorkerRefusesTypedNilProviders(t *testing.T) {
 			tt.mutate(&d)
 			if _, err := NewWorker(d); err == nil {
 				t.Errorf("%s: NewWorker must fail", tt.name)
+			}
+		})
+	}
+}
+
+// TestRunWorkerAccumulatesWebSpend: every web call's spend reaches the
+// finding's usage and the worker span, including a call that failed, and an
+// unreported amount is counted rather than priced at zero.
+func TestRunWorkerAccumulatesWebSpend(t *testing.T) {
+	const page = "https://example.com/sky"
+	calls := 0
+	searcher := &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+		calls++
+		if calls == 2 {
+			return web.SearchResponse{Spend: web.Spend{Unknown: true}}, errors.New("search: provider timed out")
+		}
+		return web.SearchResponse{
+			Results: []web.Result{{Title: "Sky", URL: page}},
+			Spend:   web.Spend{USD: 0.007},
+		}, nil
+	}}
+	fetcher := fetcherFunc(func(rawURL string) (web.Page, error) {
+		return web.Page{URL: rawURL, ContentType: "text/markdown; charset=utf-8", Content: []byte("Blue."), Spend: web.Spend{USD: 0.001}}, nil
+	})
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"a"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"search","query":"b"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"search","query":"c"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"fetch","url":"` + page + `"}`, FinishReason: "stop"},
+		finalReply("# Answer\n\nBlue.", page),
+	)
+	defer modelSrv.Close()
+
+	var out bytes.Buffer
+	finding := RunWorker(context.Background(), WorkerDeps{
+		Model:  newModelClient(t, modelSrv),
+		Search: searcher,
+		Fetch:  fetcher,
+		Tracer: trace.NewJSONL(&out),
+		Caps:   caps(),
+	}, Brief{Objective: "q"})
+	if finding.Status != types.StatusCompleted {
+		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
+	}
+	if finding.Usage.WebCostUSD != 0.015 || finding.Usage.WebCostUnknownCalls != 1 {
+		t.Errorf("web spend = %v USD, %d unknown; want 0.015 USD, 1 unknown", finding.Usage.WebCostUSD, finding.Usage.WebCostUnknownCalls)
+	}
+	spanLine := lineContaining(out.String(), `"`+trace.SpanWorker+`"`)
+	for _, attr := range []string{`"web_cost_usd":0.015`, `"web_cost_unknown_calls":1`} {
+		if !strings.Contains(spanLine, attr) {
+			t.Errorf("worker span lacks %s:\n%s", attr, spanLine)
+		}
+	}
+}
+
+// TestRunWorkerEndsAtOnceWhenAccountUnusable: a provider that will refuse
+// every further call ends the run Failed on the turn that met it, rather
+// than feeding the failure back for more paid turns.
+func TestRunWorkerEndsAtOnceWhenAccountUnusable(t *testing.T) {
+	const page = "https://example.com/sky"
+	working := &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) {
+		return web.SearchResponse{Results: []web.Result{{Title: "Sky", URL: page}}}, nil
+	}}
+	unusable := fmt.Errorf("exa: HTTP 402 NO_MORE_CREDITS: %w", web.ErrAccountUnusable)
+	for _, tt := range []struct {
+		name      string
+		search    web.Searcher
+		fetch     web.Fetcher
+		replies   []modeltest.FakeReply
+		wantTurns int
+	}{
+		{
+			name:   "search",
+			search: &searcherFunc{fn: func(web.Query) (web.SearchResponse, error) { return web.SearchResponse{}, unusable }},
+			fetch:  fetcherFunc(func(string) (web.Page, error) { return web.Page{}, nil }),
+			replies: []modeltest.FakeReply{
+				{Content: `{"action":"search","query":"a"}`, FinishReason: "stop"},
+				{Content: `{"action":"search","query":"b"}`, FinishReason: "stop"},
+			},
+			wantTurns: 1,
+		},
+		{
+			name:   "fetch",
+			search: working,
+			fetch:  fetcherFunc(func(string) (web.Page, error) { return web.Page{}, unusable }),
+			replies: []modeltest.FakeReply{
+				{Content: `{"action":"search","query":"a"}`, FinishReason: "stop"},
+				{Content: `{"action":"fetch","url":"` + page + `"}`, FinishReason: "stop"},
+				{Content: `{"action":"search","query":"b"}`, FinishReason: "stop"},
+			},
+			wantTurns: 2,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			modelSrv := modeltest.NewFakeServer(tt.replies...)
+			defer modelSrv.Close()
+
+			finding := RunWorker(context.Background(), WorkerDeps{
+				Model:  newModelClient(t, modelSrv),
+				Search: tt.search,
+				Fetch:  tt.fetch,
+				Caps:   caps(),
+			}, Brief{Objective: "q"})
+			if finding.Status != types.StatusFailed {
+				t.Fatalf("status = %s (%s), want failed", finding.Status, finding.Detail)
+			}
+			if finding.Turns != tt.wantTurns || modelSrv.CallCount() != tt.wantTurns {
+				t.Errorf("turns = %d, model calls = %d; want %d", finding.Turns, modelSrv.CallCount(), tt.wantTurns)
+			}
+			if !strings.Contains(finding.Detail, tt.name+" failed") || !strings.Contains(finding.Detail, "NO_MORE_CREDITS") {
+				t.Errorf("detail = %q, want the %s failure named", finding.Detail, tt.name)
 			}
 		})
 	}

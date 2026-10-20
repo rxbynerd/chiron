@@ -143,8 +143,8 @@ func outcomeStatus(syn synthesisResult, cited citeResult) (types.Status, string)
 func (l *lead) runUsage(workers types.Usage, leadCalls ...types.Usage) types.Usage {
 	var calls types.Usage
 	for _, u := range leadCalls {
-		calls = addUsage(calls, u)
+		calls = calls.Add(u)
 	}
 	calls.EstimatedCostGBP = costGBP(calls.InputTokens, calls.OutputTokens, l.deps.InputGBPPerMTok, l.deps.OutputGBPPerMTok)
-	return addUsage(workers, calls)
+	return workers.Add(calls)
 }

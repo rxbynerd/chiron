@@ -57,4 +57,9 @@ const (
 	MetricEstimatedCostGBP    = "estimated_cost_gbp"
 	MetricReconnectCount      = "reconnect_count"
 	MetricFailures            = "failures"
+	// MetricWebCostUSD is web-provider spend in US dollars, never summed
+	// with MetricEstimatedCostGBP; MetricWebCostUnknownCalls counts web
+	// calls whose cost was not reported.
+	MetricWebCostUSD          = "web_cost_usd"
+	MetricWebCostUnknownCalls = "web_cost_unknown_calls"
 )

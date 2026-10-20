@@ -192,11 +192,12 @@ type FleetConfig struct {
 	// MaxTokens caps a worker's cumulative model tokens; zero means
 	// uncapped on tokens (the turn and time caps still bound the loop).
 	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
-	// CeilingGBP caps a worker's estimated model spend; zero means
+	// CeilingGBP is a worker's model-token cost ceiling; zero means
 	// uncapped on cost, mirroring BudgetGBP. The estimate is derived from
-	// the price fields below, so a non-zero ceiling requires them. Token
-	// and GBP ceilings are both kept: tokens bound a loop deterministically
-	// with no price table, GBP expresses the operator's spend intent.
+	// the price fields below, so a non-zero ceiling requires them, and it
+	// excludes web-provider spend, which is reported in USD. Token and GBP
+	// ceilings are both kept: tokens bound a loop deterministically with no
+	// price table, GBP expresses the operator's spend intent.
 	CeilingGBP float64 `json:"ceiling_gbp,omitempty" yaml:"ceiling_gbp,omitempty"`
 	// PriceInputGBPPerMTok and PriceOutputGBPPerMTok price a million prompt
 	// and completion tokens of the configured model, in GBP. Zero leaves the

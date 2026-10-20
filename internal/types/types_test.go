@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -64,5 +65,45 @@ func TestInteractionJSONRoundTrip(t *testing.T) {
 	}
 	if len(out.Outputs) != 3 || string(out.Outputs[2].Data) != "hello" {
 		t.Errorf("outputs lost: %+v", out.Outputs)
+	}
+}
+
+// TestUsageAddSumsEveryField sets every field of Usage to one and checks
+// that Add doubles each, so a field added later cannot be dropped from the
+// fleet's rollup.
+func TestUsageAddSumsEveryField(t *testing.T) {
+	var u Usage
+	v := reflect.ValueOf(&u).Elem()
+	for i := range v.NumField() {
+		f := v.Field(i)
+		switch f.Kind() {
+		case reflect.Int:
+			f.SetInt(1)
+		case reflect.Float64:
+			f.SetFloat(1)
+		default:
+			t.Fatalf("Usage.%s has kind %s; teach Add and this test to sum it", v.Type().Field(i).Name, f.Kind())
+		}
+	}
+	sum := reflect.ValueOf(u.Add(u))
+	for i := range sum.NumField() {
+		f := sum.Field(i)
+		var got float64
+		if f.Kind() == reflect.Int {
+			got = float64(f.Int())
+		} else {
+			got = f.Float()
+		}
+		if got != 2 {
+			t.Errorf("Add: Usage.%s = %v, want 2", sum.Type().Field(i).Name, got)
+		}
+	}
+}
+
+// TestUsageAddRoundsWebCost: summed micro-dollar amounts stay exact.
+func TestUsageAddRoundsWebCost(t *testing.T) {
+	got := Usage{WebCostUSD: 0.007}.Add(Usage{WebCostUSD: 0.014}).Add(Usage{WebCostUSD: 0.001})
+	if got.WebCostUSD != 0.022 {
+		t.Errorf("WebCostUSD = %v, want 0.022", got.WebCostUSD)
 	}
 }
