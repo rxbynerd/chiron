@@ -209,9 +209,9 @@ func TestApplyFlagsTelemetryLayersOverBase(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := Decode(strings.NewReader(base))
+			cfg, err := DecodeBase(strings.NewReader(base))
 			if err != nil {
-				t.Fatalf("Decode: %v", err)
+				t.Fatalf("DecodeBase: %v", err)
 			}
 			fs := newFlagSet(t)
 			if err := fs.Parse(tt.args); err != nil {
@@ -227,7 +227,7 @@ func TestApplyFlagsTelemetryLayersOverBase(t *testing.T) {
 	}
 }
 
-// TestTelemetryRoundTrip: the telemetry block survives EncodeJSON -> Decode
+// TestTelemetryRoundTrip: the telemetry block survives EncodeJSON -> DecodeBase
 // under its documented keys, and an unset block is omitted.
 func TestTelemetryRoundTrip(t *testing.T) {
 	var empty bytes.Buffer
@@ -250,17 +250,17 @@ func TestTelemetryRoundTrip(t *testing.T) {
 			t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
 		}
 	}
-	out, err := Decode(&buf)
+	out, err := DecodeBase(&buf)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeBase: %v", err)
 	}
 	if out.Telemetry != in.Telemetry {
 		t.Errorf("round trip lost data:\n got %+v\nwant %+v", out.Telemetry, in.Telemetry)
 	}
 
-	otlp, err := Decode(strings.NewReader("telemetry:\n  otlp_endpoint: https://otel.example\n"))
+	otlp, err := DecodeBase(strings.NewReader("telemetry:\n  otlp_endpoint: https://otel.example\n"))
 	if err != nil {
-		t.Fatalf("Decode YAML: %v", err)
+		t.Fatalf("DecodeBase YAML: %v", err)
 	}
 	if otlp.Telemetry.OTLPEndpoint != "https://otel.example" {
 		t.Errorf("otlp_endpoint = %q", otlp.Telemetry.OTLPEndpoint)

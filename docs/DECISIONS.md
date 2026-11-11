@@ -2675,13 +2675,10 @@ base64(public:secret)` header plus `x-langfuse-ingestion-version: 4`,
 handed to the OTLP/HTTP exporter through a new `trace.WithHeaders` option
 and nowhere else. These static headers replace any
 `OTEL_EXPORTER_OTLP_HEADERS`, so credentials meant for another collector
-are never sent to Langfuse. `internal/secret.Scrub` gained a Langfuse key
-pattern (`pk-lf-`/`sk-lf-` and at least eight key characters, matched
-inside a longer word too, since the high-entropy backstop's mixed-case
-requirement misses these keys) and two Basic-credential patterns (header
-context always redacted, including its URL-encoded and base64url forms; a
-bare `Basic <token>` redacted only when it decodes to printable
-`user:password` text, so prose like "basic research" survives). The OTel
+are never sent to Langfuse. `internal/secret.Scrub` already redacts
+Langfuse keys (`pk-lf-`/`sk-lf-`) and `Basic <token>` credentials, which
+the exporter's Authorization header and the keys themselves can reach
+(`internal/secret/scrub.go`); this change adds no scrub patterns. The OTel
 SDK's process-wide error handler — whose default prints unscrubbed to
 stderr, and whose OTLP/HTTP client quotes up to 4 MiB of a collector's
 response body — is routed through a scrubbing logger on the command's

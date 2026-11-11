@@ -20,7 +20,9 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/trace"
 )
 
@@ -166,11 +168,11 @@ func TestWorkerForwardsSpansToLangfuse(t *testing.T) {
 			decoy := &otlpCollector{}
 			decoySrv := httptest.NewServer(decoy.handler(t, http.StatusOK, ""))
 			defer decoySrv.Close()
-			searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky", Snippet: "scattering"}})
+			searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky", Snippet: "scattering"}})
 			defer searchSrv.Close()
-			modelSrv := model.NewFakeServer(
-				model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
-				model.FakeReply{
+			modelSrv := modeltest.NewFakeServer(
+				modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
+				modeltest.FakeReply{
 					Content:      `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
 					FinishReason: "stop",
 					Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
@@ -250,11 +252,11 @@ func TestWorkerForwardsSpansToOTLPEndpoint(t *testing.T) {
 	decoy := &otlpCollector{}
 	decoySrv := httptest.NewServer(decoy.handler(t, http.StatusOK, ""))
 	defer decoySrv.Close()
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky", Snippet: "scattering"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky", Snippet: "scattering"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
-		model.FakeReply{
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
+		modeltest.FakeReply{
 			Content:      `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`,
 			FinishReason: "stop",
 			Usage:        model.Usage{InputTokens: 40, OutputTokens: 12, TotalTokens: 52},
@@ -314,11 +316,11 @@ func TestTelemetryExportErrorIsScrubbed(t *testing.T) {
 	langfuse := &otlpCollector{}
 	langfuseSrv := httptest.NewServer(langfuse.handler(t, http.StatusUnauthorized, echo))
 	defer langfuseSrv.Close()
-	searchSrv := search.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
+	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer(
-		model.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
-		model.FakeReply{Content: `{"action":"final","answer":"Blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`, FinishReason: "stop"},
+	modelSrv := modeltest.NewFakeServer(
+		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
+		modeltest.FakeReply{Content: `{"action":"final","answer":"Blue.","citations":[{"url":"https://example.org/sky","title":"Sky"}]}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", testModelKey)
@@ -363,9 +365,9 @@ func TestLangfuseKeyResolutionFailsBeforeSpend(t *testing.T) {
 			langfuse := &otlpCollector{}
 			langfuseSrv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
 			defer langfuseSrv.Close()
-			searchSrv := search.NewFakeServer(nil)
+			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
-			modelSrv := model.NewFakeServer()
+			modelSrv := modeltest.NewFakeServer()
 			defer modelSrv.Close()
 			t.Setenv("MODEL_KEY", testModelKey)
 			t.Setenv("LANGFUSE_PUBLIC_KEY", testLangfusePublic)
@@ -962,9 +964,9 @@ func TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend(t *testing.T) {
 	collector := &otlpCollector{}
 	collectorSrv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 	defer collectorSrv.Close()
-	searchSrv := search.NewFakeServer(nil)
+	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	modelSrv := model.NewFakeServer()
+	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	t.Setenv("MODEL_KEY", testModelKey)
 	isolateOTLPEnv(t)
