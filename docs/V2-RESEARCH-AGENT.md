@@ -93,7 +93,7 @@ When this document says "worker" or "fleet", it means Chiron in-process code.
 | Area | Current state | Implementation requirement |
 | --- | --- | --- |
 | `internal/researcher` | `Researcher` is `Start` / `Await` / `Result`. | Worker and fleet satisfy this interface without changing it. |
-| `internal/researcher/fleet` | Wave 3 landed: `RunWorker` loop, `Worker` Researcher (`wkr_` ids), page reduction, action schema, tool-failure feedback; `--agent fleet` still returns `ErrNotImplemented`. | Build the Wave 4 lead over `RunWorker`; keep the not-implemented error meaningful until it lands. |
+| `internal/researcher/fleet` | Waves 3 and 4 landed: `RunWorker` loop, `Worker` Researcher (`wkr_` ids), page reduction, action schema, tool-failure feedback; the `Fleet` Researcher (`flt_` ids) with lead decomposition, external-web router, bounded worker pool, synthesis and citation pass, opt-in via `--agent fleet`. The eval gate against Gemini Deep Research is outstanding. | Keep the fleet opt-in and the single-call paths the default until the eval gate passes. |
 | `internal/run` | Pure core: start -> await -> result -> format -> emit. | No changes unless a design decision is re-opened. |
 | `internal/types` | Domain `Interaction`, `Output`, `Citation`, `Usage`, `Report`. | Worker/fleet map their output into these domain types, not provider wire types. |
 | `internal/memory` | Local `ContextStore` seam plus `Noop`. | Add in-memory binding for Wave 4; Paddock remains Wave 6. |
@@ -214,6 +214,20 @@ The worker must not expose generic tools to the model. It dispatches only the tw
 known read-only actions above. Unknown or side-effecting actions fail the worker
 and are pinned by tests.
 
+### Web providers
+
+The worker reaches the web only through the `internal/researcher/fleet/web`
+seam: a `Searcher` and a `Fetcher`, each returning the spend of every call.
+`fleet.search_provider` selects the search MCP client (`mcp`, the default) or
+Exa (`exa`); `fleet.fetch_provider` selects Chiron's own SSRF-guarded client
+(`direct`, the default) or Exa (`exa`). The model's actions do not change with
+the provider, and both search and fetch stay read-only. Exa's endpoint and key
+(`fleet.exa_endpoint`, `fleet.exa_key_ref`) follow the endpoint provenance
+rule, with no built-in default. Web spend is reported in USD beside the GBP
+model estimate, never summed with it, and a provider account that refuses
+every call ends the worker at once. The design and its security posture are in
+docs/DECISIONS.md, 2026-10-20 "Web seam and the Exa provider".
+
 ### Mapping to Chiron types
 
 For `--agent worker`, map the final finding to one `types.Interaction`:
@@ -287,7 +301,10 @@ Populate the Wave 2 fleet vocabulary:
 - run-level rollups.
 
 Transport emission remains best effort. A failed progress event must not fail a
-paid run.
+paid run. A lead must call `Await` for a worker immediately after `Start`,
+with no intervening work: `reportProgress`'s gate wait shares its budget with
+the per-call progress deadline, so a delayed `Await` costs that deadline on
+every subsequent turn, not just the first.
 
 ### Acceptance criteria
 

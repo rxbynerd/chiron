@@ -1,0 +1,1 @@
+{"requestId":"6babd7f9f4babf6f2e716962227f7bf1","error":"Payment required to access this resource","tag":"X402_PAYMENT_REQUIRED","x402Version":2,"resource":{"url":"https://api.exa.ai/search","description":"Exa /search endpoint","mimeType":"application/json"}}

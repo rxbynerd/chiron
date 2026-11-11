@@ -14,15 +14,16 @@ import (
 )
 
 // applyEndpointEnv fills each fleet endpoint whose flag is unset from its
-// CHIRON_FLEET_*_ENDPOINT variable; a set flag wins. The knowledge variable
-// is read only with a knowledge provider. Errors name the variable and at
-// most the value's scheme and host, never its path, query or credentials.
+// CHIRON_FLEET_*_ENDPOINT variable; a set flag wins. A variable is read only
+// when the configuration needs its endpoint (FleetEndpoint.Needed). Errors
+// name the variable and at most the value's scheme and host, never its path,
+// query or credentials.
 func applyEndpointEnv(fc *config.FleetConfig, flags *pflag.FlagSet) error {
 	for _, e := range config.FleetEndpoints(fc) {
 		if flags.Changed(e.Flag) {
 			continue
 		}
-		if e.Value == &fc.KnowledgeEndpoint && fc.KnowledgeProvider == "" {
+		if e.Needed != nil && !e.Needed(fc) {
 			continue
 		}
 		raw := os.Getenv(e.Env)
@@ -43,11 +44,15 @@ type endpointsPayload struct {
 	Endpoints endpointOrigins `json:"endpoints"`
 }
 
-// endpointOrigins holds scheme://host for each destination. Knowledge is
+// endpointOrigins holds scheme://host for each destination, keyed by role.
+// Search is wherever queries go, Exa's origin when Exa searches. Fetch is
+// present only when fetching sends a credential, so it is omitted for the
+// direct fetch, which dials each page's own host with none. Knowledge is
 // omitted without a knowledge provider.
 type endpointOrigins struct {
 	Model     string `json:"model"`
 	Search    string `json:"search"`
+	Fetch     string `json:"fetch,omitempty"`
 	Knowledge string `json:"knowledge,omitempty"`
 }
 
@@ -57,6 +62,12 @@ type endpointOrigins struct {
 // paid run.
 func emitEndpoints(ctx context.Context, tr transport.Transport, fc config.FleetConfig) {
 	origins := endpointOrigins{Model: origin(fc.ModelEndpoint), Search: origin(fc.SearchEndpoint)}
+	if fc.SearchProviderOrDefault() == config.SearchExa {
+		origins.Search = origin(fc.ExaEndpoint)
+	}
+	if fc.FetchProviderOrDefault() == config.FetchExa {
+		origins.Fetch = origin(fc.ExaEndpoint)
+	}
 	if fc.KnowledgeProvider != "" {
 		origins.Knowledge = origin(fc.KnowledgeEndpoint)
 	}
@@ -77,15 +88,19 @@ func origin(raw string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// refuseEndpointFlags stops research-config from emitting a fleet endpoint:
-// its output is the next stage's base config, which config.DecodeBase
-// refuses.
+// refuseEndpointFlags stops research-config from emitting a fleet endpoint
+// or fleet.search_send_objective: its output is the next stage's base
+// config, which config.DecodeBase refuses.
 func refuseEndpointFlags(flags *pflag.FlagSet) error {
 	for _, e := range config.FleetEndpoints(&config.FleetConfig{}) {
 		if flags.Changed(e.Flag) {
 			return fmt.Errorf("research-config: --%s cannot travel through a pipeline, because the next stage refuses a base config that chooses where credentials are sent; pass --%s to the final chiron research stage or set %s for it",
 				e.Flag, e.Flag, e.Env)
 		}
+	}
+	if flags.Changed(config.FlagSearchSendObjective) {
+		return fmt.Errorf("research-config: --%s cannot travel through a pipeline, because the next stage refuses a base config that chooses to send the research question to a search provider; pass it to the final chiron research stage",
+			config.FlagSearchSendObjective)
 	}
 	return nil
 }

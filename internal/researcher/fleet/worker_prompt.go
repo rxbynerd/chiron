@@ -7,14 +7,15 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 )
 
 // systemPromptTemplate is the worker's system prompt. The four %s slots are
-// the Brief fields (objective, output format, source guidance, boundaries).
-// It restates the action contract in prose so a model that only reads
-// instructions and one that only obeys the response schema agree; the
-// schema itself (worker_action.go) is the enforced contract.
+// the Brief fields (objective, output format, source guidance, boundaries);
+// the output-format slot is filled by outputFormatBlock. It restates the
+// action contract in prose so a model that only reads instructions and one
+// that only obeys the response schema agree; the schema itself
+// (worker_action.go) is the enforced contract.
 const systemPromptTemplate = `You are a research worker on Chiron's in-process fleet. You answer one
 research objective by consulting the external public web only, then writing a
 concise, faithful, cited finding. You have no access to internal systems, no
@@ -123,17 +124,16 @@ var recallSystemPromptTemplate = func() string {
 }()
 
 // buildSystemPrompt renders the system prompt for a brief, substituting
-// defaults for blank fields. recall selects the prompt that also describes
-// the knowledge store; without it the prompt is systemPromptTemplate alone.
+// defaults for blank fields. Every brief field is defanged, so no field can
+// form a tool-result fence whether an operator or the lead wrote it. recall
+// selects the prompt that also describes the knowledge store; without it the
+// prompt is systemPromptTemplate alone.
 func buildSystemPrompt(brief Brief, recall bool) string {
 	objective := strings.TrimSpace(brief.Objective)
 	if objective == "" {
 		objective = "(no objective was supplied)"
 	}
-	format := strings.TrimSpace(brief.OutputFormat)
-	if format == "" {
-		format = defaultOutputFormat
-	}
+	format := outputFormatBlock(brief)
 	guidance := strings.TrimSpace(brief.SourceGuidance)
 	if guidance == "" {
 		guidance = defaultSourceGuidance
@@ -149,7 +149,19 @@ func buildSystemPrompt(brief Brief, recall bool) string {
 	if recall {
 		template = recallSystemPromptTemplate
 	}
-	return fmt.Sprintf(template, objective, format, guidance, boundaries)
+	return fmt.Sprintf(template, defang(objective), format, defang(guidance), defang(boundaries))
+}
+
+// outputFormatBlock is the text under "Required output format:": the
+// brief's OutputFormat, or defaultOutputFormat when that is blank. It is the
+// one part of the prompt a ReportTemplate replaces, and it is defanged
+// whatever its source so it can never form a tool-result fence.
+func outputFormatBlock(brief Brief) string {
+	format := strings.TrimSpace(brief.OutputFormat)
+	if format == "" {
+		format = defaultOutputFormat
+	}
+	return defang(format)
 }
 
 // Defaults for the optional Brief fields.
@@ -187,12 +199,39 @@ const (
 
 // defang breaks any delimiter-like sequence in retrieved content so a page
 // or snippet cannot close the fence early and impersonate Chiron's framing.
+// It writes a space after every '<' that is followed by another '<', so no
+// "<<" survives however long the run, and defang(defang(s)) == defang(s).
 func defang(s string) string {
-	return strings.ReplaceAll(s, "<<<", "< < <")
+	if !strings.Contains(s, "<<") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + strings.Count(s, "<"))
+	for i := 0; i < len(s); i++ {
+		b.WriteByte(s[i])
+		if s[i] == '<' && i+1 < len(s) && s[i+1] == '<' {
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
 }
 
-// searchResultsMessage renders search results as the next user turn.
-func searchResultsMessage(query string, results []search.Result) model.Message {
+// Bounds on search-provider text in the transcript, whichever provider
+// supplied it. A result whose URL exceeds maxResultURLBytes is dropped
+// before it is rendered or becomes fetchable.
+const (
+	maxTitleBytes     = 300
+	maxResultURLBytes = 2048
+	maxSnippetBytes   = 1000
+	maxNotes          = 5
+	maxNoteBytes      = 500
+)
+
+// searchResultsMessage renders search results, and at most maxNotes provider
+// notes after them, as the next user turn. Every provider field sits inside
+// the fence, defanged and bounded; titles, URLs and notes are flattened to
+// one line each.
+func searchResultsMessage(query string, results []web.Result, notes []string) model.Message {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Search results for %q:\n%s\n", query, toolResultOpen)
 	if len(results) == 0 {
@@ -200,19 +239,29 @@ func searchResultsMessage(query string, results []search.Result) model.Message {
 	}
 	for i, r := range results {
 		fmt.Fprintf(&b, "%d. ", i+1)
-		if r.Title != "" {
-			b.WriteString(defang(r.Title))
+		if title := oneLine(r.Title); title != "" {
+			b.WriteString(boundBytes(defang(title), maxTitleBytes))
 		} else {
 			b.WriteString("(untitled)")
 		}
 		b.WriteString("\n")
-		if r.URL != "" {
-			fmt.Fprintf(&b, "   URL: %s\n", defang(r.URL))
+		if u := oneLine(r.URL); u != "" {
+			fmt.Fprintf(&b, "   URL: %s\n", boundBytes(defang(u), maxResultURLBytes))
 		} else {
 			b.WriteString("   URL: (none; this result cannot be fetched)\n")
 		}
 		if r.Snippet != "" {
-			fmt.Fprintf(&b, "   %s\n", defang(r.Snippet))
+			fmt.Fprintf(&b, "   %s\n", boundBytes(defang(r.Snippet), maxSnippetBytes))
+		}
+	}
+	rendered := 0
+	for _, n := range notes {
+		if rendered == maxNotes {
+			break
+		}
+		if n = oneLine(n); n != "" {
+			fmt.Fprintf(&b, "Search provider note: %s\n", boundBytes(defang(n), maxNoteBytes))
+			rendered++
 		}
 	}
 	b.WriteString(toolResultClose)

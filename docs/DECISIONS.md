@@ -12,8 +12,9 @@ place with a note rather than deleting them.
 
 > **Partially superseded** by "Knowledge recall and remember via the memory
 > seam" (2026-09-23): the recall and remember halves are now bound to
-> external stores (Billet, Alexandria). The local-declaration rule stands,
-> and the session and artifact plane is still unimplemented.
+> external stores (Billet, Alexandria). The local-declaration rule stands.
+> The session and artifact plane is implemented in process by "In-memory
+> ContextStore and the fleet span vocabulary" (2026-09-25).
 
 Chiron's `internal/memory` declares its own `ContextStore` interface and
 supporting types, structurally matching the contract sketched in
@@ -1156,8 +1157,11 @@ none are given. The Gemini-only levers (`budget`, `plan`, `accept_plan`,
 `model`, `visualise`, `tools`, `mcp`, `file_search`, `inputs`, `template`)
 are rejected for `worker`/`fleet` so a caller never believes a cap applied
 when the loop ignores it. `fleet.memory: inmemory` is rejected until the
-store exists. Fleet endpoints must not carry userinfo, a query string or a
+store exists.
+Superseded for `fleet.memory: inmemory` by the 2026-09-25 entry "In-memory ContextStore and the fleet span vocabulary".
+Fleet endpoints must not carry userinfo, a query string or a
 fragment, and validation errors describe them by scheme and host only.
+Superseded for `template` by the 2026-09-25 entry "Worker report-format template": the worker honours it.
 
 **Per-worker spend lives on the span.** The worker records search count,
 tokens and estimated cost as attributes on its own span and emits no
@@ -1728,3 +1732,894 @@ OTel collector address is already environment-only
 (`OTEL_EXPORTER_OTLP_*`). Any credential-bearing endpoint added later
 follows this rule. `--agent fleet` will reuse the worker path's fallback
 and event when it lands.
+
+## 2026-09-25 — Per-turn worker progress events
+
+Issue #18. Between `interaction_created` and `run_completed` a worker run
+emitted nothing for up to `fleet.worker_timeout`, so an operator could not
+tell progress from a hang; V2-RESEARCH-AGENT §6 asks for best-effort
+progress emission. The worker now reports each turn through an optional
+hook, and the CLI emits each report as a transport event. No new dependency
+was introduced.
+
+**A `delta` typed `worker_turn`, not a new event kind.** Transport event
+kinds mirror `proto/chiron/v1` one-to-one, and `delta` already carries
+typed payloads discriminated by `type` (`thought_summary`, and
+`stream_degraded` since cycle 2). A new kind would need a proto change for
+an observability signal. The payload keeps the `type` and `text` keys every
+delta has, with `text` a self-contained line such as `turn 2/8: fetch
+https://example.org (104 tokens so far)` because the proto `Delta` carries
+only `text`. Typed `turn`, `max_turns`, `action`, `detail`,
+`input_tokens`, `output_tokens` and `estimated_cost_gbp` fields serve
+NDJSON consumers.
+
+**The fleet API is a hook, not a transport.** `fleet.WorkerDeps.Progress`
+receives a `fleet.Progress` per turn, so the fleet package stays free of
+the transport seam; the CLI binds the hook (`bindWorkerProgress`) beside
+`bindThoughtDisplay`. `RunWorker`'s signature is unchanged.
+
+**One report per parsed action.** The hook is called after the model's
+action parses and before it is dispatched, so a report always names an
+action the loop is about to take. A turn that ends earlier (a model error,
+a `length` cut-off, an invalid action) reports nothing; the terminal event
+and the report carry that outcome. The token and cost fields are the
+accumulated usage including the turn's own model call.
+
+**The detail names the target, never content.** Search and recall report
+the query. Fetch reports the URL reduced to `scheme://host`: the port is
+kept, userinfo, path, query and fragment are dropped, and an unparsable or
+scheme-less URL gives an empty detail. Final reports nothing. The detail is
+flattened to one printable line (terminal escapes and bidirectional
+overrides dropped), scrubbed, then bounded to 200 runes; scrubbing comes
+first so the cut cannot leave a credential fragment too short for the
+scrubber's high-entropy backstop. It never carries page content, search
+results, the answer or a full URL. The CLI scrubs `text` and `detail` again
+at the transport boundary, as every output path does.
+
+**Best effort, bounded and inert.** Each delivery has a 2-second deadline.
+The hook runs in its own goroutine and the loop stops waiting at the
+deadline, so a hook that ignores its context costs at most that per turn; a
+hook that never returns leaves one goroutine parked per turn, bounded by the
+turn cap. A panic in the hook is recovered. Nothing the hook does can change
+the Finding, the usage, the caps or the exit path, and the CLI drops a
+marshal or emit failure. `Stdio.Emit` checks its context only once, before it
+locks the shared writer: once a write has started it runs to completion
+regardless of the deadline, and because every transport event shares that
+lock, a stalled stderr consumer can still strand an otherwise-complete run
+behind it. That gap predates this chunk and lives in `internal/transport`,
+not here; tracked in #38.
+
+**Ordered after the resume handle.** `Worker.Start` launches the loop before
+the run core emits `interaction_created`, so a fast first turn could report
+ahead of it. The Worker therefore holds a run's deliveries until `Await` is
+first entered for that id (a per-run channel closed once), within the same
+deadline. A delivery still held at the deadline is dropped, never delivered
+late or reordered. Deliveries stay on the loop goroutine, so their order is
+the turn order. Direct `RunWorker` callers have no gate.
+
+**Citation URIs are out of scope here.** This chunk's `Progress.Detail`
+reduction is unrelated to, and unaffected by, citation rendering; whether a
+cited-but-never-fetched search result's URL needs the same userinfo/query
+stripping is tracked separately in #39.
+
+**`--quiet` suppresses them.** The hook is bound only when `cfg.Stream` is
+true, as `bindThoughtDisplay` is: `--quiet` turns the delta display surface
+off. Exit codes, the report and every existing event are unchanged.
+
+## 2026-09-25 — Worker report-format template
+
+Issues #19 and #37. `--template` shaped only the Gemini Deep Research
+prompt. The 2026-09-23 entry ("Spend levers are real or rejected")
+rejected it for `worker`/`fleet` because the worker prompt did not use it.
+The worker now honours it, and every other Gemini-only lever stays
+rejected. `text/template` is in the standard library, so there is no new
+dependency.
+
+**The template replaces the output-format block only.** The worker's
+system prompt already had a "Required output format:" slot, filled from
+`Brief.OutputFormat` with a built-in default. That slot
+(`outputFormatBlock`) is the only part a template can replace. The
+objective, the action contract, the source guidance, the boundaries and
+the recall wording stay Chiron's. A template can ask for sections, tables
+or tone, but it cannot redefine the actions, the fence protocol or the
+citation rules. The recall prompt edits are applied to the built-in prompt
+before the brief is substituted, so they never rewrite operator text.
+
+**Data contract.** Templates use the Gemini loader's `text/template`
+grammar, parsed with `missingkey=error`, and render against one field.
+`{{.Query}}` is the research question, the same name
+`internal/researcher/gemini/template.go` uses. Gemini rejects a template
+that drops the query, because the task would research its own
+boilerplate. Here `{{.Query}}` is optional, because the objective already
+has its own section of the prompt. The rendered block is trimmed.
+
+**Bounded and validated at load.** `fleet.LoadReportTemplate` reads at
+most `MaxReportTemplateBytes` (8 KiB) plus one byte. A larger file is
+rejected with an error naming the bound and is never truncated. The
+system prompt is re-sent on every turn, so the block's cost multiplies by
+the turn count. The loader also rejects invalid UTF-8 and a blank file.
+It then renders the template once against a short sample query. An
+unknown field, a blank render, or a render longer than the same bound
+(`printf` padding, for example) therefore fails at the composition root,
+before any interaction id or paid call. The sample is shorter than
+`{{.Query}}`, so the render bound measures the template's own text.
+`Render` re-checks the same bound against the real query at `Start`, so a
+template that only exceeds it once a long or repeated `{{.Query}}` is
+substituted fails there, as a pre-id, no-spend error, instead of shipping
+an oversized block on every turn. `buildWorker` loads the template before
+resolving any secret. A failure is a setup error with the usage exit code.
+
+**`WorkerDeps` carries it, not `Brief`.** The `Worker` adapter builds the
+`Brief` from the task inside `Start`. A template loaded at construction
+can therefore reach it only through `WorkerDeps`, which also leaves
+`RunWorker`'s signature unchanged. `Start` renders the template with the
+task's query before it allocates an id or registers a run. A render
+failure returns an error with nothing started and nothing spent.
+`RunWorker` ignores `WorkerDeps.ReportTemplate`. Direct callers, including
+a future fleet lead writing per-worker briefs, set `Brief.OutputFormat`
+themselves.
+
+**Operator text, still defanged.** Template text comes from the
+operator's own config, not from an untrusted page, so it is prompt text
+rather than fenced data. It still goes through the same `defang` as
+retrieved text, whatever the block's source. A template, or a query
+substituted into it, therefore cannot form a `<<<BEGIN/END TOOL RESULT>>>`
+fence and blur where untrusted data starts and ends.
+
+**`defang` spaces every `<<`.** `defang` made one non-overlapping
+`ReplaceAll("<<<", "< < <")` pass. A run of five `<` left a live `<<<`
+behind, and so did any run of length 3k+2 for k of at least one:
+`<<<<<END TOOL RESULT>>>` became `< < <<<END TOOL RESULT>>>`, so retrieved
+text could close the fence early. The fix is one left-to-right pass that
+writes a space after every `<` immediately followed by another `<`. No
+`<<` survives, and `defang` is idempotent. The output for exactly `<<<` is
+still `< < <`, so no golden changed. Every caller still uses this one
+function: search titles, snippets and URLs, fetched text, recall hits,
+tool-failure details and the output-format block.
+
+**Only the output-format block is defanged today.** `Brief.Objective`,
+`SourceGuidance` and `Boundaries` still go into the system prompt
+unmodified. That is safe today because they are always CLI/operator text
+under `--agent worker`, the only agent that runs; it becomes a gap once a
+fleet lead writes `Brief` values from tool-output-adjacent context.
+
+## 2026-09-25 — In-memory ContextStore and the fleet span vocabulary
+
+Issues #23 and #11. The fleet lead passes findings between itself and its
+workers by reference (V2-RESEARCH-AGENT §6), but the session and artifact
+plane of `memory.ContextStore` was bound only to `Noop`, which stores
+nothing. The fleet's span names were not reserved either. This entry
+records the in-process store, the config rules that select it, the
+reserved fleet vocabulary and the Langfuse scrub coverage. No new
+dependency was introduced.
+
+**The store's shape.** `memory.InMemory` implements `ContextStore` in
+process. `Put` addresses content by SHA-256: `Reference.Digest` is
+`sha256:` followed by the lower-case hex digest. The Billet and Alexandria
+adapters carry store-assigned ids rather than digests, so there was no
+existing convention to follow. Artifacts are immutable. Re-putting
+identical content into a namespace returns the same `Reference` and keeps
+the first write's meta. `OpenSession` derives the namespace
+deterministically from the session ID, as `session/<id>`. It refuses an ID
+that is already live with `ErrSessionExists`, so two runs never share a
+namespace. `Put` refuses a namespace that is not a live session with
+`ErrSessionNotOpen`, before it reads the body. The same content put into
+two sessions is two independent artifacts. A reference naming a namespace
+other than the one its content was stored under is `ErrNotFound`, as is a
+reference into a closed or expired session.
+
+**Absolute TTL, lazy sweep.** A session expires at its open time plus
+`SessionRef.TTL`, or plus the store default of two hours when the TTL is
+zero. The default sits above the 60-minute run cap (`config.MaxTimeout`),
+so a live run's session never expires under it. Activity does not extend
+a session, because a sliding TTL would let a busy session outlive its run.
+Expired sessions and their artifacts are swept at the start of every call.
+That suffices for a per-run CLI process and needs no background goroutine;
+a long-lived control plane may want a periodic sweep. `Close` drops the
+session and its artifacts. It is idempotent and ignores context
+cancellation, so a deferred `Close` after a cancelled run still releases
+the memory. A stale handle cannot close a session reopened under the same
+ID.
+
+**Bounds and copies.** `Put` reads at most the per-artifact bound plus one
+byte. The default bound is 4 MiB, far above a finding or a plan. A larger
+body is `ErrArtifactTooLarge`, and nothing is stored. Session IDs are
+bounded at 256 bytes, the same as the Billet adapter's id bound. There is
+no per-session total: the fleet's fan-out cap bounds how many findings one
+run writes. `Get` returns a reader over a private copy and a deep copy of
+the meta, and `Put` copies the caller's labels, so no caller can mutate
+stored state. The store is safe for concurrent use, because workers write
+their findings in parallel.
+
+**Remember and Recall return `ErrNotImplemented`.** V2-PLAN Wave 4 left
+open whether they would be a simple in-memory index or an explicit stub.
+The stub was chosen. Long-term memory belongs to the knowledge-store
+adapters (Billet and Alexandria; see the 2026-09-23 entry "Knowledge
+recall and remember via the memory seam"), and recall is not load-bearing
+for the fleet until Paddock. An in-process index would forget everything
+when the process exits and could rank by little better than substring
+match, so a caller could mistake it for real recall. The new
+`memory.ErrNotImplemented` sits beside `ErrNotFound`, so any binding can
+report a half of the seam it does not provide, and callers can test for
+it with `errors.Is`.
+
+**The fleet requires `inmemory`; `noop` stays the default.**
+`fleet.memory: inmemory` validates again. `noop` remains the default, so
+`config.Default` and every worker and deep-research configuration are
+unchanged. The worker accepts either value and uses neither, because it
+has no session plane; it accepts and ignores the fleet-only fan-out caps
+in the same way. The fleet rejects `noop` with an error that names
+`inmemory` and `--fleet-memory inmemory`. On `noop` every `Put` is
+discarded and every `Get` misses, so the lead could not read back a
+single finding. Rejecting the value was preferred to silently upgrading
+it, so the configuration a pipeline stage emits is the configuration that
+runs. The composition root does not bind `InMemory` yet. `--agent fleet`
+still returns `fleet.ErrNotImplemented` once validation passes, and the
+binding lands with the fleet itself.
+
+**Reserved fleet span vocabulary.** `internal/trace/names.go` reserves
+`decompose`, `delegate`, `synthesise`, `cite` and `control_plane` beside
+`worker`. Beneath the research root, the lead opens one decompose span,
+then one delegate span per dispatched brief with that worker's `worker`
+span as its child, then synthesise and cite. The control-plane span wraps
+the control plane's scheduling of a run. Three attribute keys are
+reserved, in the snake_case style of the worker's existing attributes:
+`worker_id` and `brief_id` on a delegate span, and `brief_count` on the
+decompose span. The worker's literal attributes, the run-core span names
+and the metric names are unchanged. A table test pins every span,
+attribute and metric name to its wire value, so a rename is a deliberate
+test change. A synthetic single-worker trace through the JSONL tracer
+asserts the topology and the attribute keys.
+
+**Langfuse keys are scrubbed by pattern.** A Langfuse key is `pk-lf-` or
+`sk-lf-` followed by a UUID. A lower-case UUID has no upper-case letter,
+so the high-entropy backstop never fired, and `secret.Scrub` passed the
+keys through whole. Two patterns were added. The first matches the whole
+key, case-insensitively and word-boundary anchored, so no UUID group
+survives and a trailing identifier that merely contains the shape is left
+alone. The second scrubs Basic credentials wherever a "Basic" scheme
+token appears, which is how Langfuse's OTLP ingestion sends the key pair.
+That base64 value was caught only by the entropy backstop, and a
+low-entropy key pair encodes below its 4.0-bit bar. The pattern is not
+anchored on an `Authorization` header name: every call site — both
+tracers' `SetAttr`, the scrub handler — scrubs an attribute's key and its
+value as two independent `Scrub` calls, so a header-shaped attribute puts
+"authorization" in the key and "Basic ..." in the value, and an anchor
+spanning both would never fire on the value alone. Instead a
+"Basic"-prefixed candidate is only redacted once it structurally
+base64-decodes to bytes containing `:` (RFC 7617), so ordinary prose such
+as "basic authorization rules apply" still survives. It also covers the
+percent-encoded form of an `OTEL_EXPORTER_OTLP_HEADERS` value; a raw,
+unencoded `user:pass` pair is caught by the Langfuse key pattern instead,
+since each half still starts with `pk-lf-`/`sk-lf-`. The table test
+asserts that neither half of any credential survives, including a
+key/value pair scrubbed as two separate `Scrub` calls with no
+"authorization" in either string. Both tracers already route attribute
+values through `secret.Scrub`, so no tracer changed; a JSONL test proves
+a Langfuse key pair set as span attributes never reaches the trace file,
+and a second JSONL test proves the same for a Basic pair set as a
+header-shaped attribute's value alone.
+
+## 2026-09-25 — Fleet lead decomposition and the external-web router
+
+Issue #20. The fleet lead's first step (V2-RESEARCH-AGENT §6, lead flow
+steps 2 and 3) splits the user's question into worker briefs and persists
+the plan by reference. The router decides what runs each brief. Both live
+in `internal/researcher/fleet` (`lead.go`, `lead_prompt.go`, `router.go`).
+Neither is wired to `--agent fleet` yet: `Fleet` still returns
+`ErrNotImplemented` until the pool, synthesis and citation pass land. No
+new dependency was introduced.
+
+**One structured call, strict schema.** The lead makes one call to the
+model client it shares with its workers, with provider-native structured
+output. The schema is an object with one `briefs` array, `minItems` 3 and
+`maxItems` 5. Each item carries exactly `objective`, `output_format`,
+`source_guidance`, `boundaries` and `target`, all required strings, with
+`additionalProperties: false` at every level. `model.ValidateStrictSchema`
+and a byte-for-byte snapshot (`testdata/lead-decompose-schema.json`) pin
+it. OpenAI's structured-outputs guide
+(https://platform.openai.com/docs/guides/structured-outputs, read
+2026-09-25) lists `minItems` and `maxItems` as supported array keywords,
+except on fine-tuned models, where a strict request carrying them is
+rejected. `ValidateStrictSchema` checks only the two structural rules, so
+the fake accepts them either way. A fine-tuned model would therefore fail
+every decompose call with a 400, and dropping the two keywords is the fix
+if one is ever configured. An OpenAI-compatible server that ignores them
+loses nothing, because the range is enforced in Go regardless. The call
+carries a completion cap of 16,384 tokens by default, which leaves room
+for a reasoning model's reasoning tokens. The prompt restates the fields,
+the range, the per-field bounds and what a worker can do (search, fetch
+and, when configured, recall), and asks for briefs that do not overlap. A
+query over 32 KiB (`maxLeadQueryBytes`) is refused before this call runs,
+so an oversized query is never billed.
+
+**A brief cannot add capabilities.** Neither the schema nor `Brief` has a
+field that names tools or actions, and the strict decode refuses any
+property name that does not match one of the five declared fields. A
+decomposition that carries `tools`, `allowed_actions` or any other extra
+property is therefore refused before any worker spends. (`encoding/json`'s
+case-insensitive field matching still accepts a case-folded or duplicate
+variant of a declared name; that maps to the same field, so it opens no new
+one.) The worker's action schema is unchanged, so its closed vocabulary is
+the only thing that decides what a worker can do.
+
+**Validation before dispatch.** Every check runs before `decompose`
+returns, so a caller has nothing to dispatch when one fails. The reply is
+decoded with unknown fields and trailing content rejected. A reply cut off
+at the cap (`finish_reason: "length"`), refused by the model's content
+filter (`finish_reason: "content_filter"`), an empty reply, invalid JSON, a
+count outside 3 to 5, a blank field, an unknown field or a target the
+router cannot dispatch is `ErrInvalidPlan`. An unroutable target also
+matches `ErrUnroutableTarget`; its message, like the JSON-decode failure's,
+is scrubbed, defanged and bounded, because both can carry text from the
+model reply. A refused reply still returns its usage, because it was
+billed. Briefs take stable ids by position (`brief-1` to `brief-5`) for the
+delegate spans and the pool.
+
+**Truncation, not refusal, for verbosity.** Each field is trimmed,
+defanged, and then cut to its byte bound at a rune boundary with the
+worker's existing `boundBytes`. The bounds are 1 KiB for `objective`,
+`source_guidance` and `boundaries`, and 2 KiB for `output_format`.
+Defanging first means its expansion cannot push a field past its bound. A
+cut is recorded on the brief (`truncated`), logged, and counted on the
+span as `truncated_fields`. It does not fail the run, because a verbose
+but valid plan is still usable, and every worker re-sends its brief on
+each turn, so the bound is a spend bound too.
+
+**The decompose call is never retried.** The model client makes one
+attempt and the lead adds no retry, so a 5xx, a 429 or a transport error
+is `ErrDecomposeCall` after exactly one request. The error wraps the
+context error when the context ended. For every refused reply, every
+failed call status and every failed `Put`, tests assert that the fake
+model saw exactly one request and that no worker or search call followed.
+
+**Every brief field is defanged where it is rendered.** The 2026-09-25
+"Worker report-format template" entry noted that only the output-format
+block was defanged, which was safe only while every `Brief` was operator
+text. The lead now writes `Brief` values from a model reply.
+`buildSystemPrompt` now defangs every field it renders, and the lead also
+defangs each field when it parses the reply, so the persisted plan
+carries no `<<` either. `defang` is idempotent and touches only `<<`, so
+no worker golden changed. `decomposeInSpan` trims and defangs the query
+once, into a single sanitized value it sends both to the model, between
+`<<<BEGIN RESEARCH QUESTION>>>` and `<<<END RESEARCH QUESTION>>>` markers
+it therefore cannot forge, and to `persistPlan`, so the persisted `query`
+carries no `<<` either.
+
+**The router is a table with one live row.** `router` maps a `Target` to
+a dispatch with `RunWorker`'s signature, `(ctx, WorkerDeps, Brief) ->
+Finding`. The bounded pool, which lands next, calls it per brief and
+never calls `RunWorker` directly. The live table has one row,
+`external_web` to `RunWorker`. Any other target is refused with
+`*UnroutableTargetError`, which matches `ErrUnroutableTarget` under
+`errors.Is`. The managed deep-research agent is never a row. It stays a
+top-level `--agent`, so a fleet run only ever dispatches Chiron's own
+workers (D2). The internal-source branch (repository MCP, Gemini
+`file_search`) is deliberately absent (D5). Adding it means a new
+`Target` constant, one row, and the new value in the schema's `target`
+enum. A test ties that enum to the table's keys, so the schema cannot
+offer a target the router refuses.
+
+**The plan is persisted by reference.** The lead writes the plan to the
+run's `ContextStore` session as JSON before `decompose` returns, with the
+name `fleet-plan.json` and media type `application/json`. The JSON holds a
+`kind` (`"fleet_plan"`) and `version` (`1`) discriminator alongside the
+query and the planned briefs, so the artifact describes itself and a
+strict decode of unrelated JSON as a `planDocument` fails instead of
+silently zero-filling it: a reader recovering a run from the store needs
+no other context. Identity lives in the body rather than the meta, because
+`InMemory` coalesces
+identical content and keeps the first write's meta. A `Put` failure, such
+as a closed session or an artifact over the bound, fails `decompose` after
+its one call and before any worker runs, with a scrubbed and bounded
+message; `ContextStore` is a seam a remote implementation could back with
+a large echoed body, so the failure keeps the store's error reachable via
+`errors.Is`/`errors.As` while capping what the message repeats. The step
+runs under one `decompose` span carrying `brief_count`, the call's
+`input_tokens` and `output_tokens`, `truncated_fields` and `status`. A
+failure ends the span with a scrubbed, bounded error.
+
+## 2026-09-25 — Bounded fleet worker pool
+
+Issue #21. `fleet.max_workers` and `fleet.concurrency` were validated for
+`--agent fleet`, but nothing consumed them. The worker pool
+(`internal/researcher/fleet/pool.go`) runs a decomposed plan's briefs as
+concurrent in-process workers under both caps, and writes each finding to the
+run's `ContextStore` session by reference (V2-RESEARCH-AGENT §6, lead flow
+steps 4 and 5). It is not wired to `--agent fleet` yet: `Fleet` still returns
+`ErrNotImplemented` until synthesis and the citation pass land. No new
+dependency was introduced.
+
+**Caps are validated at construction and never loosened.** `newPool` refuses
+a worker cap or concurrency that is not positive, and a concurrency above the
+worker cap, mirroring `ResearchConfig.Validate`. It also applies the checks
+`NewWorker` applies to the worker's collaborators (model, search and fetch
+clients, and a positive turn cap), through one shared helper. Every worker
+receives the shared `WorkerDeps.Caps` unchanged, so turns, tokens, the
+cost ceiling, the timeout and the page bound hold per worker. Bounded fan-out
+times these caps is the coarse spend ceiling §4 asks for.
+
+**Drop, never queue.** Each brief is dispatched through the same router table
+that validated the plan at decompose time, never by calling `RunWorker`
+directly. It runs in its own goroutine behind a slot channel sized to the
+concurrency. Briefs past `max_workers` are dropped by position, so the first
+`max_workers` briefs are the ones that run. They are never held for a later
+slot, because a queue past the cap would make the cap a delay rather than a
+bound. A brief whose target has no route is also dropped, carrying the
+router's scrubbed, bounded reason. The lead's validation makes that path
+unreachable today. Each drop is reported with its reason in the pool's
+result and on a delegate span. A failed worker is never dispatched again, so
+the no-retry rule for paid POSTs holds per worker as well as per call.
+
+**The router's dispatch carries the progress gate.** The 2026-09-25 entry
+"Fleet lead decomposition and the external-web router" gave a routing row
+`RunWorker`'s signature. That signature has no gate, and the Fleet
+researcher must hold each worker's progress deliveries until its `Await` is
+entered, exactly as `Worker` holds them behind its `awaiting` channel. The
+dispatch now takes a `progressGate` as its fourth parameter. The live
+table's one `external_web` row is `dispatchWorker`, a direct call into
+`runWorker`. Gating stays in the single implementation in the loop: each
+delivery waits for the gate within the same progress deadline, and a
+delivery still held at the deadline is dropped. `RunWorker` is unchanged for
+direct callers.
+
+**Findings by reference.** As each worker returns, its own goroutine writes
+the finding to the session before it frees its slot, rather than the pool
+batching the writes at the end. A crashed run is therefore recoverable worker
+by worker (§4), provided the session lives in a durable store; the
+`InMemory` store this wave binds does not survive the process, so today that
+recoverability is only real once a durable `ContextStore` backs it. The
+artifact is JSON named `fleet-finding-<brief id>.json`
+with media type `application/json`. Like the plan, it carries a `kind`
+(`"fleet_finding"`) and a `version` (`1`), the worker id, the brief id and
+the whole `Finding` (text, citations, usage, status, detail and turns). The
+identity lives in the body because `InMemory` keeps the first write's meta
+for identical content. The caller gets back only a lightweight result per
+brief: the ids, a disposition (`ran`, `dropped` or `not_started`), the
+reference, status, detail, usage, turn count and citation count. Results
+come back in brief order whatever the completion order, together with the
+summed usage. `readFinding` is the read-back helper for synthesis. It reads
+at most 4 MiB, the store's default artifact bound, which the pool also
+enforces on write. It then decodes strictly, refusing unknown fields,
+trailing content, another kind or version, a missing id and a non-terminal
+status with `ErrInvalidFinding`. A store failure keeps the store's error
+reachable behind a scrubbed, bounded message.
+
+**A failed store never loses the spend.** The `Put` is detached from the
+run's cancellation, under its own ten-second bound, because a cancelled
+worker's partial finding is already paid for. The bound stops a slow store
+from holding the pool open. When the store refuses a finding, the result
+still carries the worker's status, usage and turns, and the scrubbed, bounded
+store error is appended to the detail. The reference stays zero, so
+synthesis can tell a finding it cannot read back.
+
+**No save-back and a fixed tool surface.** The pool clears `Remember` and
+`ReportTemplate` from its workers' deps. A fleet worker never writes to the
+knowledge store: saving a synthesised report, if ever wanted, is the lead's
+decision, not each worker's. The lead's brief supplies the output format. The
+action schema a worker sends is therefore exactly search, fetch and final,
+plus recall only when `Knowledge` is configured. A test asserts this on the
+wire for every request, including one from a brief that asks for shell and
+file-write tools.
+
+**Cancellation stops everything, and `run` outlives its workers.** Once the
+run context ends, no slot is granted, and each brief still waiting is
+reported `not_started` with its reason. A slot won in the same instant the
+context ends is handed back. Running workers stop at their next context
+check, and an in-flight model call is cancelled with its request. `run`
+returns only after every goroutine it launched has returned and stored its
+finding. No paid turn outlives the pool, so none will outlive the Fleet's
+`Await`. Tests count model requests after the pool returns and poll the
+goroutine dump for leftover pool goroutines.
+
+**Every planned brief has one delegate span.** Each delegate span nests under
+the caller's span and carries `brief_id` and a `disposition`. A worker
+that ran adds `worker_id`, `status`, `turns`, `input_tokens`,
+`output_tokens`, `search_count`, `recall_count`, `estimated_cost_gbp`,
+`citation_count` and `finding_stored`, and that worker's `worker` span nests
+beneath it. A failed worker or an unstored finding ends the span with an
+error. A dropped or not-started brief's delegate adds the `reason` and has no
+worker beneath it. This keeps drops visible in a trace, because the pool has
+no other span of its own and the fixed vocabulary has no dispatch span. The
+reference's digest is not an attribute, because both tracers route values
+through `secret.Scrub`, whose backstop redacts a 64-character hex run. The
+brief id correlates the span with the stored finding. Worker ids are
+`worker-<n>`, from the brief's position.
+
+**Progress identifies its worker.** `Progress` gains a `WorkerID` field at
+its end. The pool stamps each delivery with it by wrapping the hook, and it
+is empty for the single-worker agent, so the CLI's event rendering is
+unchanged. `Finding` likewise gains `Turns` at its end: the number of model
+turns the loop started, including one whose call failed. The delegate span
+and the pool's result can then carry the turn count without the worker's
+own span.
+
+## 2026-09-25 — Fleet synthesis, citation pass and spend rollup
+
+Issues #22 and #24. The pool leaves each finding in the run's session by
+reference, but nothing turned the findings into a report. The lead now closes
+a run with two passes over the pool's results (V2-RESEARCH-AGENT §6, lead
+flow steps 6 to 8). Synthesis (`internal/researcher/fleet/synthesise.go`)
+writes the report body, and the citation pass (`cite.go`) attributes it to
+the workers' sources. `conclude.go` composes the run's body, citations,
+status, detail and single `Usage` from both passes. None of it is wired to
+`--agent fleet` yet: `Fleet` still returns `ErrNotImplemented` until the
+researcher that calls it lands. No new dependency was introduced.
+
+**Findings are read back by reference.** Before synthesis, the lead reads
+each finding from the store through `readFinding`, never from the pool's
+in-memory result, so a report is written from the same record a recovered
+run would see. A finding is used only when its reference lies in the run's
+own session, its stored worker and brief ids match the brief that produced
+it, it did not fail, and it has text. Every other planned brief becomes a
+gap with one reason: dropped, not started, not stored, unreadable,
+mismatched, failed or empty. The reason is scrubbed, defanged and bounded to
+512 bytes. The reads are detached from the run's cancellation, as the
+pool's writes are, because a cancelled run's findings are already paid for
+and the fallback body needs them. They run one after another under a single
+ten-second deadline for all of them, not one per read, so a slow store
+holds synthesis for at most ten seconds however many briefs there are. No
+read starts once the deadline has passed; each brief left unread is a gap.
+The reads stay sequential rather than parallel because five reads from the
+in-process store take microseconds, and one deadline bounds a networked
+store just as well.
+
+**Each finding has a fixed budget in the prompt.** The synthesis user
+message carries the question between the question markers, then each
+finding labelled with its brief id and objective. The finding's status,
+sources and text sit inside the untrusted-data fence, and the gap list sits
+in a fence of its own. Each text is cut to 12 KiB after defang and marked
+`[truncated]`, so five findings stay near 60 KiB whatever the workers wrote.
+Each source list is bounded to 4 KiB. Every stored field is defanged, and
+source titles pass through `citationTitle` again because they were read back
+from the store. Transcripts and page content never reach the lead. The
+system prompt's output-format block is the built-in format, or the
+`ReportTemplate` rendered for the query and defanged. The pool withholds the
+template from workers, so the lead takes it on `leadDeps`. Synthesis is one
+plain-text call capped at 16,384 completion tokens and never retried, and
+its body passes through `sanitiseAnswer` like a worker's answer. The
+`synthesise` span records the included, truncated and gapped finding counts,
+the tokens and the status.
+
+**No body can carry raw HTML or hide the sources.** `sanitiseAnswer`, which
+every synthesised, stitched and worker body passes through, removes HTML
+tags and comments repeatedly until none remains, since removing one tag can
+join the text around it into another. Tag removal alone misses a `<` inside
+a quoted attribute, and an unclosed `<!--` or `<script` opens a CommonMark
+HTML block that runs to the end of the document, swallowing the Sources list
+the formatter appends. So, after removal, every `<` followed by a letter,
+`/`, `!` or `?` is escaped as `\<` and renders as text. Those are the only
+ways raw HTML can begin. An `http://` or `https://` autolink is kept, and a
+`<` already escaped by a backslash is left alone. The escape is not aware of
+code spans or blocks, so a `<` before a letter in code shows its backslash.
+A test formats a body ending in an unclosed comment and checks that the
+Sources list still follows it as a list.
+
+**Synthesis degrades to the findings, never to nothing.** A reply cut off at
+the completion cap keeps its body, and synthesis is Incomplete. A failed
+call, a filtered or empty reply, or a template that fails to render makes
+synthesis Failed. The body then becomes every collected finding stitched
+together unedited, under a note and one heading per finding, and
+sanitised, so no paid finding is lost to a lead failure. The citation pass
+is skipped, and the sources are the union of the worker citations. With no
+finding collected, no call is made and the run fails.
+
+**A panicking lead pass cannot take the process down.** `conclude` reads
+the findings back as its own step before synthesis. It recovers a panic in
+any of its passes, as the pool recovers a panicking worker. The outcome is
+then the findings already read back, stitched, with the union of the worker
+citations, Incomplete. It does not depend on how far the passes got. The
+detail is a fixed sentence and never echoes the recovered value, which can
+carry request or response content. With no finding read back, the run is
+Failed with no body. The `Usage` counts the tokens of each lead call whose
+pass returned before the panic; a call cut short by the panic is not
+counted, as with a recovered worker. A store read that panics is recovered
+on its own, so that brief becomes a gap ("the store panicked") and the
+other briefs' findings are still read back.
+
+**Citations are a subset of what the workers cited.** The citation pass is
+one structured call under a `cite` span, never retried. It sees the report
+body, fenced and bounded to 64 KiB, and the rendered findings as evidence.
+Its strict schema, pinned by `ValidateStrictSchema` and a golden, returns
+claims and the URLs that support each, and no title. A returned URL is kept
+only when it exactly equals a URI a worker cited. The prompt shows each URI
+on one line and defanged, so a URI with whitespace or `<<` appears altered,
+and a model that copies it as shown would otherwise never match. A URL that
+exactly equals the shown form of one worker URI is therefore kept too. A
+shown form that two worker URIs share names neither, and an exact URI match
+wins over a shown-form match. Either way the emitted citation is the
+worker's own raw URI. There is no other normalisation, so the model cannot
+introduce a variant of a URL no worker fetched. Every other URL is dropped
+and counted as `dropped_citations` on the span. Kept citations are
+deduplicated in first attribution order and carry the worker's title,
+cleaned by `citationTitle`, never a title from the model.
+The pass falls back to the deduplicated union of every worker citation, and
+is Incomplete, on a failed call, a reply that is cut off, filtered or
+invalid, or a reply that attributes no worker source. Claims are not
+rendered: the report's sources section lists citations only. When no worker
+cited anything there is nothing to attribute, so no call and no span are
+made.
+
+**Left-out sources are counted, not policed.** Any non-empty attributed
+subset completes the pass, so an injected finding could steer the model to
+attribute every claim to one page and shrink the report's sources to it.
+The `cite` span therefore records `unattributed_sources`: the worker sources
+missing from the emitted list, zero when the pass falls back to every
+worker citation. The count only makes such a shrink visible in the trace.
+It changes no status, and there is no coverage threshold, because a report
+that rests on a few of many consulted sources is ordinary, and a threshold
+would mark it Incomplete.
+
+**Status rules.** A run is Completed only when every planned brief yielded a
+completed finding and synthesis and the citation pass both completed. It is
+Failed when no worker produced a finding with text. Everything between is
+Incomplete: a dropped, not-started, failed or stopped worker, or a degraded
+lead pass. The detail names each degraded pass, then each brief that
+yielded no finding (`<id> produced no finding: <reason>`) or only a partial
+one (`<id> is partial: the worker ended <status>: <detail>`). A degraded
+pass's own detail, as its span records it, is its scrubbed reason followed
+by a note of what it fell back to. The reason is cut so the whole fits the
+2 KiB detail bound with the note kept whole. The joined detail is scrubbed
+and bounded like every other status detail.
+
+**One Usage per run, recorded once.** `runUsage` gives the only spend the
+fleet reports. It is the workers' summed usage, which already carries their
+searches, recalls and cost, plus the tokens of the lead's decompose,
+synthesis and citation calls. The lead's tokens are priced once, on their
+sum, at the per-million-token prices the workers use: `leadDeps` takes them
+from `Caps`, and `costGBP` is shared with the worker loop. The model client
+clamps a negative token count from the provider to zero, so a provider's
+accounting cannot offset the rest of the run's spend. Nothing in the fleet
+emits a metric. As with the single worker, spans carry per-call spend as
+attributes, and the run core records the run-level metrics once from the
+returned `Usage`. A test runs a synthetic fleet end to end and checks that
+the `Usage` equals the delegate spans' totals plus the lead spans' tokens,
+with no metric line in the trace.
+
+## 2026-09-25 — Wave 4 fleet orchestration
+
+Issue #26. The lead, router, pool, synthesis and citation pass had each
+landed behind a `Fleet` that still returned `ErrNotImplemented`. `Fleet`
+(`internal/researcher/fleet/fleet.go`) now composes them as a
+`Researcher`, and the CLI binds it for `--agent fleet`. This entry
+records the orchestration shape, how it generalises the money rules, and
+why the fleet stays opt-in. No new dependency was introduced.
+
+**The orchestration shape.** One run is lead, then router, then a
+bounded pool, then synthesis, then the citation pass, all behind the
+unchanged `Start`/`Await`/`Result` seam, so `internal/run` did not
+change. `Start` refuses a blank query, a follow-up, a report template that
+fails to render against the query, and a session the store cannot open,
+all before any model call. It then mints an opaque `flt_` id, opens one
+`ContextStore` session keyed on that id, and starts the lead on a context
+detached from the caller's, as the worker does. `Await` mirrors the
+worker's `Await`. It releases the progress gate and returns nil once the
+run has concluded, even when its own context ends in the same instant.
+Otherwise, when its context ends, it cancels the run and waits for the
+unwind, bounded by the finding write, the findings read-back and the
+session close, the three steps detached from cancellation. It then returns
+the context error. `Result` reports the run in progress until the lead
+concludes. When the run's `--timeout` deadline ends `Await`, no report is
+emitted, because the run core writes the report on the ended context. If
+the run has recorded its outcome by then, `Await` logs that outcome's
+spend to stderr instead, once, at Warn. The line carries the interaction
+id, status, tokens, search count and estimated cost, never report or
+finding text. The worker agent shares the no-report limitation, and it
+logs no spend. An interrupt such as Ctrl-C ends the process at once,
+because the CLI installs no signal handler, so it neither emits a report
+nor logs spend. Emitting the report after the deadline is a deferred
+follow-up for both agents. `get` and `follow-up` refuse `flt_` ids as they
+refuse `wkr_` ids, because a fleet run holds no server-side state. The
+composition root builds the fleet from the same `buildWorkerDeps` helper
+as `--agent worker`, so one model client serves the lead and every worker.
+Each `worker_turn` progress delta names its worker in a `worker_id` field
+and in its text.
+
+**The store and long-term memory.** The CLI binds a fresh `memory.InMemory`
+for each fleet run and for no other agent. The store's shape, and the
+decision that its `Remember` and `Recall` return `ErrNotImplemented`, are
+in "In-memory ContextStore and the fleet span vocabulary" above. Fleet
+workers may recall from a configured knowledge store but never save a
+finding back. Config validation rejects `fleet.knowledge_remember` for
+`--agent fleet`, and `NewFleet` refuses a non-nil `Remember` as a second
+guard, so the fleet's tool list never names `knowledge_remember`.
+
+**The money rules, generalised to many calls.** V2-PLAN §4 carries the v1
+rules to a run with many paid calls:
+
+- No lead or worker POST is ever retried. The decompose, synthesis and
+  citation calls are single attempts, like each worker turn.
+- Fan-out is bounded. At most `fleet.max_workers` briefs run,
+  `fleet.concurrency` at once, and each worker keeps the shared per-worker
+  caps on turns, tokens, estimated cost and wall-clock time. Bounded
+  fan-out times those caps is the coarse ceiling. Each lead call's
+  completion is capped at 16,384 tokens, and its prompt is bounded by the
+  query and finding byte bounds.
+- Findings pass by reference as each worker finishes. The lead reads them
+  back from the store rather than from the pool's memory, and a failed
+  synthesis still returns the stitched findings, so no paid finding is
+  lost within the process. The in-memory store dies with the process, so
+  recovering a crashed run finding by finding waits for a durable store.
+- One `Usage` rollup per run. It sums the workers' usage and the lead's
+  tokens, priced at the workers' prices. The run core records it once, and
+  spans carry per-call spend as attributes only.
+
+There is still no run-level GBP ceiling, because budgeting stays deferred
+(V2-PLAN §4, D6).
+
+**External-web-only routing, and the stopgap stays top level.** The
+router's table has one target, the external web, dispatching to an
+in-process worker. The lead's validation and the pool share that table.
+The managed Gemini Deep Research adapter is never a routing target. It
+remains a top-level `--agent` choice and is never mixed into a fleet run.
+
+**The eval gate is outstanding.** The harness that would run the fleet
+against the Gemini Deep Research baseline (issue #25) has not been built.
+Until the fleet meets or beats that baseline, `deep-research` stays the
+default agent, `worker` stays the single-loop in-process path, and
+`--agent fleet` is opt-in.
+
+## 2026-10-20 — Web seam and the Exa provider
+
+The worker's two web tools were bound to concrete clients: an MCP search
+client and Chiron's own SSRF-guarded fetch client. Operators need a hosted
+provider for either role, because egress from some deployments is
+restricted and many sites answer datacentre fetches with bot walls. Exa
+serves both roles over one REST API. A study of the next providers (Brave,
+Firecrawl, Tavily, Parallel, Jina) found that they differ in capability
+(search only, fetch only, both), cost reporting (USD, credits, tokens or
+nothing) and failure semantics (per-item errors inside a 200, billed error
+pages), so the worker now depends on a seam rather than on any one of them.
+No new dependency was introduced.
+
+**The seam.** `internal/researcher/fleet/web` is a stdlib-only leaf, laid
+out like `internal/memory`: it declares `Searcher` and `Fetcher`, and
+adapters live beside or beneath it (`search`, `fetch`, `web/exa`). `Search`
+takes a `Query` (text and an optional objective) and returns results, notes
+for the model and the call's `Spend`; `Fetch` returns a `Page` with its
+`Spend`. Spend is returned per call, valid even beside an error as
+`io.Reader`'s count is, because the lead and every fleet worker share one
+client: a client-held total could not be attributed to one finding without
+racing. The zero `Spend` means nothing was billed, so the MCP search and the
+direct fetch report nothing and need no change. `ErrRefusedDestination` and
+`ErrAccountUnusable` are seam sentinels; `fetch.ErrRefusedDestination` is
+the same value. The internal-address table moved unchanged from the fetch
+guard to `httpx.InternalAddr`, so a provider that sends URLs to a third
+party refuses the same addresses the direct client refuses at dial time.
+`search.Result` and `fetch.Page` are aliases of the seam types for now.
+
+**REST, not Exa's hosted MCP server.** The existing MCP search client
+cannot use `mcp.exa.ai`: its search tool requires an `objective` argument
+and forbids unknown ones, while the client sends only the query; it replies
+in prose, so the client would degrade to one URL-less snippet; it expects
+`x-api-key`, not the client's bearer header; selecting tools needs a query
+string, which `httpx.ParseEndpoint` refuses; and it reports no cost.
+`web/exa` is a hand-rolled `net/http` client for `POST /search` and
+`POST /contents`.
+
+**Selectors by role, endpoint and key by provider.**
+`fleet.search_provider` (`mcp`, the default, or `exa`) and
+`fleet.fetch_provider` (`direct`, the default, or `exa`) choose who serves
+each role, which a search-only or fetch-only provider needs. The Exa
+endpoint and key are named for the provider instead
+(`fleet.exa_endpoint`, `fleet.exa_key_ref`, one key for both roles), so a
+key is bound by name to the destination it is sent to: with role-keyed
+fields, a deployment's `CHIRON_FLEET_SEARCH_ENDPOINT` would receive the Exa
+key the moment a run switched its search provider. A new provider
+therefore costs a leaf adapter package under `fleet/web`, one enum value for
+each role it serves, and, when it carries a credential, a provider-scoped
+endpoint and key pair (fields, flags and validation) plus one
+`FleetEndpoints` row for its endpoint variable. When both roles use Exa the
+composition root builds one client, so a per-provider limit added later
+covers both.
+
+**No default endpoint.** `exa.DefaultEndpoint` is documentation only. The
+operator names `https://api.exa.ai` with `--fleet-exa-endpoint` or
+`CHIRON_FLEET_EXA_ENDPOINT`, exactly as for the model endpoint. The Exa
+endpoint joins `FleetEndpoints`, so `DecodeBase` refuses it and
+`research-config` refuses its flag. Each table row now carries `Needed`, so
+a variable is read only when its endpoint is used: the search variable is
+ignored when Exa searches, and the Exa variable unless a role uses Exa.
+This does not stop a base config choosing Exa. When the deployment exports
+`CHIRON_FLEET_EXA_ENDPOINT`, a base config may set either provider to `exa`
+and name any `exa_key_ref`, which moves queries and fetched URLs from the
+operator's MCP server and Chiron's own fetch to Exa and sends the referenced
+secret there. That is the exposure the knowledge pair already has when
+`CHIRON_FLEET_KNOWLEDGE_ENDPOINT` is exported, and the destination is still
+one the operator named and the endpoints event shows. Operators who do not
+want that should set the variable per invocation rather than ambiently.
+Sending the research question is the one Exa setting a base config cannot
+make: `DecodeBase` refuses `search_send_objective: true` and
+`research-config` refuses `--fleet-search-send-objective`, so only the final
+stage's flag can turn it on.
+
+**Spend.** `types.Usage` gains `WebCostUSD` and `WebCostUnknownCalls`.
+GBP stays model spend only and the two currencies are never summed. The
+worker folds each call's spend into its usage before inspecting the error
+and rounds the sum to the micro-dollar; an `Unknown` spend increments the
+counter, making `web_cost_usd` a lower bound. Exa's cost is
+`costDollars.total`; a billed reply that omits it, a 5xx other than Exa's
+enveloped `SERVICE_OVERLOADED` 503, a refused redirect, and a transport
+failure after the request was written are `Unknown`; a 4xx and that 503
+cost nothing. The fleet rollup moved to `types.Usage.Add`, pinned by a
+reflection test so no field can drop out of it. There is no USD ceiling:
+`fleet.ceiling_gbp` is a model-token ceiling and its help now says so. The
+bound is structural. At most `max_turns` web calls run per worker, so web
+spend is at most `max_turns × $0.007` for searches of ten results plus
+`$0.001` per fetched page, times `max_workers` in a fleet. A later
+`Caps` field can add a USD ceiling from the per-call spend.
+
+**Account failures end the run.** A 401, a 402 for no credit or an
+exhausted key or team budget, and a 403 `TEAM_BLOCKED` match
+`web.ErrAccountUnusable`, and the worker ends the run Failed on the turn
+that met one. Feeding it back would cost up to two more paid model turns
+for a call that cannot succeed. The finding records the cause, and the
+fleet's pool then starts none of its queued briefs, each of which would pay
+a model turn to meet the same refusal; workers already running finish. A
+402 `X402_PAYMENT_REQUIRED` is Exa's answer to a request without a key;
+`exa.New` refuses an empty key, so that tag means a client fault and stays
+an ordinary error. A 401 ends the run whatever its body, while a 402 or 403
+without Exa's envelope does not, since its cause is unknown.
+
+**One re-send.** No Exa POST is retried, except that a 503 whose body is
+Exa's JSON envelope with tag `SERVICE_OVERLOADED` is sent once more at
+once. Exa documents that reply as not processed and not billed, the same
+unambiguous case as the MCP session 404, and failing it would cost a tool
+strike, a paid model turn worth more than the search. A 503 without the
+envelope, such as an edge proxy's page, is not re-sent, because nothing
+says the request was not processed.
+
+**What the smoke run settled.** An authenticated run against the live API
+on 2026-10-20 showed: `highlights.maxCharacters` is a hint (567 runes came
+back for 300), so the worker bounds every provider's snippet, title, URL
+and notes itself; `/contents` echoes each requested URL verbatim as its
+status id and reports no final URL after a redirect, so `Fetch` sends one
+URL, requires exactly one status (whatever form its id takes), and reports
+the URL it sent; a URL Exa cannot retrieve is a 200 with an
+error status and costs nothing; without a text view `/contents` returns the
+whole page and bills it, so a bounded text view is always requested;
+`maxCharacters` counts characters, not bytes, so a page reads as truncated
+when it reaches the bound counted as runes or as UTF-16 units; and Exa
+accepted and echoed userinfo and fragments.
+
+**Security posture.** Exa, not Chiron, dials the pages, so there is no
+dial-time guard; the SSRF question becomes one of disclosure. Before
+anything is sent, `Fetch` refuses a URL with userinfo, drops its fragment,
+caps it at 2,048 bytes, and refuses a host that is an internal address
+(`httpx.InternalAddr`, which also refuses Teredo), `localhost`, a name with
+an empty or non-ASCII label, a single-label name, a name under a
+special-use, reserved or commonly private suffix (`.localhost`, `.local`,
+`.localdomain`, `.internal`, `.intranet`, `.private`, `.corp`, `.home`,
+`.lan`, `.home.arpa`, the reverse-DNS `.arpa` zones, `.test`, `.invalid`,
+`.example`, `.onion`), or a name whose last label is numeric, which a WHATWG
+parser may read as an address. Non-ASCII names are refused, punycode forms
+admitted, because IDNA mapping can delete characters and turn a name into
+one the suffix check would refuse. The checks are syntactic: a public name
+that resolves to an internal address is admitted, which discloses only the
+name, because Exa resolves it from its own network. The worker's rule
+that only URLs from search results are fetched still applies first. Exa
+receives every search query, the research objective only when
+`fleet.search_send_objective` is set (off by default), and every fetched
+URL including its query string. Exa's retention and training terms for API
+traffic depend on the customer agreement; reviewing them and signing a data
+processing agreement is the operator's job. Target sites see Exa's
+`ExaUser` agent, not Chiron's identifying user agent. The key travels only
+in `x-api-key`, redirects are refused, and errors are scrubbed of the key
+by exact match before `secret.Scrub`, which gains an `x-api-key` header
+rule, because the heuristics are not known to recognise Exa's key format.
+The query and objective are redacted from Exa's error messages by exact
+match.
+The Interaction's tool list records `web_search:exa` and `web_fetch:exa`,
+and the endpoints event names Exa's origin for search and adds a `fetch`
+key when fetching sends a credential.
+
+**Not yet measured or built.** Whether Exa fetches pages that bot-wall
+Chiron's own requests is unmeasured: Exa's crawler documentation says it
+does not bypass logins, paywalls or CAPTCHAs, and no provider publishes a
+success rate from datacentre callers. Accepting Exa fetch as the remedy for
+bot walls needs a trial against a list of known bot-walled URLs. Request
+pacing is deferred: Exa limits a team to 10 searches per second, which one
+worker cannot reach, and a shared per-provider limiter, honouring a 429's
+`Retry-After`, belongs with the fleet's concurrent workers; until then a 429
+is an ordinary tool failure. `proto/chiron/v1` `Usage` gains `recall_count`,
+`web_cost_usd` and `web_cost_unknown_calls`.

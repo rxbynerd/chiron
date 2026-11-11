@@ -143,6 +143,9 @@ func TestFetchHappyPath(t *testing.T) {
 	if page.URL != server.URL {
 		t.Errorf("URL = %q, want %q", page.URL, server.URL)
 	}
+	if page.Spend.USD != 0 || page.Spend.Unknown {
+		t.Errorf("Spend = %+v, want zero: a direct fetch bills nothing", page.Spend)
+	}
 }
 
 func TestFetchSendsIdentifyingHeaders(t *testing.T) {

@@ -1,7 +1,8 @@
 // Package httpx holds the HTTP rules every credential-bearing Chiron client
 // shares: which endpoints may receive a credential, which redirects may be
-// followed, and how a response body is read under a bound. It imports only
-// the standard library so config, the CLI and every client can use it.
+// followed, how a response body is read under a bound, and which addresses a
+// fetch of an untrusted URL must refuse. It imports only the standard
+// library so config, the CLI and every client can use it.
 package httpx
 
 import (

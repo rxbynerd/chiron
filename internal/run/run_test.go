@@ -449,3 +449,23 @@ func TestRunRecordsRecallCount(t *testing.T) {
 		t.Errorf("%s = %v, want 80", trace.MetricSearchCount, got)
 	}
 }
+
+// TestRunRecordsWebCost: the run-level web spend and unknown-cost count are
+// recorded from the interaction's usage under their own names.
+func TestRunRecordsWebCost(t *testing.T) {
+	deps, r, _, _ := happyDeps()
+	r.result.Usage.WebCostUSD = 0.015
+	r.result.Usage.WebCostUnknownCalls = 2
+	tracer := &valueTracer{}
+	deps.Tracer = tracer
+
+	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := tracer.values[trace.MetricWebCostUSD]; got != 0.015 {
+		t.Errorf("%s = %v, want 0.015", trace.MetricWebCostUSD, got)
+	}
+	if got := tracer.values[trace.MetricWebCostUnknownCalls]; got != 2 {
+		t.Errorf("%s = %v, want 2", trace.MetricWebCostUnknownCalls, got)
+	}
+}

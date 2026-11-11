@@ -12,7 +12,10 @@
 // docs/DECISIONS.md, "Wire types vs domain types").
 package types
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Status is the lifecycle state of an interaction. The set mirrors the
 // API's full enum (docs/INTERACTIONS-API.md §4) so the domain model can
@@ -99,17 +102,49 @@ type Citation struct {
 // API reports (mapped by the adapter) plus Chiron-side run telemetry.
 // Chiron tracks the signals and enforces budget caps; pricing tables and
 // attribution are deferred to Stint (a suite concern, not Chiron's).
+//
+// EstimatedCostGBP is model spend only. WebCostUSD is the spend web search
+// and fetch providers reported, in US dollars; the two currencies are never
+// summed or converted. When WebCostUnknownCalls is above zero, that many web
+// calls may have been billed an unreported amount, so WebCostUSD is a lower
+// bound. Usage stays comparable with ==.
 type Usage struct {
-	InputTokens      int     `json:"input_tokens,omitempty"`
-	CachedTokens     int     `json:"cached_tokens,omitempty"`
-	OutputTokens     int     `json:"output_tokens,omitempty"`
-	ToolUseTokens    int     `json:"tool_use_tokens,omitempty"`
-	ThoughtTokens    int     `json:"thought_tokens,omitempty"`
-	SearchCount      int     `json:"search_count,omitempty"`
-	RecallCount      int     `json:"recall_count,omitempty"`
-	PollCount        int     `json:"poll_count,omitempty"`
-	ReconnectCount   int     `json:"reconnect_count,omitempty"`
-	EstimatedCostGBP float64 `json:"estimated_cost_gbp,omitempty"`
+	InputTokens         int     `json:"input_tokens,omitempty"`
+	CachedTokens        int     `json:"cached_tokens,omitempty"`
+	OutputTokens        int     `json:"output_tokens,omitempty"`
+	ToolUseTokens       int     `json:"tool_use_tokens,omitempty"`
+	ThoughtTokens       int     `json:"thought_tokens,omitempty"`
+	SearchCount         int     `json:"search_count,omitempty"`
+	RecallCount         int     `json:"recall_count,omitempty"`
+	PollCount           int     `json:"poll_count,omitempty"`
+	ReconnectCount      int     `json:"reconnect_count,omitempty"`
+	EstimatedCostGBP    float64 `json:"estimated_cost_gbp,omitempty"`
+	WebCostUSD          float64 `json:"web_cost_usd,omitempty"`
+	WebCostUnknownCalls int     `json:"web_cost_unknown_calls,omitempty"`
+}
+
+// Add returns the field-by-field sum of u and o. WebCostUSD is rounded to
+// the micro-dollar, the unit providers report, so summed binary fractions
+// stay stable in reports.
+func (u Usage) Add(o Usage) Usage {
+	u.InputTokens += o.InputTokens
+	u.CachedTokens += o.CachedTokens
+	u.OutputTokens += o.OutputTokens
+	u.ToolUseTokens += o.ToolUseTokens
+	u.ThoughtTokens += o.ThoughtTokens
+	u.SearchCount += o.SearchCount
+	u.RecallCount += o.RecallCount
+	u.PollCount += o.PollCount
+	u.ReconnectCount += o.ReconnectCount
+	u.EstimatedCostGBP += o.EstimatedCostGBP
+	u.WebCostUSD = RoundUSD(u.WebCostUSD + o.WebCostUSD)
+	u.WebCostUnknownCalls += o.WebCostUnknownCalls
+	return u
+}
+
+// RoundUSD rounds a US-dollar amount to the micro-dollar.
+func RoundUSD(v float64) float64 {
+	return math.Round(v*1e6) / 1e6
 }
 
 // Report is a formatted research report: a single portable Markdown

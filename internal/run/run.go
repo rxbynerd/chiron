@@ -270,6 +270,8 @@ func recordMetrics(ctx context.Context, tracer trace.Tracer, result *types.RunRe
 	tracer.Metric(ctx, trace.MetricOutputTokens, float64(result.Usage.OutputTokens))
 	tracer.Metric(ctx, trace.MetricEstimatedCostGBP, result.Usage.EstimatedCostGBP)
 	tracer.Metric(ctx, trace.MetricReconnectCount, float64(result.Usage.ReconnectCount))
+	tracer.Metric(ctx, trace.MetricWebCostUSD, result.Usage.WebCostUSD)
+	tracer.Metric(ctx, trace.MetricWebCostUnknownCalls, float64(result.Usage.WebCostUnknownCalls))
 	if result.Status != types.StatusCompleted {
 		tracer.Metric(ctx, trace.MetricFailures, 1)
 	}

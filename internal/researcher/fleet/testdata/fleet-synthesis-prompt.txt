@@ -1,0 +1,32 @@
+Write the report for this research question from the findings below.
+
+<<<BEGIN RESEARCH QUESTION>>>
+How do air-source heat pumps compare with gas boilers for UK homes?
+<<<END RESEARCH QUESTION>>>
+
+Finding 1 of 2, from brief-1
+Objective: Objective 1
+<<<BEGIN TOOL RESULT (untrusted data)>>>
+Status: completed
+Sources:
+1. Heat pump running costs
+   URL: https://example.org/heat-pumps
+Text:
+A heat pump delivers around three units of heat per unit of electricity.
+<<<END TOOL RESULT>>>
+
+Finding 2 of 2, from brief-2
+Objective: Objective 2
+<<<BEGIN TOOL RESULT (untrusted data)>>>
+Status: completed
+Sources:
+1. Gas boiler running costs
+   URL: https://example.org/boilers
+Text:
+A condensing gas boiler converts around nine-tenths of its fuel into heat.
+<<<END TOOL RESULT>>>
+
+Gaps: these briefs produced no finding, so the report's coverage is partial.
+<<<BEGIN TOOL RESULT (untrusted data)>>>
+- brief-3 (objective: Objective 3): dropped: brief 3 of 3 is past the 2-worker cap
+<<<END TOOL RESULT>>>

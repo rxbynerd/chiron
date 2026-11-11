@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rxbynerd/chiron/internal/memory"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/fetch"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
-	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/secret"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
@@ -20,18 +23,18 @@ import (
 // Brief is one unit of work for a worker: the objective to research and the
 // shape of the answer expected. Blank fields fall back to instructive defaults
 // (worker_prompt.go), so a minimally-populated Brief still produces a coherent
-// prompt.
+// prompt. The JSON names match the lead's decomposition schema.
 type Brief struct {
 	// Objective is the research question or subtask the worker must answer.
-	Objective string
+	Objective string `json:"objective"`
 	// OutputFormat describes the shape the finding should take (e.g. a short
 	// Markdown synthesis, a comparison table). Blank selects a default.
-	OutputFormat string
+	OutputFormat string `json:"output_format"`
 	// SourceGuidance steers which sources to prefer. Blank selects a default.
-	SourceGuidance string
+	SourceGuidance string `json:"source_guidance"`
 	// Boundaries constrains scope (what to include or exclude). Blank selects a
 	// default.
-	Boundaries string
+	Boundaries string `json:"boundaries"`
 }
 
 // Finding is the outcome of one worker run: the synthesised prose, the sources
@@ -58,6 +61,33 @@ type Finding struct {
 	// Detail is a human-readable reason accompanying an Incomplete or Failed
 	// outcome, empty on success. It is scrubbed and bounded in length.
 	Detail string
+	// Turns is the number of model turns the loop started, counting a turn
+	// whose model call failed.
+	Turns int
+	// AccountUnusable reports that the run failed because a web provider
+	// will refuse every further call on its account, so another worker on
+	// the same providers would fail the same way.
+	AccountUnusable bool
+}
+
+// Progress is one best-effort report from a worker turn, made after the
+// model's action has parsed and before it is dispatched. The token and cost
+// fields are the run's accumulated usage including this turn's model call.
+type Progress struct {
+	// Turn is the 1-based turn number; MaxTurns is Caps.MaxTurns.
+	Turn, MaxTurns int
+	// Action is the parsed action kind: search, fetch, recall or final.
+	Action string
+	// Detail names the action's target without its content: the query for
+	// search and recall, the URL reduced to scheme://host for fetch, empty
+	// for final. It is one line of printable text, scrubbed and bounded to
+	// maxProgressDetailRunes.
+	Detail                    string
+	InputTokens, OutputTokens int
+	EstimatedCostGBP          float64
+	// WorkerID identifies the fleet worker that made the report; empty for
+	// the single-worker agent.
+	WorkerID string
 }
 
 // Caps bound one worker run deterministically. Exceeding a cap ends the loop
@@ -115,24 +145,41 @@ const turnCompletionTokens = 8192
 // so this is a spend bound as much as a robustness one.
 const maxConsecutiveToolFailures = 3
 
+// progressTimeout bounds one Progress delivery, including any wait for the
+// Worker's delivery gate. The loop never waits on a hook for longer.
+const progressTimeout = 2 * time.Second
+
+// maxProgressDetailRunes bounds Progress.Detail.
+const maxProgressDetailRunes = 200
+
 // maxDetailBytes bounds Finding.Detail; a provider error body can be large
 // and the detail is copied into the report front matter and traces.
 const maxDetailBytes = 2048
 
-// WorkerDeps are the shared collaborators a worker loop uses: the three
-// clients, the optional knowledge store halves, a tracer for best-effort
-// observability, and the caps. Model and Search are required; Fetch is
-// required for the loop to honour a fetch action; the rest may be nil.
+// WorkerDeps are the shared collaborators a worker loop uses: the model
+// client, the web search and fetch providers, the optional knowledge store
+// halves, a tracer for best-effort observability, and the caps. Model,
+// Search and Fetch are required (checkWorkerDeps); the rest may be nil.
 type WorkerDeps struct {
 	Model  *model.Client
-	Search *search.Client
-	Fetch  *fetch.Client
+	Search web.Searcher
+	Fetch  web.Fetcher
+	// SearchProvider and FetchProvider name a non-default web provider,
+	// such as "exa", so the Interaction's tool list records where queries
+	// and URLs were sent. Empty means the default MCP search and direct
+	// fetch.
+	SearchProvider string
+	FetchProvider  string
 	// Knowledge, when non-nil, adds the recall action. nil omits recall from
 	// the loop's schema, prompt and tool list.
 	Knowledge memory.Recaller
 	// Remember, when non-nil, saves a bounded summary of a Completed finding
 	// after the loop returns (Worker only). It is independent of Knowledge.
 	Remember memory.Rememberer
+	// ReportTemplate, when non-nil, is rendered with the query to fill the
+	// Brief's OutputFormat (Worker only; RunWorker callers set
+	// Brief.OutputFormat themselves). nil selects the built-in format.
+	ReportTemplate *ReportTemplate
 	// Logger receives the save-back outcome. nil discards it; the composition
 	// root binds a scrubbing handler on the command's stderr.
 	Logger *slog.Logger
@@ -141,15 +188,17 @@ type WorkerDeps struct {
 	KnowledgeNamespace memory.Namespace
 	Tracer             trace.Tracer
 	Caps               Caps
-}
+	// Progress, when non-nil, receives one Progress per turn whose action
+	// parsed. Delivery is best effort within progressTimeout: a panic is
+	// recovered, a hook still running at the deadline is abandoned, and
+	// nothing the hook does affects the Finding. The fleet worker pool calls
+	// it concurrently from every worker's own goroutine, so a hook must be
+	// safe for concurrent use.
+	Progress func(ctx context.Context, p Progress)
 
-// fetchedPage is the loop's view of a fetched document: the subset of
-// fetch.Page the transcript renders.
-type fetchedPage struct {
-	URL         string
-	ContentType string
-	Content     []byte
-	Truncated   bool
+	// progressTimeoutOverride replaces progressTimeout when positive, so
+	// tests can shorten it.
+	progressTimeoutOverride time.Duration
 }
 
 // RunWorker runs the bounded worker loop for one brief and returns a Finding.
@@ -163,14 +212,17 @@ type fetchedPage struct {
 // no side effect. RunWorker never calls deps.Remember; saving a finding is the
 // Worker's concern.
 func RunWorker(ctx context.Context, deps WorkerDeps, brief Brief) Finding {
-	return runWorker(ctx, deps, brief, nil)
+	return runWorker(ctx, deps, brief, nil, nil)
 }
 
 // afterLoop runs once the loop has produced its Finding, while the worker
 // span is still open; span is nil when no tracer is configured.
 type afterLoop func(ctx context.Context, f Finding, span trace.Span)
 
-func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoop) Finding {
+// runWorker runs the loop. A non-nil progressGate holds each Progress
+// delivery until the gate is closed, dropping it if the progress deadline
+// passes first.
+func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <-chan struct{}, after afterLoop) Finding {
 	if deps.Caps.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, deps.Caps.Timeout)
@@ -183,7 +235,7 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoo
 		span.SetAttr("objective", boundDetail(brief.Objective))
 	}
 
-	w := &workerRun{deps: deps, brief: brief}
+	w := &workerRun{deps: deps, brief: brief, progressGate: progressGate}
 	finding := w.loop(ctx)
 	if after != nil {
 		after(ctx, finding, span)
@@ -203,6 +255,8 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoo
 		span.SetAttr("input_tokens", finding.Usage.InputTokens)
 		span.SetAttr("output_tokens", finding.Usage.OutputTokens)
 		span.SetAttr("estimated_cost_gbp", finding.Usage.EstimatedCostGBP)
+		span.SetAttr("web_cost_usd", finding.Usage.WebCostUSD)
+		span.SetAttr("web_cost_unknown_calls", finding.Usage.WebCostUnknownCalls)
 		var spanErr error
 		if finding.Status == types.StatusFailed {
 			spanErr = errors.New(finding.Detail)
@@ -217,8 +271,9 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, after afterLoo
 // permitted to fetch and cite (only URLs it has actually seen in a search
 // result or fetched).
 type workerRun struct {
-	deps  WorkerDeps
-	brief Brief
+	deps         WorkerDeps
+	brief        Brief
+	progressGate <-chan struct{}
 
 	transcript []model.Message
 	usage      types.Usage
@@ -305,6 +360,7 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 		// guarantee.
 		return true, w.failed("invalid model action: " + w.scrub(err.Error()))
 	}
+	w.reportProgress(ctx, act)
 
 	switch act.Kind {
 	case actionSearch:
@@ -324,12 +380,19 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 // records every returned URL as fetchable and citable. A search failure is
 // fed back to the model unless the consecutive-failure bound is reached.
 func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
-	results, err := w.deps.Search.Search(ctx, act.Query)
+	resp, err := w.deps.Search.Search(ctx, web.Query{Text: act.Query, Objective: w.brief.Objective})
+	w.addSpend(resp.Spend)
 	if err != nil {
-		return w.toolFailure(ctx, "search failed: "+w.scrub(err.Error()))
+		return w.webFailure(ctx, "search failed: ", err)
 	}
 	w.toolFailures = 0
 	w.usage.SearchCount++
+	results := resp.Results[:0:0]
+	for _, r := range resp.Results {
+		if len(r.URL) <= maxResultURLBytes {
+			results = append(results, r)
+		}
+	}
 	for _, r := range results {
 		if r.URL != "" {
 			w.seenURLs[r.URL] = true
@@ -338,7 +401,7 @@ func (w *workerRun) doSearch(ctx context.Context, act action) (bool, Finding) {
 			}
 		}
 	}
-	w.transcript = append(w.transcript, searchResultsMessage(act.Query, results))
+	w.transcript = append(w.transcript, searchResultsMessage(act.Query, results, resp.Notes))
 	return false, Finding{}
 }
 
@@ -354,32 +417,33 @@ func (w *workerRun) doFetch(ctx context.Context, act action) (bool, Finding) {
 			fmt.Sprintf("the URL %q did not appear in any search result, so it cannot be fetched.", act.URL)))
 		return false, Finding{}
 	}
-	if w.deps.Fetch == nil {
+	if isNil(w.deps.Fetch) {
 		return true, w.failed("fetch requested but no fetch client is configured")
 	}
 
 	page, err := w.deps.Fetch.Fetch(ctx, act.URL)
+	w.addSpend(page.Spend)
 	if err != nil {
-		return w.toolFailure(ctx, "fetch failed: "+w.scrub(err.Error()))
+		return w.webFailure(ctx, "fetch failed: ", err)
 	}
-	fp := fetchedPage{
-		URL:         page.URL,
-		ContentType: page.ContentType,
-		Content:     page.Content,
-		Truncated:   page.Truncated,
-	}
-	rendered, ok := pageText(fp, w.maxPageBytes())
+	rendered, ok := pageText(page, w.maxPageBytes())
 	if !ok {
-		return w.toolFailure(ctx, fmt.Sprintf("the content at %s (%s) is not text and cannot be read.", fp.URL, fp.ContentType))
+		return w.toolFailure(ctx, fmt.Sprintf("the content at %s (%s) is not text and cannot be read.", page.URL, page.ContentType))
 	}
 	w.toolFailures = 0
 
 	// A fetched page is a source the worker read, so it is citable under its
-	// final URL as well as the requested one.
+	// final URL as well as the requested one. It is cited under the
+	// requested URL when the two differ only by a fragment, so the model
+	// citing the URL it fetched does not list the page twice.
 	w.seenURLs[page.URL] = true
-	w.addCitation(page.URL, w.titles[act.URL])
+	citeURL := page.URL
+	if withoutFragment(page.URL) == withoutFragment(act.URL) {
+		citeURL = act.URL
+	}
+	w.addCitation(citeURL, w.titles[act.URL])
 
-	w.transcript = append(w.transcript, fetchedPageMessage(fp.URL, fp.ContentType, rendered.text, fp.Truncated || rendered.truncated))
+	w.transcript = append(w.transcript, fetchedPageMessage(page.URL, page.ContentType, rendered.text, page.Truncated || rendered.truncated))
 	return false, Finding{}
 }
 
@@ -409,6 +473,37 @@ func (w *workerRun) doRecall(ctx context.Context, act action) (bool, Finding) {
 	}
 	w.transcript = append(w.transcript, recallResultsMessage(act.Query, hits, w.maxRecallBytes()))
 	return false, Finding{}
+}
+
+// webFailure handles a failed search or fetch. A provider account that will
+// refuse every further call ends the run Failed at once, because feeding the
+// failure back cannot help and each retry costs a model turn; anything else
+// is an ordinary tool failure.
+func (w *workerRun) webFailure(ctx context.Context, prefix string, err error) (bool, Finding) {
+	detail := prefix + w.scrub(err.Error())
+	if errors.Is(err, web.ErrAccountUnusable) && ctx.Err() == nil {
+		f := w.failed(detail)
+		f.AccountUnusable = true
+		return true, f
+	}
+	return w.toolFailure(ctx, detail)
+}
+
+// withoutFragment returns rawURL up to any '#'.
+func withoutFragment(rawURL string) string {
+	u, _, _ := strings.Cut(rawURL, "#")
+	return u
+}
+
+// addSpend runs before the error check, because a failed call may be billed.
+// A non-finite amount counts as unknown and a negative one as nothing.
+func (w *workerRun) addSpend(s web.Spend) {
+	switch {
+	case s.Unknown, math.IsNaN(s.USD), math.IsInf(s.USD, 0):
+		w.usage.WebCostUnknownCalls++
+	case s.USD > 0:
+		w.usage.WebCostUSD = types.RoundUSD(w.usage.WebCostUSD + s.USD)
+	}
 }
 
 // toolFailure handles a failed search, fetch or recall: a context end is
@@ -451,7 +546,99 @@ func (w *workerRun) finalise(act action) Finding {
 		Citations: w.citations,
 		Usage:     w.usage,
 		Status:    types.StatusCompleted,
+		Turns:     w.turns,
 	}
+}
+
+// reportProgress delivers this turn's Progress to deps.Progress within one
+// progress deadline. With a gate, delivery first waits for it to open; a
+// delivery whose deadline passes first, or whose run has ended, is dropped.
+func (w *workerRun) reportProgress(ctx context.Context, act action) {
+	hook := w.deps.Progress
+	if hook == nil {
+		return
+	}
+	p := Progress{
+		Turn:             w.turns,
+		MaxTurns:         w.deps.Caps.MaxTurns,
+		Action:           string(act.Kind),
+		Detail:           progressDetail(act),
+		InputTokens:      w.usage.InputTokens,
+		OutputTokens:     w.usage.OutputTokens,
+		EstimatedCostGBP: w.usage.EstimatedCostGBP,
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, w.deps.progressDeadline())
+	defer cancel()
+	if w.progressGate != nil {
+		select {
+		case <-w.progressGate:
+		case <-ctx.Done():
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	if r := callProgress(ctx, hook, p); r != nil {
+		w.deps.logger().Debug("worker: progress hook panicked", "recover", w.scrub(fmt.Sprint(r)))
+	}
+}
+
+// callProgress runs hook in its own goroutine and waits until it returns or
+// ctx ends, so a hook that ignores ctx cannot hold the loop past the
+// deadline. A panic in the hook is recovered and returned, never re-raised:
+// progress is observability, never a reason to fail a paid run. The recovered
+// value travels over a buffered channel rather than a named return, because
+// the goroutine can still be writing after the ctx.Done branch returns.
+func callProgress(ctx context.Context, hook func(context.Context, Progress), p Progress) any {
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		hook(ctx, p)
+	}()
+	select {
+	case r := <-recovered:
+		return r
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+// progressDetail names an action's target for a Progress report: the query
+// for search and recall, the URL's origin for fetch, nothing for final. The
+// text is flattened, scrubbed, then bounded, in that order, so the bound
+// cannot split a credential into fragments too short for the scrubber.
+func progressDetail(act action) string {
+	var s string
+	switch act.Kind {
+	case actionSearch, actionRecall:
+		s = act.Query
+	case actionFetch:
+		s = urlOrigin(act.URL)
+	}
+	return strings.TrimSpace(boundRunes(secret.Scrub(printableOneLine(s)), maxProgressDetailRunes))
+}
+
+// urlOrigin reduces a URL to scheme://host, lowercased, keeping a port but
+// dropping userinfo, path, query and fragment. A URL without both a scheme
+// and a host yields "".
+func urlOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
+}
+
+// printableOneLine flattens s to one line of printable text, dropping control
+// and format characters such as terminal escapes and bidirectional overrides.
+func printableOneLine(s string) string {
+	return oneLine(strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) || unicode.IsSpace(r) {
+			return r
+		}
+		return -1
+	}, s))
 }
 
 // incomplete builds a bounded-stop Finding: a cap, the context, or a truncated
@@ -462,6 +649,7 @@ func (w *workerRun) incomplete(detail string) Finding {
 		Usage:     w.usage,
 		Status:    types.StatusIncomplete,
 		Detail:    boundDetail(detail),
+		Turns:     w.turns,
 	}
 }
 
@@ -473,6 +661,7 @@ func (w *workerRun) failed(detail string) Finding {
 		Usage:     w.usage,
 		Status:    types.StatusFailed,
 		Detail:    boundDetail(detail),
+		Turns:     w.turns,
 	}
 }
 
@@ -515,8 +704,13 @@ func citationTitle(s string) string {
 func (w *workerRun) accumulateModelUsage(u model.Usage) {
 	w.usage.InputTokens += u.InputTokens
 	w.usage.OutputTokens += u.OutputTokens
-	w.usage.EstimatedCostGBP += float64(u.InputTokens)*w.deps.Caps.InputGBPPerMTok/1e6 +
-		float64(u.OutputTokens)*w.deps.Caps.OutputGBPPerMTok/1e6
+	w.usage.EstimatedCostGBP += costGBP(u.InputTokens, u.OutputTokens, w.deps.Caps.InputGBPPerMTok, w.deps.Caps.OutputGBPPerMTok)
+}
+
+// costGBP estimates the spend of a model call's tokens at per-million-token
+// prices. The worker and the lead both price with it.
+func costGBP(inputTokens, outputTokens int, inputGBPPerMTok, outputGBPPerMTok float64) float64 {
+	return float64(inputTokens)*inputGBPPerMTok/1e6 + float64(outputTokens)*outputGBPPerMTok/1e6
 }
 
 // turnCompletionCap is the completion cap for one model turn: the fixed
@@ -579,8 +773,17 @@ func (w *workerRun) scrub(s string) string {
 // boundDetail truncates a detail string to maxDetailBytes at a rune boundary.
 func boundDetail(s string) string { return boundBytes(s, maxDetailBytes) }
 
-// errWorkerNoModel is returned by NewWorker when the model client is nil.
+// errWorkerNoModel is returned by checkWorkerDeps when the model client is
+// nil.
 var errWorkerNoModel = errors.New("fleet: worker requires a model client")
+
+// progressDeadline is the bound on one Progress delivery.
+func (d WorkerDeps) progressDeadline() time.Duration {
+	if d.progressTimeoutOverride > 0 {
+		return d.progressTimeoutOverride
+	}
+	return progressTimeout
+}
 
 // logger returns the injected logger, or one that discards every record.
 func (d WorkerDeps) logger() *slog.Logger {

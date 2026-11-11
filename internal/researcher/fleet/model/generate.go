@@ -69,7 +69,8 @@ type Response struct {
 // Usage is the provider's token accounting. Callers convert this to
 // internal/types.Usage and attach cost estimates; this package stays free
 // of domain coupling. InputTokens maps prompt_tokens, OutputTokens maps
-// completion_tokens.
+// completion_tokens. A negative reported count is clamped to zero, so a
+// provider's accounting can never reduce a run's recorded spend.
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
@@ -183,9 +184,9 @@ func (c *Client) Generate(ctx context.Context, req Request) (Response, error) {
 		Content:      wire.Choices[0].Message.Content,
 		FinishReason: wire.Choices[0].FinishReason,
 		Usage: Usage{
-			InputTokens:  wire.Usage.PromptTokens,
-			OutputTokens: wire.Usage.CompletionTokens,
-			TotalTokens:  wire.Usage.TotalTokens,
+			InputTokens:  max(wire.Usage.PromptTokens, 0),
+			OutputTokens: max(wire.Usage.CompletionTokens, 0),
+			TotalTokens:  max(wire.Usage.TotalTokens, 0),
 		},
 	}, nil
 }

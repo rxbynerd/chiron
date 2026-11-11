@@ -529,6 +529,8 @@ change, not a rewrite.
 
 ### Wave 4 — in-process fleet orchestrator (+ in-memory ContextStore)
 
+**Status (2026-09-25).** The fleet is implemented and opt-in (`--agent fleet --fleet-memory inmemory`); the eval gate (key task 8, issue #25) is outstanding, so the single-call default stands.
+
 **Goal.** Implement the `Researcher=fleet` seam, **external-web-only** (D5): a lead agent
 that plans, decomposes, dispatches several **in-process research workers** in parallel (Wave
 3's single worker, fanned out as goroutines), synthesises, and runs a citation pass —

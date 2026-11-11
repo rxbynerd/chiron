@@ -42,8 +42,9 @@ const (
 )
 
 // Memory bindings for the in-process research agents (V2-RESEARCH-AGENT §4).
-// noop holds no Chiron-side context; inmemory is reserved for the in-process
-// ContextStore and rejected until that store exists.
+// noop holds no Chiron-side context; inmemory is the in-process ContextStore
+// the fleet passes findings through by reference. The fleet requires
+// inmemory; the worker has no session plane and accepts either.
 const (
 	MemoryNoop     = "noop"
 	MemoryInMemory = "inmemory"
@@ -191,11 +192,12 @@ type FleetConfig struct {
 	// MaxTokens caps a worker's cumulative model tokens; zero means
 	// uncapped on tokens (the turn and time caps still bound the loop).
 	MaxTokens int `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
-	// CeilingGBP caps a worker's estimated model spend; zero means
+	// CeilingGBP is a worker's model-token cost ceiling; zero means
 	// uncapped on cost, mirroring BudgetGBP. The estimate is derived from
-	// the price fields below, so a non-zero ceiling requires them. Token
-	// and GBP ceilings are both kept: tokens bound a loop deterministically
-	// with no price table, GBP expresses the operator's spend intent.
+	// the price fields below, so a non-zero ceiling requires them, and it
+	// excludes web-provider spend, which is reported in USD. Token and GBP
+	// ceilings are both kept: tokens bound a loop deterministically with no
+	// price table, GBP expresses the operator's spend intent.
 	CeilingGBP float64 `json:"ceiling_gbp,omitempty" yaml:"ceiling_gbp,omitempty"`
 	// PriceInputGBPPerMTok and PriceOutputGBPPerMTok price a million prompt
 	// and completion tokens of the configured model, in GBP. Zero leaves the
@@ -213,7 +215,8 @@ type FleetConfig struct {
 	// Concurrency caps how many workers run at once. Positive; must not
 	// exceed MaxWorkers.
 	Concurrency int `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
-	// Memory selects the ContextStore binding: noop (inmemory is reserved).
+	// Memory selects the ContextStore binding: noop or inmemory. The fleet
+	// agent requires inmemory; the worker accepts either and uses neither.
 	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
 	// KnowledgeProvider selects the knowledge store the worker recalls from:
 	// empty (none), billet or alexandria.
@@ -229,7 +232,7 @@ type FleetConfig struct {
 	// KnowledgeLimit is the hits per recall, 1 to MaxKnowledgeLimit.
 	KnowledgeLimit int `json:"knowledge_limit,omitempty" yaml:"knowledge_limit,omitempty"`
 	// KnowledgeRemember saves each completed finding back to the store
-	// (billet only).
+	// (billet, worker agent only).
 	KnowledgeRemember bool `json:"knowledge_remember,omitempty" yaml:"knowledge_remember,omitempty"`
 	// SearchTool is the MCP tool the search client invokes in tools/call.
 	// Default DefaultSearchTool; override for a vendor search server that
@@ -240,6 +243,21 @@ type FleetConfig struct {
 	// override for a vendor search server that names its argument
 	// differently.
 	SearchQueryArg string `json:"search_query_arg,omitempty" yaml:"search_query_arg,omitempty"`
+	// SearchProvider selects who runs web searches: empty or SearchMCP for
+	// the MCP server at SearchEndpoint, or SearchExa.
+	SearchProvider string `json:"search_provider,omitempty" yaml:"search_provider,omitempty"`
+	// FetchProvider selects who fetches pages: empty or FetchDirect for
+	// Chiron's own SSRF-guarded client, or FetchExa.
+	FetchProvider string `json:"fetch_provider,omitempty" yaml:"fetch_provider,omitempty"`
+	// ExaEndpoint is the Exa API base URL, validated like ModelEndpoint;
+	// the composition root requires it when either role uses Exa.
+	ExaEndpoint string `json:"exa_endpoint,omitempty" yaml:"exa_endpoint,omitempty"`
+	// ExaKeyRef is a secret:// reference to the Exa key, which serves both
+	// roles — never a literal.
+	ExaKeyRef string `json:"exa_key_ref,omitempty" yaml:"exa_key_ref,omitempty"`
+	// SearchSendObjective sends the research objective with each Exa
+	// search; off, only the model's query leaves the process.
+	SearchSendObjective bool `json:"search_send_objective,omitempty" yaml:"search_send_objective,omitempty"`
 }
 
 // Default returns the documented defaults (PROPOSAL §4.3). The Fleet
@@ -368,11 +386,10 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 		{"accept_plan", c.AcceptPlan, "the in-process agents have no plan phase"},
 		{"model", c.Model != "", "use fleet.model_name"},
 		{"visualise", c.Visualise, "the in-process agents produce no charts"},
-		{"tools", len(c.Tools) > 0, "the in-process agents use fleet.search_endpoint and web_fetch only"},
+		{"tools", len(c.Tools) > 0, "the in-process agents search and fetch through fleet.search_provider and fleet.fetch_provider only"},
 		{"mcp", len(c.MCP) > 0, "use fleet.search_endpoint or the fleet.knowledge_* fields"},
 		{"file_search", len(c.FileSearch) > 0, "the in-process agents search the external web only"},
 		{"inputs", len(c.Inputs) > 0, "the in-process agents take no input documents"},
-		{"template", c.Template != "", "the in-process agents do not take an output template"},
 	}
 	for _, lever := range set {
 		if lever.on {
@@ -386,9 +403,10 @@ func (c ResearchConfig) rejectDeepResearchLevers() error {
 // is worker or fleet, so a deep-research run stays valid with a zero
 // FleetConfig. Endpoints and key references are optional here (the
 // composition root requires them); when present they must satisfy the same
-// rules the Gemini base-URL override does. agent gates the fleet-only caps:
-// a single worker has no fan-out, so MaxWorkers/Concurrency are enforced for
-// fleet only.
+// rules the Gemini base-URL override does. agent gates the fleet-only rules:
+// a single worker has no fan-out and no session plane, so MaxWorkers,
+// Concurrency and the inmemory requirement are enforced for fleet only, and
+// a fleet never saves back, so it refuses KnowledgeRemember.
 func (f FleetConfig) validate(agent string) error {
 	if err := validEndpoint("fleet.model_endpoint", f.ModelEndpoint); err != nil {
 		return err
@@ -442,13 +460,26 @@ func (f FleetConfig) validate(agent string) error {
 		}
 	}
 	switch f.Memory {
-	case MemoryNoop:
 	case MemoryInMemory:
-		return fmt.Errorf("fleet.memory: %q is not implemented yet; use %q", f.Memory, MemoryNoop)
+	case MemoryNoop:
+		if agent == AgentFleet {
+			return fmt.Errorf("fleet.memory: %q stores nothing, but agent %q passes findings between the lead and its workers by reference; set fleet.memory to %q (--fleet-memory %s)",
+				MemoryNoop, AgentFleet, MemoryInMemory, MemoryInMemory)
+		}
 	default:
 		return fmt.Errorf("fleet.memory: %q is not %q or %q", f.Memory, MemoryNoop, MemoryInMemory)
 	}
-	return f.validateKnowledge()
+	if err := f.validateKnowledge(); err != nil {
+		return err
+	}
+	if err := f.validateWeb(); err != nil {
+		return err
+	}
+	if agent == AgentFleet && f.KnowledgeRemember {
+		return fmt.Errorf("fleet.knowledge_remember: agent %q never saves a finding to the knowledge store; remove it (--fleet-knowledge-remember), or use agent %q to save one",
+			AgentFleet, AgentWorker)
+	}
+	return nil
 }
 
 // validateKnowledge checks the knowledge store fields. Without a provider

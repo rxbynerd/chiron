@@ -46,20 +46,25 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("fleet-search-query-arg", d.Fleet.SearchQueryArg, "argument key the search query is passed under")
 	fs.Int("fleet-max-turns", d.Fleet.MaxTurns, "per-worker search->read->synthesise turn cap")
 	fs.Int("fleet-max-tokens", d.Fleet.MaxTokens, "per-worker model token ceiling; 0 means uncapped")
-	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker estimated-cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags)")
+	fs.Float64("fleet-ceiling", d.Fleet.CeilingGBP, "per-worker model-token cost ceiling in GBP; 0 means uncapped (needs the fleet-price flags; web-provider spend is not counted)")
 	fs.Float64("fleet-price-input", d.Fleet.PriceInputGBPPerMTok, "model price in GBP per million prompt tokens (for --fleet-ceiling)")
 	fs.Float64("fleet-price-output", d.Fleet.PriceOutputGBPPerMTok, "model price in GBP per million completion tokens (for --fleet-ceiling)")
 	fs.Int("fleet-max-page-bytes", d.Fleet.MaxPageBytes, "bound on one fetched page's text before it enters the transcript")
 	fs.Duration("fleet-worker-timeout", time.Duration(d.Fleet.WorkerTimeout), "per-worker wall-clock timeout")
 	fs.Int("fleet-max-workers", d.Fleet.MaxWorkers, "maximum workers the fleet lead may dispatch")
 	fs.Int("fleet-concurrency", d.Fleet.Concurrency, "maximum workers running at once (<= fleet-max-workers)")
-	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q (%q is reserved and not yet implemented)", MemoryNoop, MemoryInMemory))
+	fs.String("fleet-memory", d.Fleet.Memory, fmt.Sprintf("ContextStore binding: %q or %q (fleet requires %q; ignored by worker)", MemoryNoop, MemoryInMemory, MemoryInMemory))
 	fs.String("fleet-knowledge-provider", "", fmt.Sprintf("knowledge store the worker recalls from: %q or %q (unset disables recall)", KnowledgeBillet, KnowledgeAlexandria))
 	fs.String("fleet-knowledge-endpoint", "", "knowledge store base URL (absolute https://, http:// loopback only; overrides "+EnvFleetKnowledgeEndpoint+"; refused in a base config)")
 	fs.String("fleet-knowledge-key-ref", "", "secret:// reference to the knowledge store key (never a literal; required for alexandria)")
 	fs.String("fleet-knowledge-space", "", "Alexandria space slug to scope recalls to (alexandria only)")
 	fs.Int("fleet-knowledge-limit", d.Fleet.KnowledgeLimit, fmt.Sprintf("hits per recall, 1..%d", MaxKnowledgeLimit))
-	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet only)")
+	fs.Bool("fleet-knowledge-remember", false, "save each completed finding back to the knowledge store (billet, --agent worker only)")
+	fs.String("fleet-search-provider", "", fmt.Sprintf("web search provider: %q (an MCP server at --fleet-search-endpoint; default) or %q", SearchMCP, SearchExa))
+	fs.String("fleet-fetch-provider", "", fmt.Sprintf("web fetch provider: %q (Chiron fetches pages itself; default) or %q", FetchDirect, FetchExa))
+	fs.String("fleet-exa-endpoint", "", "Exa API base URL, normally https://api.exa.ai (absolute https://, http:// loopback only; overrides "+EnvFleetExaEndpoint+"; refused in a base config)")
+	fs.String("fleet-exa-key-ref", "", "secret:// reference to the Exa key (never a literal; serves both roles)")
+	fs.Bool(FlagSearchSendObjective, false, "send the research objective to the search provider with each query (exa only; refused in a base config)")
 }
 
 // ApplyFlags overlays the flags the user explicitly set onto cfg. Unset
@@ -166,6 +171,16 @@ func ApplyFlags(cfg *ResearchConfig, fs *pflag.FlagSet) error {
 			cfg.Fleet.KnowledgeLimit, _ = fs.GetInt(f.Name)
 		case "fleet-knowledge-remember":
 			cfg.Fleet.KnowledgeRemember = mustBool(fs, f.Name)
+		case "fleet-search-provider":
+			cfg.Fleet.SearchProvider = mustString(fs, f.Name)
+		case "fleet-fetch-provider":
+			cfg.Fleet.FetchProvider = mustString(fs, f.Name)
+		case "fleet-exa-endpoint":
+			cfg.Fleet.ExaEndpoint = mustString(fs, f.Name)
+		case "fleet-exa-key-ref":
+			cfg.Fleet.ExaKeyRef = mustString(fs, f.Name)
+		case FlagSearchSendObjective:
+			cfg.Fleet.SearchSendObjective = mustBool(fs, f.Name)
 		}
 	})
 

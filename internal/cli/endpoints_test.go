@@ -20,6 +20,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/memory/billet/billettest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa/exatest"
 	"github.com/rxbynerd/chiron/internal/secret"
 	"github.com/rxbynerd/chiron/internal/transport"
 )
@@ -343,6 +344,8 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 		{"userinfo search", config.EnvFleetSearchEndpoint, "https://user:" + token + "@search.example/mcp", "--fleet-search-endpoint", nil},
 		{"query knowledge", config.EnvFleetKnowledgeEndpoint, "https://kb.example/?key=" + token, "",
 			[]string{"--fleet-knowledge-provider", "billet"}},
+		{"userinfo exa", config.EnvFleetExaEndpoint, "https://user:" + token + "@exa.example", "",
+			[]string{"--fleet-fetch-provider", "exa", "--fleet-exa-key-ref", "secret://EXA_KEY"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			clearEndpointEnv(t)
@@ -376,8 +379,8 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 }
 
 // TestMissingEndpointErrorNamesFlagAndVariable: a worker run missing any
-// fleet endpoint fails before any secret resolves, and the error names the
-// flag and the environment variable that can supply it.
+// fleet endpoint it uses fails before any secret resolves, and the error
+// names the flag and the environment variable that can supply it.
 func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
@@ -385,6 +388,8 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 	defer searchSrv.Close()
 	kbSrv := billettest.NewFakeServer(nil)
 	defer kbSrv.Close()
+	exaSrv := exatest.NewFakeServer()
+	defer exaSrv.Close()
 
 	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
 		t.Run(tt.Flag, func(t *testing.T) {
@@ -392,6 +397,9 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 			full := workerArgs(modelSrv, searchSrv, "-o", "none",
 				"--fleet-knowledge-provider", "billet",
 				"--fleet-knowledge-endpoint", kbSrv.URL(),
+				"--fleet-fetch-provider", "exa",
+				"--fleet-exa-endpoint", exaSrv.URL(),
+				"--fleet-exa-key-ref", "secret://EXA_KEY",
 			)
 			var args []string
 			for i := 0; i < len(full); i++ {
@@ -417,7 +425,7 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 			}
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(kbSrv.Requests()) != 0 {
+	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(kbSrv.Requests()) != 0 || len(exaSrv.Requests()) != 0 {
 		t.Error("a worker run missing an endpoint must not dial any endpoint")
 	}
 }

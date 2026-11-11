@@ -11,6 +11,7 @@ const (
 	EnvFleetModelEndpoint     = "CHIRON_FLEET_MODEL_ENDPOINT"
 	EnvFleetSearchEndpoint    = "CHIRON_FLEET_SEARCH_ENDPOINT"
 	EnvFleetKnowledgeEndpoint = "CHIRON_FLEET_KNOWLEDGE_ENDPOINT"
+	EnvFleetExaEndpoint       = "CHIRON_FLEET_EXA_ENDPOINT"
 )
 
 // FleetEndpoint is one credential-bearing fleet endpoint with the flag and
@@ -26,21 +27,29 @@ type FleetEndpoint struct {
 	Env string
 	// Value points at the field in the FleetConfig passed to FleetEndpoints.
 	Value *string
+	// Needed reports whether a run configured as f uses this endpoint; nil
+	// means always. A variable whose endpoint is not needed is neither read
+	// nor validated.
+	Needed func(f *FleetConfig) bool
 }
 
-// FleetEndpoints returns f's credential-bearing endpoints: model, search and
-// knowledge, in that order.
+// FleetEndpoints returns f's credential-bearing endpoints: model, search,
+// knowledge and Exa, in that order.
 func FleetEndpoints(f *FleetConfig) []FleetEndpoint {
 	return []FleetEndpoint{
 		{Field: "fleet.model_endpoint", Flag: "fleet-model-endpoint", Env: EnvFleetModelEndpoint, Value: &f.ModelEndpoint},
-		{Field: "fleet.search_endpoint", Flag: "fleet-search-endpoint", Env: EnvFleetSearchEndpoint, Value: &f.SearchEndpoint},
-		{Field: "fleet.knowledge_endpoint", Flag: "fleet-knowledge-endpoint", Env: EnvFleetKnowledgeEndpoint, Value: &f.KnowledgeEndpoint},
+		{Field: "fleet.search_endpoint", Flag: "fleet-search-endpoint", Env: EnvFleetSearchEndpoint, Value: &f.SearchEndpoint,
+			Needed: func(f *FleetConfig) bool { return f.SearchProviderOrDefault() == SearchMCP }},
+		{Field: "fleet.knowledge_endpoint", Flag: "fleet-knowledge-endpoint", Env: EnvFleetKnowledgeEndpoint, Value: &f.KnowledgeEndpoint,
+			Needed: func(f *FleetConfig) bool { return f.KnowledgeProvider != "" }},
+		{Field: "fleet.exa_endpoint", Flag: "fleet-exa-endpoint", Env: EnvFleetExaEndpoint, Value: &f.ExaEndpoint,
+			Needed: func(f *FleetConfig) bool { return f.UsesExa() }},
 	}
 }
 
 // DecodeBase strictly decodes a base config (a --config file or piped stdin,
-// JSON or YAML) over the defaults and refuses one naming any fleet endpoint,
-// whatever its agent. Flags overlay the base afterwards, so a flag setting
+// JSON or YAML) over the defaults and refuses one naming any fleet endpoint
+// or turning on fleet.search_send_objective, whatever its agent. Flags overlay the base afterwards, so a flag setting
 // the same endpoint cannot rescue it. The error never echoes the value.
 func DecodeBase(r io.Reader) (ResearchConfig, error) {
 	cfg, err := decode(r)
@@ -52,6 +61,10 @@ func DecodeBase(r io.Reader) (ResearchConfig, error) {
 			return ResearchConfig{}, fmt.Errorf("%s: must not come from a base config (--config or piped stdin), because a shared config must not choose where credentials are sent; pass --%s or set %s instead",
 				e.Field, e.Flag, e.Env)
 		}
+	}
+	if cfg.Fleet.SearchSendObjective {
+		return ResearchConfig{}, fmt.Errorf("fleet.search_send_objective: must not come from a base config (--config or piped stdin), because a shared config must not choose to send the research question to a search provider; pass --%s instead",
+			FlagSearchSendObjective)
 	}
 	return cfg, nil
 }

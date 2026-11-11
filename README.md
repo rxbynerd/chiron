@@ -53,7 +53,7 @@ chiron follow-up <interaction-id> --query "..."
 | Flag | Default | Notes |
 | --- | --- | --- |
 | `--query` / positional | — | The research question. |
-| `--agent` | `deep-research` | `deep-research-max` (tier table below), or `worker` for the in-process research loop (section below). `fleet` is reserved and not yet implemented. |
+| `--agent` | `deep-research` | `deep-research-max` (tier table below), `worker` for the in-process research loop, or `fleet` for the opt-in multi-worker orchestrator (sections below). |
 | `--plan` | off | Collaborative planning: review and refine the plan before spending. |
 | `--accept-plan` | off | With `--plan`, approve the first proposed plan without prompting. |
 | `--model` | adapter default | Follow-up Q&A model (`chiron follow-up`). |
@@ -68,7 +68,7 @@ chiron follow-up <interaction-id> --query "..."
 | `--out <path>` | stdout | Write the Markdown report (and chart assets) to a file. |
 | `--config <path>` | — | Base `ResearchConfig`; `-` or piped stdin for composition. |
 | `--api-key-ref` | `secret://GEMINI_API_KEY` | Never a literal key. |
-| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; the worker uses `--fleet-ceiling`). |
+| `--budget <gbp>` | unset | Block the run before any spend if the estimate exceeds the cap (deep-research tiers; `worker` and `fleet` use `--fleet-ceiling`). |
 | `--timeout <dur>` | `30m` | Wall-clock; hard cap 60m (the agent's own limit). |
 
 All four commands accept the same flag surface; configuration resolves
@@ -174,18 +174,23 @@ chiron research --agent worker \
 | `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
 | `--fleet-search-tool` | `search` | MCP tool the search client invokes; change it for a search server that names its tool differently. |
 | `--fleet-search-query-arg` | `query` | Argument key the search query is passed under; change it to match the configured tool. |
+| `--fleet-search-provider` | `mcp` | Who runs web searches: `mcp` (the server at `--fleet-search-endpoint`) or `exa`. |
+| `--fleet-fetch-provider` | `direct` | Who fetches pages: `direct` (Chiron's own SSRF-guarded client) or `exa`. |
+| `--fleet-exa-endpoint` | — | Exa API base URL, normally `https://api.exa.ai`; same scheme rule. Required when either provider is `exa`, from this flag or `CHIRON_FLEET_EXA_ENDPOINT`, never a base config. |
+| `--fleet-exa-key-ref` | — | `secret://` reference to the Exa key, which serves both roles. Required when either provider is `exa`. |
+| `--fleet-search-send-objective` | `false` | Send the research question to Exa with each search (`exa` search only). |
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
-| `--fleet-ceiling` | `0` | Estimated-cost cap in GBP; needs both price flags. |
+| `--fleet-ceiling` | `0` | Model-token cost cap in GBP; needs both price flags. Web-provider spend is not counted. |
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
-| `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction. |
+| `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction; with Exa fetch, also the page's character bound (at most 1,000,000). |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
 | `--fleet-knowledge-endpoint` | — | Knowledge store base URL; same scheme rule. Required with a provider, from this flag or `CHIRON_FLEET_KNOWLEDGE_ENDPOINT`, never a base config. |
 | `--fleet-knowledge-key-ref` | — | `secret://` reference to the knowledge store key; required for `alexandria`, optional for `billet`. |
 | `--fleet-knowledge-space` | — | Alexandria space slug to scope recalls to (`alexandria` only). |
 | `--fleet-knowledge-limit` | `5` | Hits per recall, 1 to 20. |
-| `--fleet-knowledge-remember` | `false` | Save each completed finding back to the store (`billet` only). |
+| `--fleet-knowledge-remember` | `false` | Save each completed finding back to the store (`billet` only; rejected for `--agent fleet`). |
 
 The worker keeps the v1 money rules: the paid model call is never
 auto-retried, the interaction id (a local `wkr_` handle) is emitted before
@@ -195,9 +200,27 @@ destination, a binary page) are fed back to the model so it can choose
 another source; three consecutive failures end the run `failed`. The
 `wkr_` handle is not a resume token: `chiron get` and `chiron follow-up`
 refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
-`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`,
-`--template`) are rejected for the worker rather than silently ignored.
+`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`) are
+rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
+
+`--template <path>` is honoured by the worker, but it replaces only the
+"Required output format" block of the worker's system prompt: it can ask
+for sections, tables or tone, while the actions, source rules and
+citation rules stay Chiron's. It uses the same `text/template` grammar as
+the deep-research template, and `{{.Query}}` is available but optional,
+because the query already has its own section of the prompt. The file is
+limited to 8 KiB because the block is re-sent on every turn. It is
+checked at startup: a file that is too large, not UTF-8, unparsable,
+names an unknown field or renders blank fails before any request. The
+same 8 KiB bound is re-checked against the real query when a run starts,
+so a template that only exceeds it once the query is substituted still
+fails before any request, not partway through the run. Any `<<<` in the
+rendered block is spaced out, as in retrieved text, so it cannot mimic the
+tool-result fence.
+Each turn emits a `delta` event (`type: worker_turn`, with the turn, action,
+a scrubbed target and tokens so far) on stderr between `interaction_created`
+and `run_completed`, unless `--quiet`.
 
 The endpoints come only from their flags or from
 `CHIRON_FLEET_MODEL_ENDPOINT`, `CHIRON_FLEET_SEARCH_ENDPOINT` and
@@ -209,6 +232,40 @@ first model call the run names its destinations on stderr, by scheme and
 host only, in one `delta` event:
 `{"endpoints":{"model":"https://api.openai.com","search":"https://search.example.com"}}`,
 with a `knowledge` entry when a knowledge store is configured.
+
+#### Searching and fetching through Exa
+
+Exa can serve either web role, or both, instead of an MCP search server and
+Chiron's own page fetches. Exa crawls the pages from its own infrastructure,
+so target sites see Exa's agent, not Chiron's.
+
+```sh
+export MODEL_KEY=... EXA_KEY=...
+export CHIRON_FLEET_EXA_ENDPOINT=https://api.exa.ai
+chiron research --agent worker \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-provider exa --fleet-fetch-provider exa \
+  --fleet-exa-key-ref secret://EXA_KEY \
+  --query "Competitive landscape of 10BASE-T1L PHY vendors" --out report.md
+```
+
+Every search query, and every fetched URL with its query string, goes to
+Exa; the research question goes too only with
+`--fleet-search-send-objective`, which only the final stage's flag can set.
+Exa has no built-in endpoint: name it with `--fleet-exa-endpoint` or
+`CHIRON_FLEET_EXA_ENDPOINT`, as for the model. While the variable is
+exported, any base config can select Exa, so export it only for the runs
+that should use it.
+URLs carrying credentials or naming internal or local hosts are refused
+before anything is sent. The report's front matter records the provider
+(`tools: ['web_search:exa', 'web_fetch:exa']`) and Exa's reported cost as
+`web_cost_usd`, separate from the GBP model estimate; when a call's cost
+was not reported, `web_cost_unknown_calls` counts it and `web_cost_usd` is
+a lower bound. A rejected key or an exhausted Exa balance ends the run
+`failed` at once. The endpoints event names Exa's origin for `search` and
+adds a `fetch` entry.
 
 #### Organisational knowledge (Billet, Alexandria)
 
@@ -237,6 +294,69 @@ chiron research --agent worker \
 A recalled Billet memory the answer relies on is listed under Sources as
 its title and `billet://memory/<id>` locator, not as a link. Recalls count
 towards the same three-strike tool-failure bound as search and fetch.
+
+### The in-process fleet (`--agent fleet`)
+
+`--agent fleet` puts a lead in front of several workers. One lead call
+splits the question into three to five briefs, each aimed at the external
+web; a bounded pool runs one worker per brief, each the same loop as
+`--agent worker` under the same per-worker flags and caps; and the lead
+writes one synthesised report from the findings, then attributes its
+claims to the sources the workers cited. The lead and every worker share
+the one model endpoint and key.
+
+The fleet is opt-in and is not the default: a run costs several workers
+plus three lead calls, so expect a multiple of a single worker's spend.
+The eval gate that would compare it with Gemini Deep Research has not yet
+run, so `deep-research` stays the default and `worker` stays the
+single-loop path.
+
+```sh
+chiron research --agent fleet --fleet-memory inmemory \
+  --fleet-max-workers 5 --fleet-concurrency 3 \
+  --fleet-model-endpoint https://api.openai.com/v1 \
+  --fleet-model-name gpt-5.5 \
+  --fleet-model-key-ref secret://MODEL_KEY \
+  --fleet-search-endpoint https://search.example.com/mcp \
+  --query "How do air-source heat pumps compare with gas boilers for UK homes?" --out report.md
+```
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--fleet-memory` | `noop` | Must be `inmemory` for the fleet: the plan and each finding pass between the lead and its workers by reference through an in-process store, dropped when the run ends. Ignored by `worker`. |
+| `--fleet-max-workers` | `5` | Most briefs dispatched. A brief past the cap is dropped and listed as a gap, and the run ends `incomplete`. |
+| `--fleet-concurrency` | `3` | Most workers running at once; at most `--fleet-max-workers`. |
+
+The worker's money rules hold across the fleet. No lead or worker model
+call is ever auto-retried. Each worker is bounded by `--fleet-max-turns`,
+`--fleet-max-tokens`, `--fleet-ceiling` and `--fleet-worker-timeout`, so
+the workers' worst case is `--fleet-max-workers` times one worker's caps.
+Each lead call is a single attempt whose completion is capped at 16,384
+tokens. The report's tokens and estimated cost are the one rollup of every
+lead and worker call. The run ends `failed` when no worker produced a
+finding (a decomposition the lead cannot use fails before any worker
+runs), `incomplete` when a brief yielded no finding or only a partial one,
+or when synthesis or citation degraded, and `completed` otherwise.
+
+When `--timeout` ends a fleet run, no report is emitted and the command
+exits 1, because the report is written on the run's context, which has
+ended. If the lead has recorded its outcome by then, the fleet logs that
+outcome's spend to stderr instead, as one warning line. That includes an
+outcome stitched from the findings because the deadline cut off synthesis
+or citation. The line carries the `flt_` id, status, tokens, search count
+and estimated cost, never report or finding text. `--agent worker` also
+emits no report when `--timeout` ends it, and it logs no spend. An
+interrupt (Ctrl-C) ends either agent at once, with neither a report nor a
+spend line.
+
+The interaction id is a local `flt_` handle, emitted before the first
+call; like `wkr_`, it is not a resume token, so `chiron get` and
+`chiron follow-up` refuse it. Each worker turn emits the `worker_turn`
+delta described above, with a `worker_id` field and the text prefixed by
+the worker it came from. `--template` shapes the lead's synthesis only,
+under the worker template's rules; workers keep the built-in format for
+their findings. Workers can recall from a configured knowledge store, but
+`--fleet-knowledge-remember` is rejected for the fleet.
 
 ### Exit codes
 
@@ -277,8 +397,8 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 | `GEMINI_API_KEY` | The API key, read via the default `secret://GEMINI_API_KEY` reference. Any `secret://env/NAME` or `secret://file/<absolute path>` reference works instead. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Standard OpenTelemetry configuration; naming an endpoint enables the OTel tracer (spans + per-run metrics). Absent, tracing is a no-op. |
 | `CHIRON_GEMINI_BASE_URL` | Overrides the Gemini API endpoint **for tests only**: the key is sent to whatever this names, so it is validated at startup — absolute `https://` anywhere, `http://` for loopback hosts only. Never set it in production; absence is the safe default. |
-| `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Never set it in production. |
-| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` | The worker's model, search and knowledge store endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. The knowledge variable is read only with a knowledge provider. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
+| `CHIRON_FETCH_ALLOW_LOOPBACK` | Set to exactly `1`, lets the worker's direct `web_fetch` reach loopback hosts **for tests only**. Any other value is a startup error; it never relaxes the private-network or metadata refusals. Read only with `--fleet-fetch-provider direct`. Never set it in production. |
+| `CHIRON_FLEET_MODEL_ENDPOINT` / `CHIRON_FLEET_SEARCH_ENDPOINT` / `CHIRON_FLEET_KNOWLEDGE_ENDPOINT` / `CHIRON_FLEET_EXA_ENDPOINT` | The worker's model, search, knowledge store and Exa endpoints when the matching `--fleet-*-endpoint` flag is unset. The matching key is sent to whatever these name, so they are validated at startup with the `CHIRON_GEMINI_BASE_URL` rule. Each is read only when the run uses its endpoint: the search variable with MCP search, the knowledge variable with a knowledge provider, the Exa variable when a web role uses Exa. Unlike the two entries above, these are a production deployment mechanism: set them as operator-supplied configuration. |
 
 ## Documents
 

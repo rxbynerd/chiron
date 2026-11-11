@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,11 @@ import (
 // costs the recorded Finding. Unlike the Gemini adapter, the id is a local
 // handle, not a durable resume token: a crashed in-process run cannot be
 // recovered by `chiron get <id>`.
+//
+// The loop can finish a turn before the run core has emitted the id Start
+// returned, so deps.Progress deliveries for a run are held until Await is
+// first entered for it; a delivery still held at its progress deadline is
+// dropped, never reordered.
 type Worker struct {
 	deps WorkerDeps
 
@@ -43,11 +49,14 @@ type Worker struct {
 // closed once finding and completed are stored, before any save-back; done is
 // closed once the run, save-back included, has finished. finding and
 // completed are written only before loopDone closes. cancel stops the loop
-// early.
+// early. awaiting is the progress gate, closed once by the first Await.
 type workerState struct {
 	query   string
 	started time.Time
 	cancel  context.CancelFunc
+
+	awaiting     chan struct{}
+	awaitingOnce sync.Once
 
 	loopDone  chan struct{}
 	done      chan struct{}
@@ -73,17 +82,8 @@ func IsWorkerInteractionID(id string) bool {
 // misconfigured worker fails at the composition root rather than mid-run after
 // a resume handle has been emitted.
 func NewWorker(deps WorkerDeps) (*Worker, error) {
-	if deps.Model == nil {
-		return nil, errWorkerNoModel
-	}
-	if deps.Search == nil {
-		return nil, errors.New("fleet: worker requires a search client")
-	}
-	if deps.Fetch == nil {
-		return nil, errors.New("fleet: worker requires a fetch client")
-	}
-	if deps.Caps.MaxTurns <= 0 {
-		return nil, fmt.Errorf("fleet: worker requires a positive turn cap, got %d", deps.Caps.MaxTurns)
+	if err := checkWorkerDeps(deps); err != nil {
+		return nil, err
 	}
 	return &Worker{
 		deps: deps,
@@ -91,10 +91,44 @@ func NewWorker(deps WorkerDeps) (*Worker, error) {
 	}, nil
 }
 
+// checkWorkerDeps validates the collaborators and cap every worker loop
+// needs; the Worker and the fleet's worker pool both apply it at
+// construction.
+func checkWorkerDeps(deps WorkerDeps) error {
+	switch {
+	case deps.Model == nil:
+		return errWorkerNoModel
+	case isNil(deps.Search):
+		return errors.New("fleet: worker requires a search client")
+	case isNil(deps.Fetch):
+		return errors.New("fleet: worker requires a fetch client")
+	case deps.Caps.MaxTurns <= 0:
+		return fmt.Errorf("fleet: worker requires a positive turn cap, got %d", deps.Caps.MaxTurns)
+	}
+	return nil
+}
+
+// isNil reports whether v is nil or an interface holding a nil pointer, so a
+// provider bound as a typed nil is refused at construction rather than
+// panicking on its first call.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
+}
+
 // Start implements researcher.Researcher. It builds a Brief from the query,
-// allocates an opaque local id, launches RunWorker in a goroutine, and returns
-// the id immediately. A follow-up (PreviousInteractionID set) is rejected
-// before any work starts: the worker has no stored interaction chain.
+// with deps.ReportTemplate rendered as its OutputFormat when set, allocates an
+// opaque local id, launches RunWorker in a goroutine, and returns the id
+// immediately. A follow-up (PreviousInteractionID set) is rejected before any
+// work starts, because the worker has no stored interaction chain; so is a
+// template that fails to render.
 //
 // The run is detached from the Start context's cancellation (the run core
 // scopes that context to the start phase) and given its own cancel, which
@@ -106,8 +140,16 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	if task.PreviousInteractionID != "" {
 		return "", errors.New("fleet: the in-process worker does not support follow-up interactions")
 	}
+	brief := Brief{Objective: task.Query}
+	if w.deps.ReportTemplate != nil {
+		format, err := w.deps.ReportTemplate.Render(task.Query)
+		if err != nil {
+			return "", err
+		}
+		brief.OutputFormat = format
+	}
 
-	id, err := newInteractionID()
+	id, err := newInteractionID(InteractionIDPrefix)
 	if err != nil {
 		return "", err
 	}
@@ -117,6 +159,7 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		query:    task.Query,
 		started:  time.Now(),
 		cancel:   cancel,
+		awaiting: make(chan struct{}),
 		loopDone: make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -124,7 +167,6 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 	w.runs[id] = st
 	w.mu.Unlock()
 
-	brief := Brief{Objective: task.Query}
 	after := func(ctx context.Context, f Finding, span trace.Span) {
 		st.finding = f
 		st.completed = time.Now()
@@ -132,12 +174,29 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 		w.rememberFinding(ctx, id, brief.Objective, f, span)
 	}
 	go func() {
+		defer close(st.done)
 		defer cancel()
-		runWorker(runCtx, w.deps, brief, after)
-		close(st.done)
+		defer st.recoverPanic()
+		runWorker(runCtx, w.deps, brief, st.awaiting, after)
 	}()
 
 	return id, nil
+}
+
+// recoverPanic, deferred by the run's goroutine, recovers a panic so it
+// cannot take the process down. A Finding already recorded is kept;
+// otherwise the run records a Failed Finding under panicRecoveryDetail.
+func (st *workerState) recoverPanic() {
+	if recover() == nil {
+		return
+	}
+	select {
+	case <-st.loopDone:
+	default:
+		st.finding = Finding{Status: types.StatusFailed, Detail: panicRecoveryDetail}
+		st.completed = time.Now()
+		close(st.loopDone)
+	}
 }
 
 // Await implements researcher.Researcher: block until the run for id
@@ -145,13 +204,15 @@ func (w *Worker) Start(ctx context.Context, task researcher.Task) (string, error
 // the run is cancelled so no further paid turns are taken, and the context
 // error is returned. If ctx ends after the loop has recorded its Finding,
 // Await returns nil: the finding is complete and paid for, and the save-back
-// continues under its own rememberTimeout. An unknown id is a programming
-// fault, not a user condition.
+// continues under its own rememberTimeout. Entering Await releases the run's
+// held progress deliveries. An unknown id is a programming fault, not a user
+// condition.
 func (w *Worker) Await(ctx context.Context, id string) error {
 	st, err := w.state(id)
 	if err != nil {
 		return err
 	}
+	st.awaitingOnce.Do(func() { close(st.awaiting) })
 	select {
 	case <-st.done:
 		return nil
@@ -229,11 +290,12 @@ func (w *Worker) state(id string) (*workerState, error) {
 const agentWorker = "worker"
 
 // workerTools is the tool set recorded on a worker Interaction: the read-only
-// web tools the loop dispatches, the knowledge store recall when configured,
-// and knowledge_remember when the finding is saved back, so an operator
-// reading the Interaction sees the write.
+// web tools the loop dispatches, qualified with a non-default provider, the
+// knowledge store recall when configured, and knowledge_remember when the
+// finding is saved back, so an operator reading the Interaction sees where
+// queries, URLs and findings went.
 func workerTools(deps WorkerDeps) []string {
-	tools := []string{"web_search", "web_fetch"}
+	tools := []string{qualifiedTool("web_search", deps.SearchProvider), qualifiedTool("web_fetch", deps.FetchProvider)}
 	if deps.Knowledge != nil {
 		tools = append(tools, "knowledge_recall")
 	}
@@ -241,6 +303,14 @@ func workerTools(deps WorkerDeps) []string {
 		tools = append(tools, "knowledge_remember")
 	}
 	return tools
+}
+
+// qualifiedTool names tool as tool:provider when provider is set.
+func qualifiedTool(tool, provider string) string {
+	if provider == "" {
+		return tool
+	}
+	return tool + ":" + provider
 }
 
 // Save-back bounds. rememberTimeout also bounds how long a slow store can
@@ -335,11 +405,12 @@ func boundRunes(s string, n int) string {
 }
 
 // newInteractionID mints an opaque, unguessable local id for one in-process
-// run. 128 bits of randomness makes collisions within a process negligible.
-func newInteractionID() (string, error) {
+// run, under the researcher's prefix. 128 bits of randomness makes collisions
+// within a process negligible.
+func newInteractionID(prefix string) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("fleet: generating interaction id: %w", err)
 	}
-	return InteractionIDPrefix + hex.EncodeToString(b[:]), nil
+	return prefix + hex.EncodeToString(b[:]), nil
 }

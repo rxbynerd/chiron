@@ -13,12 +13,13 @@
 # block instead.
 #
 # The endpoints the keys are sent to never come from a config file: a
-# base config naming model_endpoint, search_endpoint or knowledge_endpoint
-# is refused. Supply each with its flag (--fleet-model-endpoint,
-# --fleet-search-endpoint, --fleet-knowledge-endpoint) or environment
-# variable (CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT,
-# CHIRON_FLEET_KNOWLEDGE_ENDPOINT); a set flag wins. Endpoints must be
-# absolute https:// (http:// for loopback only).
+# base config naming model_endpoint, search_endpoint, knowledge_endpoint or
+# exa_endpoint is refused. Supply each with its flag (--fleet-model-endpoint,
+# --fleet-search-endpoint, --fleet-knowledge-endpoint, --fleet-exa-endpoint)
+# or environment variable (CHIRON_FLEET_MODEL_ENDPOINT,
+# CHIRON_FLEET_SEARCH_ENDPOINT, CHIRON_FLEET_KNOWLEDGE_ENDPOINT,
+# CHIRON_FLEET_EXA_ENDPOINT); a set flag wins. Endpoints must be absolute
+# https:// (http:// for loopback only).
 agent: worker
 output: text
 timeout: 30m
@@ -31,6 +32,15 @@ fleet:
   # tool or query argument differently.
   # search_tool: web_search
   # search_query_arg: q
+  # Exa can search and fetch instead (README, "Searching and fetching
+  # through Exa"). Uncomment, drop search_key_ref above, and supply the
+  # endpoint with --fleet-exa-endpoint or CHIRON_FLEET_EXA_ENDPOINT
+  # (https://api.exa.ai). Queries and fetched URLs then go to Exa.
+  # search_provider: exa              # or mcp (default)
+  # fetch_provider: exa               # or direct (default)
+  # exa_key_ref: secret://EXA_KEY     # one key for both roles
+  # Sending the research question with each search is per run only:
+  # pass --fleet-search-send-objective; a config file cannot set it.
   max_turns: 8
   max_tokens: 400000
   worker_timeout: 5m
