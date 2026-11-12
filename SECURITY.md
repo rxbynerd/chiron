@@ -19,9 +19,10 @@ machinery.
   permissions admit group or world access trigger a warning.
 - A credential-pattern scrubber (`secret.Scrub`: header forms, bearer
   tokens, Google API key shapes, a high-entropy backstop) wraps every
-  output path — the slog handler, both tracer bindings, the CLI's stderr
-  error line, and streamed thought-summary deltas, which can quote
-  credentials found in `--input` documents back out.
+  output path — the slog handler, the OpenTelemetry tracer and the JSONL
+  tracer that tests use, the CLI's stderr error line, and streamed
+  thought-summary deltas, which can quote credentials found in `--input`
+  documents back out.
 
 ## Network
 
@@ -47,9 +48,10 @@ machinery.
 
 - The dependency surface is deliberately minimal and auditable: stdlib,
   cobra (+pflag), yaml.v3, and the OpenTelemetry SDK (justified in
-  `docs/DECISIONS.md`). Provider adapters are hand-rolled `net/http`
-  against documented REST APIs — no vendor AI SDKs — so every line that
-  touches a credential is in this repository.
+  `docs/DECISIONS.md`), plus testify, which only tests import. Provider
+  adapters are hand-rolled `net/http` against documented REST APIs — no
+  vendor AI SDKs — so every line that touches a credential is in this
+  repository.
 - CI actions are pinned to full commit SHAs, not mutable tags.
 
 ## Reporting a vulnerability
