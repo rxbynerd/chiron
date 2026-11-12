@@ -13,17 +13,31 @@ proposal. Documentation uses en-GB spelling and no emojis.
 ## Build and verify
 
 ```sh
-just build        # go build -o bin/chiron ./cmd/chiron
-just test         # go test ./...
+just build        # go build -o bin/chiron ./cmd/chiron, stamped with the git version
+just test         # go test -race -shuffle=on ./...
+just cover        # the same tests with a coverage profile; prints the total
 just vet          # go vet ./...
-just lint         # golangci-lint if installed, else go vet
-just ci           # everything CI runs
-just proto-lint   # lint + compile-check proto/chiron/v1 (needs buf)
-just proto        # generate Go from the proto module (output not committed)
+just lint         # golangci-lint run ./...; fails if golangci-lint is missing
+just fmt-check    # golangci-lint fmt --diff ./...; read-only, fails on a difference
+just tidy-check   # go mod tidy -diff; read-only, fails on drift
+just ci           # everything CI runs, in its read-only form
+just proto-lint   # lint + compile-check proto/chiron/v1 (buf, pinned in the Justfile)
+just proto        # generate Go from the proto module (output not committed; needs buf)
+just fmt          # apply gofmt and goimports in place; WRITES to tracked files
 ```
 
-CI (`.github/workflows/ci.yml`) runs build, vet, test, and golangci-lint,
-with actions pinned to full commit SHAs.
+CI (`.github/workflows/ci.yml`) runs build, a stamped build, vet, shuffled
+race tests with a coverage summary, the `go.mod` tidy check, golangci-lint,
+the format check and the Buf lint, with actions pinned to full commit SHAs.
+`just ci` runs the same checks in the same read-only form. `just lint` and
+`just ci` fail when `golangci-lint` is not installed, and warn when its
+version differs from the one `ci.yml` pins, so a green result always means
+the linter ran.
+
+Three commands write to the working tree: `golangci-lint fmt` without
+`--diff` (`just fmt`), `golangci-lint run --fix`, and `go mod tidy` without
+`-diff`. Verification and review runs use `just fmt-check` and
+`just tidy-check`; use the writing forms only on your own delivery branch.
 
 ## Per-package map
 
