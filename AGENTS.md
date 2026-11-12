@@ -21,6 +21,7 @@ just lint         # golangci-lint run ./...; fails if golangci-lint is missing
 just fmt-check    # golangci-lint fmt --diff ./...; read-only, fails on a difference
 just tidy-check   # go mod tidy -diff; read-only, fails on drift
 just binary-deps-check  # fails when the chiron binary links a test-only package
+just vuln         # govulncheck ./... (pinned in the Justfile); needs network
 just ci           # everything CI runs, in its read-only form
 just proto-lint   # lint + compile-check proto/chiron/v1 (buf, pinned in the Justfile)
 just proto        # generate Go from the proto module (output not committed; needs buf)
@@ -29,8 +30,8 @@ just fmt          # apply gofmt and goimports in place; WRITES to tracked files
 
 CI (`.github/workflows/ci.yml`) runs build, a stamped build, vet, shuffled
 race tests with a coverage summary, the `go.mod` tidy check, a check that
-the binary links no test-only package, golangci-lint,
-the format check and the Buf lint, with actions pinned to full commit SHAs.
+the binary links no test-only package, golangci-lint, the format check, the
+Buf lint and a `govulncheck` scan, with actions pinned to full commit SHAs.
 `just ci` runs the same checks in the same read-only form. `just lint` and
 `just ci` fail when `golangci-lint` is not installed, and warn when its
 version differs from the one `ci.yml` pins, so a green result always means

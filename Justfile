@@ -6,6 +6,7 @@
 
 version_pkg := "github.com/rxbynerd/chiron/internal/version"
 buf := "go run github.com/bufbuild/buf/cmd/buf@v1.75.0"
+govulncheck := "go run golang.org/x/vuln/cmd/govulncheck@v1.9.0"
 
 # Build the chiron binary into ./bin, stamped with its git version.
 build:
@@ -64,8 +65,12 @@ tidy-check:
 binary-deps-check:
     ./scripts/check-binary-deps.sh
 
+# Fail when the code reaches a known vulnerability (needs network).
+vuln:
+    {{govulncheck}} ./...
+
 # Everything CI runs, in its read-only form.
-ci: require-golangci-lint build binary-deps-check vet test fmt-check lint tidy-check proto-lint
+ci: require-golangci-lint build binary-deps-check vet test fmt-check lint tidy-check proto-lint vuln
 
 # Lint and compile-check the proto/chiron/v1 Buf module.
 proto-lint:
