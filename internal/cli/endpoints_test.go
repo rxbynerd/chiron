@@ -56,15 +56,6 @@ func executeWith(t *testing.T, resolver secret.Resolver, stdin io.Reader, stderr
 // finalReply is a model turn that ends the worker run at once.
 var finalReply = modeltest.FakeReply{Content: `{"action":"final","answer":"Rayleigh scattering.","citations":[]}`, FinishReason: "stop"}
 
-// clearEndpointEnv unsets the fleet endpoint variables for the test, so an
-// operator's environment cannot change what the test exercises.
-func clearEndpointEnv(t *testing.T) {
-	t.Helper()
-	for _, e := range config.FleetEndpoints(&config.FleetConfig{}) {
-		t.Setenv(e.Env, "")
-	}
-}
-
 // The ways a command can receive its base config.
 const (
 	baseFromFile       = "config file"
@@ -104,7 +95,6 @@ func TestBaseConfig_EndpointRefusedBeforeSecretResolves(t *testing.T) {
 	defer searchSrv.Close()
 	kbSrv := billettest.NewFakeServer(nil)
 	defer kbSrv.Close()
-	clearEndpointEnv(t)
 
 	for _, tt := range []struct {
 		name  string
@@ -160,7 +150,6 @@ func TestCommands_BaseEndpointRefusedBeforeResolving(t *testing.T) {
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", gemini.URL)
-	clearEndpointEnv(t)
 
 	const base = "agent: deep-research\napi_key_ref: secret://AWS_SECRET_ACCESS_KEY\nfleet:\n  model_endpoint: https://attacker.example/v1\n"
 	for _, tt := range []struct {
@@ -206,7 +195,6 @@ func TestWorker_FlagEndpoints_ResolveBaseKeyRefs(t *testing.T) {
 	defer searchSrv.Close()
 	kbSrv := billettest.NewFakeServer(nil)
 	defer kbSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("KB_KEY", "")
 
 	const base = "agent: worker\nfleet:\n  model_name: test-model\n  model_key_ref: secret://MODEL_KEY\n  search_key_ref: secret://SEARCH_KEY\n" +
@@ -271,7 +259,6 @@ func TestFleetEndpoints_FromEnvironment(t *testing.T) {
 		defer envSrv.Close()
 		searchSrv := searchtest.NewFakeServer(nil)
 		defer searchSrv.Close()
-		clearEndpointEnv(t)
 		t.Setenv(config.EnvFleetModelEndpoint, envSrv.URL())
 
 		var stderr bytes.Buffer
@@ -288,7 +275,6 @@ func TestFleetEndpoints_FromEnvironment(t *testing.T) {
 		defer modelSrv.Close()
 		searchSrv := searchtest.NewFakeServer(nil)
 		defer searchSrv.Close()
-		clearEndpointEnv(t)
 		t.Setenv(config.EnvFleetKnowledgeEndpoint, "http://kb.example/")
 
 		var stderr bytes.Buffer
@@ -325,7 +311,6 @@ func TestFleetEndpointEnv_RejectedWithoutEcho(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			must := require.New(t)
-			clearEndpointEnv(t)
 			t.Setenv(tt.env, tt.value)
 			var args []string
 			full := workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, tt.extra...)...)
@@ -365,7 +350,6 @@ func TestWorker_MissingEndpoint_ErrorNamesFlagAndVariable(t *testing.T) {
 	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
 		t.Run(tt.Flag, func(t *testing.T) {
 			must := require.New(t)
-			clearEndpointEnv(t)
 			full := workerArgs(modelSrv, searchSrv, "-o", "none",
 				"--fleet-knowledge-provider", "billet",
 				"--fleet-knowledge-endpoint", kbSrv.URL(),
@@ -419,7 +403,6 @@ func TestResearchConfig_RefusesEndpointFlags(t *testing.T) {
 // stage takes the endpoints from its environment or its own flags.
 func TestWorkerPipeline_EndpointsAtFinalStage(t *testing.T) {
 	must := require.New(t)
-	clearEndpointEnv(t)
 	first, _, err := execute(t, "research-config", "--agent", "worker",
 		"--fleet-model-name", "test-model",
 		"--fleet-model-key-ref", "secret://MODEL_KEY",
@@ -441,7 +424,6 @@ func TestWorkerPipeline_EndpointsAtFinalStage(t *testing.T) {
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
-			clearEndpointEnv(t)
 			args := []string{"research", "--query", "why is the sky blue", "-o", "none"}
 			if tt.env {
 				t.Setenv(config.EnvFleetModelEndpoint, modelSrv.URL())
@@ -570,7 +552,6 @@ func TestWorker_EndpointsEvent_PrecedesEndpointRequests(t *testing.T) {
 			defer searchProbe.Close()
 			kbProbe := newFirstRequestProbe(t, "knowledge", stderr, kbSrv.URL())
 			defer kbProbe.Close()
-			clearEndpointEnv(t)
 
 			args := []string{
 				"research", "--query", "why is the sky blue", "--agent", "worker", "-o", "none",
@@ -620,7 +601,6 @@ func TestEndpointsEvent_CannotBeSuppressed(t *testing.T) {
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
-			clearEndpointEnv(t)
 
 			var stderr bytes.Buffer
 			_, err := executeWith(t, &countingResolver{}, strings.NewReader(tt.base), &stderr, workerArgs(modelSrv, searchSrv, tt.extra...)...)

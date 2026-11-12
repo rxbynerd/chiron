@@ -69,7 +69,6 @@ func TestWorker_ExaServesSearchAndFetch(t *testing.T) {
 	defer exaSrv.Close()
 	modelSrv := searchFetchFinal()
 	defer modelSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 	t.Setenv(config.EnvFleetSearchEndpoint, "http://search.invalid/not-loopback")
@@ -109,7 +108,6 @@ func TestWorker_MCPSearchWithExaFetch(t *testing.T) {
 	defer exaSrv.Close()
 	modelSrv := searchFetchFinal()
 	defer modelSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 
@@ -144,7 +142,6 @@ func TestWorker_ExaSearchSendsObjectiveWhenAsked(t *testing.T) {
 		finalReply,
 	)
 	defer modelSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 
@@ -169,7 +166,6 @@ func TestWorker_RejectedExaKeyEndsRunAtOnce(t *testing.T) {
 		modeltest.FakeReply{Content: `{"action":"search","query":"sky again"}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 
@@ -218,7 +214,6 @@ func TestWorker_ExaMisconfigurationRefused(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			must := require.New(t)
-			clearEndpointEnv(t)
 			resolver := &countingResolver{}
 			var stderr syncBuffer
 			_, err := executeWith(t, resolver, strings.NewReader(tt.stdin), &stderr, tt.args...)
@@ -267,7 +262,6 @@ func TestWorker_ExaSearchWithDirectFetch(t *testing.T) {
 		modeltest.FakeReply{Content: `{"action":"final","answer":"# Answer\n\nRayleigh scattering.","citations":[{"url":"` + page.URL + `","title":"Sky"}]}`, FinishReason: "stop"},
 	)
 	defer modelSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "1")
@@ -314,7 +308,6 @@ func TestExaEndpoint_FromEnvironment(t *testing.T) {
 		defer exaSrv.Close()
 		modelSrv := searchOnce()
 		defer modelSrv.Close()
-		clearEndpointEnv(t)
 		t.Setenv(config.EnvFleetExaEndpoint, exaSrv.URL())
 		t.Setenv("MODEL_KEY", "test-model-key")
 		t.Setenv("EXA_KEY", exaTestKey)
@@ -332,7 +325,6 @@ func TestExaEndpoint_FromEnvironment(t *testing.T) {
 		defer envSrv.Close()
 		modelSrv := searchOnce()
 		defer modelSrv.Close()
-		clearEndpointEnv(t)
 		t.Setenv(config.EnvFleetExaEndpoint, envSrv.URL())
 		t.Setenv("MODEL_KEY", "test-model-key")
 		t.Setenv("EXA_KEY", exaTestKey)
@@ -349,7 +341,6 @@ func TestExaEndpoint_FromEnvironment(t *testing.T) {
 		defer modelSrv.Close()
 		searchSrv := searchtest.NewFakeServer(nil)
 		defer searchSrv.Close()
-		clearEndpointEnv(t)
 		t.Setenv(config.EnvFleetExaEndpoint, "http://exa.invalid/not-loopback")
 		t.Setenv("MODEL_KEY", "test-model-key")
 
@@ -373,7 +364,6 @@ func TestEndpointsEvent_PrecedesFirstExaRequest(t *testing.T) {
 	stderr := &syncBuffer{}
 	exaProbe := newFirstRequestProbe(t, "exa", stderr, exaSrv.URL())
 	defer exaProbe.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 
@@ -403,7 +393,6 @@ func TestFleet_ExaServesEveryWorkerSearch(t *testing.T) {
 	defer modelSrv.Close()
 	exaSrv := exatest.NewFakeServer(exatest.WithResults(fleetSources), exatest.WithCostDollars(0.007))
 	defer exaSrv.Close()
-	clearEndpointEnv(t)
 	t.Setenv("MODEL_KEY", "test-model-key")
 	t.Setenv("EXA_KEY", exaTestKey)
 
