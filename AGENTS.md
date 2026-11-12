@@ -131,6 +131,48 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   connection open cannot leave the scanner blocked.
 - Table-test loop variables are named `tt`.
 
+## Writing tests
+
+The conventions match Stirrup's, so tests read the same in both
+repositories (see DECISIONS.md, 2026-11-12 entry).
+
+- **Assert with testify through a per-scope object.** Every function or
+  closure that asserts starts with `must := require.New(t)` (and
+  `check := assert.New(t)` where a soft assertion is wanted), then asserts
+  as `must.Equal(want, got)`. The object captures the `t` it was built
+  from, so each `t.Run` closure builds its own `must` from the subtest's
+  `t`; reusing the parent's object inside a subtest fails the parent
+  instead, and no linter catches it. The names `must` and `check` are
+  fixed across the suite. Pick the most specific form (`NoError`,
+  `ErrorIs`, `ErrorContains`, `Len`, `Empty`, `Contains`, `ElementsMatch`,
+  `EqualValues`, `JSONEq`, `WithinDuration`) rather than `True` over a
+  hand-written comparison. Hand-rolled `if got != want { t.Fatalf(...) }`
+  blocks and `reflect.DeepEqual` are not accepted in new tests.
+  `testifylint` runs under `just lint` and rejects swapped arguments,
+  `Equal` on errors and other common misuse.
+- **`require` stops the test; keep it on the test goroutine.** Inside
+  `go func` bodies, `httptest` handlers and any other callback that may
+  run off the test goroutine, use `check` or hand the failure back over a
+  channel; `must` there cannot stop the test correctly. Inside
+  `must.EventuallyWithT` the condition asserts through the `CollectT` it
+  receives (`require.NoError(c, err)`), never through the outer `must`.
+- **Name each test so it reads on its own.** Test names follow
+  `Test<Subject>_<Behaviour>[_<Detail>]`, for example
+  `TestConfig_Validate_RejectsUnknownAgent`. JUnit output loses the
+  package, so the name has to carry the subject. Subtest names are short
+  lowercase phrases. Names referenced from documentation or CI, such as
+  `TestLiveBillet` and `TestLiveExa`, are kept.
+- **Prefer subtests over loops with `t.Errorf`.** A table-driven test runs
+  each case under `t.Run` with the case's name and uses the subtest's own
+  `t` and its own `must`, so the first failure names the case and stops
+  there.
+- **Helpers build fixtures; assertions stay in the test.** A helper that
+  only wraps an assertion hides what the test checks. Keep helpers for
+  setup and teardown, mark them with `t.Helper()`, and use `t.TempDir`,
+  `t.Setenv` and `t.Cleanup` instead of manual equivalents.
+- **Comments describe the behaviour protected**, not the incident, pull
+  request or session that motivated the test.
+
 ## Security-sensitive environment variables
 
 - `CHIRON_GEMINI_BASE_URL` — overrides the Gemini API endpoint. The API
