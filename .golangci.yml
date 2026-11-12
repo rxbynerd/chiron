@@ -107,7 +107,11 @@ linters:
             - pkg: net/http/httptest
               desc: "httptest must not link into the chiron binary; put fakes in a <pkg>test package"
         no-test-packages-in-binary:
-          files: ["$all", "!$test", "!**/*test/*.go"]
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/*test/*.go"
+            - "!**/internal/testutil/**/*.go"
           deny:
             - pkg: github.com/rxbynerd/chiron/internal/mcpclient/mcpclienttest
               desc: "test double; production code must not import it"
@@ -121,6 +125,8 @@ linters:
               desc: "test double; production code must not import it"
             - pkg: github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa/exatest
               desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/testutil
+              desc: "test helper; production code must not import it"
         run-core-seams:
           files: ["**/internal/run/*.go", "!$test"]
           list-mode: strict
