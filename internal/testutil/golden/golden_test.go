@@ -65,6 +65,16 @@ func TestAssert_Match(t *testing.T) {
 	Assert(t, "a.txt", []byte("alpha\n"))
 }
 
+func TestAssert_Match_NestedName(t *testing.T) {
+	must := require.New(t)
+	inTempDir(t, "a.txt", "alpha\n")
+	must.NoError(os.MkdirAll(filepath.Join("testdata", "pages"), 0o755))
+	must.NoError(os.WriteFile(filepath.Join("testdata", "pages", "p.golden.txt"), []byte("page\n"), 0o644))
+	t.Setenv(updateEnv, "")
+
+	Assert(t, "pages/p.golden.txt", []byte("page\n"))
+}
+
 func TestCompare_Mismatch_FailsWithoutStoppingAndNamesFile(t *testing.T) {
 	must := require.New(t)
 	check := assert.New(t)
@@ -159,12 +169,21 @@ func TestCompare_Update_ReportsAnUnwritableTarget(t *testing.T) {
 }
 
 func TestCompare_RejectsAnyOtherNonEmptyValue(t *testing.T) {
-	for _, value := range []string{"0", "true", "yes", "2", " 1"} {
-		t.Run(value, func(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+	}{
+		{name: "zero", value: "0"},
+		{name: "true", value: "true"},
+		{name: "yes", value: "yes"},
+		{name: "another number", value: "2"},
+		{name: "padded one", value: " 1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			must := require.New(t)
 			check := assert.New(t)
 			inTempDir(t, "a.txt", "alpha\n")
-			t.Setenv(updateEnv, value)
+			t.Setenv(updateEnv, tt.value)
 
 			f := compareOnFake(filepath.Join("testdata", "a.txt"), []byte("beta\n"))
 
