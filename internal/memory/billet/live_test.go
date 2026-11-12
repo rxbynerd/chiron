@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/memory"
 )
 
@@ -18,6 +21,9 @@ import (
 // which it starts on a free loopback port with the default in-process
 // backend.
 func TestLiveBillet(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	bin := os.Getenv("CHIRON_BILLET_BIN")
 	if bin == "" {
 		t.Skip("set CHIRON_BILLET_BIN to a billet binary to run the Billet interop test")
@@ -31,7 +37,7 @@ func TestLiveBillet(t *testing.T) {
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
 		cancel()
-		t.Fatalf("starting %s: %v", bin, err)
+		must.NoError(err, "starting %s", bin)
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -48,9 +54,7 @@ func TestLiveBillet(t *testing.T) {
 	waitForListener(t, addr, exited)
 
 	c, err := New(Options{Endpoint: "http://" + addr + "/", RequestTimeout: 10 * time.Second})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err, "New")
 
 	const (
 		ns    = memory.Namespace("chiron-interop")
@@ -59,72 +63,49 @@ func TestLiveBillet(t *testing.T) {
 	)
 	fact := memory.ArtifactMeta{Labels: map[string]string{"kind": "fact"}}
 	ref1, err := c.Remember(ctx, ns, memory.Memory{Text: fact1, Meta: fact})
-	if err != nil {
-		t.Fatalf("Remember fact 1: %v", err)
-	}
+	must.NoError(err, "Remember fact 1")
 	ref2, err := c.Remember(ctx, ns, memory.Memory{Text: fact2, Meta: fact})
-	if err != nil {
-		t.Fatalf("Remember fact 2: %v", err)
-	}
+	must.NoError(err, "Remember fact 2")
 	for _, ref := range []memory.Reference{ref1, ref2} {
-		if ref.Namespace != ns || ref.Digest == "" || ref.Locator != LocatorPrefix+ref.Digest {
-			t.Errorf("reference = %+v, want namespace, id and billet:// locator", ref)
-		}
+		check.Equal(ns, ref.Namespace, "reference %+v", ref)
+		check.NotEmpty(ref.Digest, "reference %+v", ref)
+		check.Equal(LocatorPrefix+ref.Digest, ref.Locator, "reference %+v", ref)
 	}
-	if ref1.Digest == ref2.Digest {
-		t.Errorf("both memories got id %q", ref1.Digest)
-	}
+	check.NotEqual(ref1.Digest, ref2.Digest, "both memories got the same id")
 
 	hits, err := c.Recall(ctx, ns, memory.Query{Text: "saffron canary", Limit: 1})
-	if err != nil {
-		t.Fatalf("Recall: %v", err)
-	}
-	if len(hits) != 1 {
-		t.Fatalf("got %d hits, want 1: %+v", len(hits), hits)
-	}
+	must.NoError(err, "Recall")
+	must.Len(hits, 1, "got %+v", hits)
 	hit := hits[0]
-	if hit.Reference != ref1 {
-		t.Errorf("hit reference = %+v, want %+v", hit.Reference, ref1)
-	}
-	if hit.Memory.Text != fact1 || hit.Memory.Meta.Name != fact1 {
-		t.Errorf("hit memory = %+v, want the saffron fact as text and name", hit.Memory)
-	}
-	if hit.Memory.Meta.MediaType != "text/plain" {
-		t.Errorf("media type = %q, want text/plain", hit.Memory.Meta.MediaType)
-	}
-	if _, err := time.Parse(time.RFC3339, hit.Memory.Meta.Labels["created_at"]); err != nil {
-		t.Errorf("created_at label %q is not RFC 3339: %v", hit.Memory.Meta.Labels["created_at"], err)
-	}
-	if hit.Score <= 0 {
-		t.Errorf("score = %v, want a positive match score", hit.Score)
-	}
+	check.Equal(ref1, hit.Reference)
+	check.Equal(fact1, hit.Memory.Text)
+	check.Equal(fact1, hit.Memory.Meta.Name)
+	check.Equal("text/plain", hit.Memory.Meta.MediaType)
+	createdAt := hit.Memory.Meta.Labels["created_at"]
+	_, err = time.Parse(time.RFC3339, createdAt)
+	must.NoError(err, "created_at %q is not RFC 3339", createdAt)
+	check.Positive(hit.Score, "score")
 
 	// A multi-line memory recalls under its first line, which is why a saved
 	// finding leads with the objective.
 	hits, err = c.Recall(ctx, ns, memory.Query{Text: "Equestrianism suite", Limit: 1})
-	if err != nil {
-		t.Fatalf("Recall fact 2: %v", err)
-	}
-	if len(hits) != 1 || hits[0].Reference != ref2 {
-		t.Fatalf("got %+v, want the suite fact", hits)
-	}
-	if first, _, _ := strings.Cut(fact2, "\n"); hits[0].Memory.Text != fact2 || hits[0].Memory.Meta.Name != first {
-		t.Errorf("hit memory = %+v, want the full text and the first line as name", hits[0].Memory)
-	}
+	must.NoError(err, "Recall fact 2")
+	must.Len(hits, 1, "got %+v", hits)
+	must.Equal(ref2, hits[0].Reference, "got %+v, want the suite fact", hits)
+	first, _, _ := strings.Cut(fact2, "\n")
+	check.Equal(fact2, hits[0].Memory.Text)
+	check.Equal(first, hits[0].Memory.Meta.Name)
 }
 
 // freeLoopbackAddr returns a loopback address whose port was free a moment
 // ago.
 func freeLoopbackAddr(t *testing.T) string {
 	t.Helper()
+	must := require.New(t)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserving a port: %v", err)
-	}
+	must.NoError(err, "reserving a port")
 	addr := l.Addr().String()
-	if err := l.Close(); err != nil {
-		t.Fatalf("releasing %s: %v", addr, err)
-	}
+	must.NoError(l.Close(), "releasing %s", addr)
 	return addr
 }
 
@@ -132,11 +113,12 @@ func freeLoopbackAddr(t *testing.T) string {
 // the server process exits first.
 func waitForListener(t *testing.T, addr string, exited <-chan struct{}) {
 	t.Helper()
+	must := require.New(t)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
-			t.Fatalf("billet exited before listening on %s", addr)
+			must.FailNow("billet exited before listening on " + addr)
 		default:
 		}
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
@@ -146,5 +128,5 @@ func waitForListener(t *testing.T, addr string, exited <-chan struct{}) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("billet did not listen on %s within 10s", addr)
+	must.FailNow("billet did not listen on " + addr + " within 10s")
 }

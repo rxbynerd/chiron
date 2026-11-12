@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/researcher/fleet"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
@@ -16,17 +19,18 @@ import (
 // path.
 func writeWorkerTemplate(t *testing.T, body string) string {
 	t.Helper()
+	must := require.New(t)
 	path := filepath.Join(t.TempDir(), "format.md")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write template: %v", err)
-	}
+	must.NoError(os.WriteFile(path, []byte(body), 0o600), "write template")
 	return path
 }
 
-// TestWorkerTemplateThroughCLI: --template with --agent worker validates, and
-// the rendered block, query substituted, reaches the model's system prompt
-// in place of the built-in format.
-func TestWorkerTemplateThroughCLI(t *testing.T) {
+// TestWorkerTemplate_CLIRendersIntoSystemPrompt: --template with --agent
+// worker validates, and the rendered block, query substituted, reaches the
+// model's system prompt in place of the built-in format.
+func TestWorkerTemplate_CLIRendersIntoSystemPrompt(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{
@@ -38,26 +42,19 @@ func TestWorkerTemplateThroughCLI(t *testing.T) {
 	path := writeWorkerTemplate(t, "Answer \"{{.Query}}\" under a single ## Summary heading.\n")
 
 	stdout, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "text", "--template", path)...)
-	if err != nil {
-		t.Fatalf("research --agent worker --template: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "stderr: %s", stderr)
 	reqs := modelSrv.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("model requests = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1, "model requests")
 	want := "Required output format:\nAnswer \"why is the sky blue\" under a single ## Summary heading.\n\nSource guidance:"
-	if system := reqs[0].Messages[0].Content; !strings.Contains(system, want) {
-		t.Errorf("system prompt lacks the rendered block %q:\n%s", want, system)
-	}
-	if !strings.Contains(stdout, "Rayleigh scattering.") {
-		t.Errorf("report lacks the answer:\n%s", stdout)
-	}
+	system := reqs[0].Messages[0].Content
+	check.Contains(system, want, "system prompt lacks the rendered block")
+	check.Contains(stdout, "Rayleigh scattering.", "report lacks the answer")
 }
 
-// TestWorkerTemplateRejectedBeforeAnyRequest: a template that cannot load
+// TestWorkerTemplate_RejectedBeforeAnyRequest: a template that cannot load
 // fails the run at setup, with the usage exit code, before any model or
 // search request and before an interaction id is emitted.
-func TestWorkerTemplateRejectedBeforeAnyRequest(t *testing.T) {
+func TestWorkerTemplate_RejectedBeforeAnyRequest(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		body string
@@ -69,6 +66,7 @@ func TestWorkerTemplateRejectedBeforeAnyRequest(t *testing.T) {
 		{"missing file", "", "reading report template"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
 			modelSrv := modeltest.NewFakeServer()
@@ -80,21 +78,12 @@ func TestWorkerTemplateRejectedBeforeAnyRequest(t *testing.T) {
 			}
 
 			_, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "none", "--template", path)...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want an error containing %q", err, tt.want)
-			}
-			if _, ok := errors.AsType[*ExitError](err); ok {
-				t.Errorf("a template failure is a setup error with the usage exit code: %v", err)
-			}
-			if n := modelSrv.CallCount(); n != 0 {
-				t.Errorf("model requests = %d, want 0", n)
-			}
-			if n := searchSrv.CallCount(); n != 0 {
-				t.Errorf("search requests = %d, want 0", n)
-			}
-			if strings.Contains(stderr, "interaction_created") {
-				t.Errorf("an interaction id was emitted for a run that never started:\n%s", stderr)
-			}
+			must.ErrorContains(err, tt.want)
+			_, isExitErr := errors.AsType[*ExitError](err)
+			must.False(isExitErr, "a template failure is a setup error with the usage exit code: %v", err)
+			must.Equal(0, modelSrv.CallCount(), "model requests")
+			must.Equal(0, searchSrv.CallCount(), "search requests")
+			must.NotContains(stderr, "interaction_created", "an interaction id was emitted for a run that never started")
 		})
 	}
 }

@@ -2,9 +2,11 @@ package config
 
 import (
 	"bytes"
-	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // withKnowledge returns validWorker with the given provider and endpoint.
@@ -15,7 +17,7 @@ func withKnowledge(provider, endpoint string) ResearchConfig {
 	return cfg
 }
 
-func TestValidateKnowledge(t *testing.T) {
+func TestKnowledge_Validate_FieldRules(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		mutate  func(*ResearchConfig)
@@ -103,59 +105,55 @@ func TestValidateKnowledge(t *testing.T) {
 	} {
 		for _, agent := range []string{AgentWorker, AgentFleet} {
 			t.Run(tt.name+"/"+agent, func(t *testing.T) {
+				must := require.New(t)
 				cfg := validWorker()
 				tt.mutate(&cfg)
 				cfg = withAgent(cfg, agent)
 				err := cfg.Validate()
 				if tt.wantErr == "" {
-					if err != nil {
-						t.Errorf("Validate: %v", err)
-					}
+					must.NoError(err)
 					return
 				}
-				if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
-					t.Errorf("Validate = %v, want an error starting %q", err, tt.wantErr)
-				}
+				must.Error(err)
+				must.True(strings.HasPrefix(err.Error(), tt.wantErr),
+					"Validate = %v, want an error starting %q", err, tt.wantErr)
 			})
 		}
 	}
 }
 
-// TestValidateKnowledgeRememberIsWorkerOnly: Billet save-back is valid for
+// TestKnowledge_Validate_RememberIsWorkerOnly: Billet save-back is valid for
 // the single worker and refused for the fleet, whose workers never save a
 // finding back, with an error that names the field, the flag and the agent
 // that can.
-func TestValidateKnowledgeRememberIsWorkerOnly(t *testing.T) {
+func TestKnowledge_Validate_RememberIsWorkerOnly(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	remember := withKnowledge(KnowledgeBillet, "https://billet.internal/")
 	remember.Fleet.KnowledgeRemember = true
 
-	if err := withAgent(remember, AgentWorker).Validate(); err != nil {
-		t.Errorf("worker with knowledge_remember: %v", err)
-	}
+	must.NoError(withAgent(remember, AgentWorker).Validate(), "worker with knowledge_remember")
 	err := withAgent(remember, AgentFleet).Validate()
-	if err == nil {
-		t.Fatal("fleet with knowledge_remember validated, want it refused")
-	}
+	must.Error(err, "fleet with knowledge_remember validated, want it refused")
 	for _, want := range []string{"fleet.knowledge_remember:", "--fleet-knowledge-remember", `"worker"`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("err = %v, want it to name %s", err, want)
-		}
+		check.ErrorContains(err, want)
 	}
 }
 
-// TestValidateKnowledgeIgnoredForDeepResearch: the knowledge fields belong to
+// TestKnowledge_Validate_IgnoredForDeepResearch: the knowledge fields belong to
 // the fleet block, which the deep-research tiers never validate.
-func TestValidateKnowledgeIgnoredForDeepResearch(t *testing.T) {
+func TestKnowledge_Validate_IgnoredForDeepResearch(t *testing.T) {
+	must := require.New(t)
+
 	cfg := Default()
 	cfg.Fleet.KnowledgeEndpoint = "https://billet.internal/"
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("deep-research with a stray knowledge field: %v", err)
-	}
+	must.NoError(cfg.Validate(), "deep-research with a stray knowledge field")
 }
 
-// TestValidateKnowledgeNeverEchoesSecrets: a literal key or an endpoint's
+// TestKnowledge_Validate_NeverEchoesSecrets: a literal key or an endpoint's
 // userinfo never appears in a validation error.
-func TestValidateKnowledgeNeverEchoesSecrets(t *testing.T) {
+func TestKnowledge_Validate_NeverEchoesSecrets(t *testing.T) {
 	const literal = "alx_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 	for _, tt := range []struct {
 		name   string
@@ -171,22 +169,22 @@ func TestValidateKnowledgeNeverEchoesSecrets(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validWorker()
 			tt.mutate(&cfg)
 			err := cfg.Validate()
-			if err == nil {
-				t.Fatal("validated")
-			}
-			if strings.Contains(err.Error(), literal) {
-				t.Errorf("validation error leaked the literal: %v", err)
-			}
+			must.Error(err)
+			must.NotContains(err.Error(), literal, "validation error leaked the literal")
 		})
 	}
 }
 
-// TestKnowledgeRoundTrip: the knowledge fields survive EncodeJSON -> decode
-// under their documented keys, so a pipeline stage cannot drop one.
-func TestKnowledgeRoundTrip(t *testing.T) {
+// TestKnowledge_RoundTrip_JSONAndYAML: the knowledge fields survive EncodeJSON
+// -> decode under their documented keys, so a pipeline stage cannot drop one.
+func TestKnowledge_RoundTrip_JSONAndYAML(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	in := withKnowledge(KnowledgeAlexandria, "https://alexandria.example")
 	in.Fleet.KnowledgeKeyRef = "secret://ALEXANDRIA_KEY"
 	in.Fleet.KnowledgeSpace = "notes"
@@ -194,39 +192,29 @@ func TestKnowledgeRoundTrip(t *testing.T) {
 	in.Fleet.KnowledgeRemember = true
 
 	var buf bytes.Buffer
-	if err := in.EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
+	must.NoError(in.EncodeJSON(&buf))
 	for _, key := range []string{`"knowledge_provider"`, `"knowledge_endpoint"`, `"knowledge_key_ref"`, `"knowledge_space"`, `"knowledge_limit"`, `"knowledge_remember"`} {
-		if !strings.Contains(buf.String(), key) {
-			t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
-		}
+		check.Contains(buf.String(), key, "encoded config lacks %s:\n%s", key, buf.String())
 	}
 	out, err := decode(&buf)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !reflect.DeepEqual(out.Fleet, in.Fleet) {
-		t.Errorf("round trip lost data:\n got %+v\nwant %+v", out.Fleet, in.Fleet)
-	}
+	must.NoError(err)
+	must.Equal(in.Fleet, out.Fleet, "round trip lost data")
 
 	yamlIn := "agent: worker\nfleet:\n  knowledge_provider: billet\n  knowledge_endpoint: http://127.0.0.1:8140/\n  knowledge_remember: true\n"
 	cfg, err := decode(strings.NewReader(yamlIn))
-	if err != nil {
-		t.Fatalf("decode YAML: %v", err)
-	}
-	if f := cfg.Fleet; f.KnowledgeProvider != KnowledgeBillet || !f.KnowledgeRemember || f.KnowledgeLimit != DefaultKnowledgeLimit {
-		t.Errorf("YAML knowledge block = %+v, want billet with remember and the default limit", f)
-	}
+	must.NoError(err)
+	f := cfg.Fleet
+	must.Equal(KnowledgeBillet, f.KnowledgeProvider, "YAML knowledge_provider")
+	must.True(f.KnowledgeRemember, "YAML knowledge_remember")
+	must.Equal(DefaultKnowledgeLimit, f.KnowledgeLimit, "YAML knowledge_limit default")
 }
 
-// TestMCPLeverHintNamesKnowledge: the rejected mcp lever points at both
-// replacements for the in-process agents.
-func TestMCPLeverHintNamesKnowledge(t *testing.T) {
+// TestValidate_MCPLever_HintNamesKnowledge: the rejected mcp lever points at
+// both replacements for the in-process agents.
+func TestValidate_MCPLever_HintNamesKnowledge(t *testing.T) {
+	must := require.New(t)
+
 	cfg := validWorker()
 	cfg.MCP = map[string]string{"billet": "https://billet.internal/"}
-	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "use fleet.search_endpoint or the fleet.knowledge_* fields") {
-		t.Errorf("Validate = %v, want the knowledge hint", err)
-	}
+	must.ErrorContains(cfg.Validate(), "use fleet.search_endpoint or the fleet.knowledge_* fields")
 }

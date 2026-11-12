@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // scriptedPlanner counts rounds and records the refinement chain.
@@ -45,84 +48,69 @@ func newSession(p Planner, input string) (*Session, *bytes.Buffer) {
 	return &Session{Planner: p, In: strings.NewReader(input), Out: &out}, &out
 }
 
-func TestSessionAcceptFirstPlan(t *testing.T) {
+func TestSession_Run_AcceptsFirstPlan(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	p := &scriptedPlanner{}
 	s, out := newSession(p, "a\n")
 
 	id, err := s.Run(context.Background(), "q")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if id != "v1_plan_1" {
-		t.Errorf("accepted id = %q, want the first plan's interaction", id)
-	}
-	if p.proposals != 1 || len(p.refines) != 0 {
-		t.Errorf("rounds = %d proposals, %d refines; want exactly one proposal", p.proposals, len(p.refines))
-	}
-	if !strings.Contains(out.String(), "1. Search.") {
-		t.Errorf("the plan text must be rendered for review:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "round 1 of 5") {
-		t.Errorf("the round counter must make the spend bound visible:\n%s", out.String())
-	}
+	must.NoError(err)
+	check.Equal("v1_plan_1", id, "accepted id must be the first plan's interaction")
+	check.Equal(1, p.proposals, "accepting the first plan must spend exactly one proposal round")
+	check.Empty(p.refines, "accepting the first plan must not refine it")
+	check.Contains(out.String(), "1. Search.", "the plan text must be rendered for review")
+	check.Contains(out.String(), "round 1 of 5", "the round counter must make the spend bound visible")
 }
 
-func TestSessionRefineThenAccept(t *testing.T) {
+func TestSession_Run_RefineThenAccept(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	p := &scriptedPlanner{}
 	s, _ := newSession(p, "r\nfocus on vendors only\na\n")
 
 	id, err := s.Run(context.Background(), "q")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if id != "v1_plan_2" {
-		t.Errorf("accepted id = %q, want the refined plan's interaction", id)
-	}
-	if len(p.refines) != 1 {
-		t.Fatalf("refines = %d, want 1", len(p.refines))
-	}
+	must.NoError(err)
+	check.Equal("v1_plan_2", id, "accepted id must be the refined plan's interaction")
+	must.Len(p.refines, 1)
 	// The refinement must chain from the plan it revises, with the
 	// user's feedback verbatim.
-	if p.refines[0].previousID != "v1_plan_1" || p.refines[0].feedback != "focus on vendors only" {
-		t.Errorf("refine call = %+v", p.refines[0])
-	}
+	check.Equal(refineCall{previousID: "v1_plan_1", feedback: "focus on vendors only"}, p.refines[0])
 }
 
-func TestSessionQuitAborts(t *testing.T) {
+func TestSession_Run_QuitAborts(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	p := &scriptedPlanner{}
 	s, _ := newSession(p, "q\n")
 
-	if _, err := s.Run(context.Background(), "q"); !errors.Is(err, ErrAborted) {
-		t.Errorf("err = %v, want ErrAborted", err)
-	}
-	if len(p.refines) != 0 {
-		t.Error("quitting must not spend another planning round")
-	}
+	_, err := s.Run(context.Background(), "q")
+	must.ErrorIs(err, ErrAborted)
+	check.Empty(p.refines, "quitting must not spend another planning round")
 }
 
-func TestSessionEndOfInputAborts(t *testing.T) {
+func TestSession_Run_EndOfInputAborts(t *testing.T) {
+	must := require.New(t)
 	p := &scriptedPlanner{}
 	s, _ := newSession(p, "")
 
-	if _, err := s.Run(context.Background(), "q"); !errors.Is(err, ErrAborted) {
-		t.Errorf("err = %v, want ErrAborted when input ends unanswered", err)
-	}
+	_, err := s.Run(context.Background(), "q")
+	must.ErrorIs(err, ErrAborted, "input that ends unanswered must abort")
 }
 
-func TestSessionAutoAcceptReadsNoInput(t *testing.T) {
+func TestSession_Run_AutoAcceptReadsNoInput(t *testing.T) {
+	must := require.New(t)
 	p := &scriptedPlanner{}
 	s := &Session{Planner: p, Out: &bytes.Buffer{}, AutoAccept: true} // In deliberately nil
 
 	id, err := s.Run(context.Background(), "q")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if id != "v1_plan_1" {
-		t.Errorf("accepted id = %q", id)
-	}
+	must.NoError(err)
+	must.Equal("v1_plan_1", id)
 }
 
 func TestSessionRoundBoundWithdrawsRefine(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// With MaxRounds 2 the second plan is the last: a refine answer is
 	// rejected and the user must accept or quit.
 	p := &scriptedPlanner{}
@@ -130,71 +118,58 @@ func TestSessionRoundBoundWithdrawsRefine(t *testing.T) {
 	s.MaxRounds = 2
 
 	id, err := s.Run(context.Background(), "q")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if id != "v1_plan_2" {
-		t.Errorf("accepted id = %q", id)
-	}
-	if len(p.refines) != 1 {
-		t.Errorf("refines = %d, want the bound to stop the second", len(p.refines))
-	}
-	if !strings.Contains(out.String(), "no refine rounds left") {
-		t.Errorf("the user must be told the bound is spent:\n%s", out.String())
-	}
+	must.NoError(err)
+	check.Equal("v1_plan_2", id, "accepted id must be the second plan's interaction")
+	check.Len(p.refines, 1, "the bound must stop the second refine")
+	check.Contains(out.String(), "no refine rounds left", "the user must be told the bound is spent")
 }
 
-func TestSessionUnrecognisedAnswerReprompts(t *testing.T) {
+func TestSession_Run_UnrecognisedAnswerReprompts(t *testing.T) {
+	must := require.New(t)
 	p := &scriptedPlanner{}
 	s, out := newSession(p, "maybe\na\n")
 
-	if _, err := s.Run(context.Background(), "q"); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !strings.Contains(out.String(), `unrecognised answer "maybe"`) {
-		t.Errorf("unrecognised answers must reprompt:\n%s", out.String())
-	}
+	_, err := s.Run(context.Background(), "q")
+	must.NoError(err)
+	must.Contains(out.String(), `unrecognised answer "maybe"`, "unrecognised answers must reprompt")
 }
 
-func TestSessionEmptyFeedbackReprompts(t *testing.T) {
+func TestSession_Run_EmptyFeedbackReprompts(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	p := &scriptedPlanner{}
 	s, out := newSession(p, "r\n\na\n")
 
 	id, err := s.Run(context.Background(), "q")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if id != "v1_plan_1" || len(p.refines) != 0 {
-		t.Errorf("empty feedback must not spend a refine round: id=%q refines=%d", id, len(p.refines))
-	}
-	if !strings.Contains(out.String(), "must not be empty") {
-		t.Errorf("empty feedback must explain itself:\n%s", out.String())
-	}
+	must.NoError(err)
+	check.Equal("v1_plan_1", id, "empty feedback must not change the accepted plan")
+	check.Empty(p.refines, "empty feedback must not spend a refine round")
+	check.Contains(out.String(), "must not be empty", "empty feedback must explain itself")
 }
 
-func TestSessionProposeErrorPropagates(t *testing.T) {
+func TestSession_Run_ProposeErrorPropagates(t *testing.T) {
+	must := require.New(t)
 	wantErr := errors.New("the API said no")
 	p := &scriptedPlanner{proposeErr: wantErr}
 	s, _ := newSession(p, "a\n")
 
-	if _, err := s.Run(context.Background(), "q"); !errors.Is(err, wantErr) {
-		t.Errorf("err = %v, want the planner's error verbatim", err)
-	}
+	_, err := s.Run(context.Background(), "q")
+	must.ErrorIs(err, wantErr, "the planner's error must propagate")
 }
 
-func TestSessionValidatesInputs(t *testing.T) {
+func TestSession_Run_ValidatesInputs(t *testing.T) {
+	must := require.New(t)
 	s := &Session{Planner: nil, Out: &bytes.Buffer{}}
-	if _, err := s.Run(context.Background(), "q"); err == nil {
-		t.Error("nil Planner must be rejected")
-	}
+	_, err := s.Run(context.Background(), "q")
+	must.Error(err, "nil Planner must be rejected")
+
 	s = &Session{Planner: &scriptedPlanner{}, Out: &bytes.Buffer{}}
-	if _, err := s.Run(context.Background(), ""); err == nil {
-		t.Error("empty query must be rejected")
-	}
+	_, err = s.Run(context.Background(), "")
+	must.Error(err, "empty query must be rejected")
 }
 
-// orphaningPlanner fails its round but hands back the paid round's
-// interaction id, per the Planner seam's partial-Plan contract.
+// orphaningPlanner fails its round but returns the paid round's
+// interaction id alongside the error, as the Planner contract allows.
 type orphaningPlanner struct{}
 
 func (orphaningPlanner) Propose(context.Context, string) (*Plan, error) {
@@ -205,17 +180,14 @@ func (orphaningPlanner) Refine(context.Context, string, string) (*Plan, error) {
 	return nil, errors.New("unreachable")
 }
 
-// TestSessionSurfacesOrphanedPlanID pins C2-CODE-2: a plan round that
-// was paid for but could not be concluded surfaces its interaction id
-// with the chiron get recovery hint, so the spend is never silently
-// lost.
-func TestSessionSurfacesOrphanedPlanID(t *testing.T) {
+// A paid plan round that fails to conclude must still print its
+// interaction id with a `chiron get` recovery hint.
+func TestSession_Run_SurfacesOrphanedPlanID(t *testing.T) {
+	must := require.New(t)
 	var out bytes.Buffer
 	s := &Session{Planner: orphaningPlanner{}, In: strings.NewReader(""), Out: &out}
-	if _, err := s.Run(context.Background(), "q"); err == nil {
-		t.Fatal("a failed round must still fail the session")
-	}
-	if !strings.Contains(out.String(), "chiron get v1_orphan") {
-		t.Errorf("output %q must carry the recovery hint for the paid round", out.String())
-	}
+
+	_, err := s.Run(context.Background(), "q")
+	must.Error(err, "a failed round must still fail the session")
+	must.Contains(out.String(), "chiron get v1_orphan", "the recovery hint for the paid round must be printed")
 }

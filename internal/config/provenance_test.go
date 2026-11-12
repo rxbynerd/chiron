@@ -2,16 +2,19 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestDecodeBaseRejectsFleetEndpoints: a base config naming any fleet
+// TestDecodeBase_RejectsFleetEndpoints: a base config naming any fleet
 // endpoint beside its key reference is refused at load time, whatever its
 // agent, with an error that names the field, the reason and the flag and
 // environment variable to use instead, and never echoes the value.
-func TestDecodeBaseRejectsFleetEndpoints(t *testing.T) {
+func TestDecodeBase_RejectsFleetEndpoints(t *testing.T) {
 	const token = "sk-live-0123456789abcdefghijklmn"
 	for _, tt := range []struct {
 		name  string
@@ -32,91 +35,84 @@ func TestDecodeBaseRejectsFleetEndpoints(t *testing.T) {
 			"fleet.model_endpoint", "--fleet-model-endpoint", EnvFleetModelEndpoint},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := DecodeBase(strings.NewReader(tt.base))
-			if err == nil {
-				t.Fatal("a base config naming an endpoint was accepted")
-			}
+			must.Error(err, "a base config naming an endpoint was accepted")
 			for _, want := range []string{tt.field + ":", "base config", "credentials are sent", tt.flag, tt.env} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q lacks %q", err, want)
-				}
+				must.ErrorContains(err, want)
 			}
-			if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), ".example") {
-				t.Errorf("error echoes the endpoint: %q", err)
-			}
+			must.NotContains(err.Error(), token, "error echoes the endpoint")
+			must.NotContains(err.Error(), ".example", "error echoes the endpoint")
 		})
 	}
 }
 
-// TestDecodeBaseAcceptsKeyRefsWithoutEndpoints: a base may still carry the
+// TestDecodeBase_AcceptsKeyRefsWithoutEndpoints: a base may still carry the
 // key references and every other fleet field; only the endpoints move.
-func TestDecodeBaseAcceptsKeyRefsWithoutEndpoints(t *testing.T) {
+func TestDecodeBase_AcceptsKeyRefsWithoutEndpoints(t *testing.T) {
+	must := require.New(t)
 	const base = "agent: worker\nfleet:\n  model_name: gpt-5.5\n  model_key_ref: secret://MODEL_KEY\n  search_key_ref: secret://SEARCH_KEY\n" +
 		"  knowledge_provider: alexandria\n  knowledge_key_ref: secret://KB_KEY\n  max_turns: 4\n"
 	cfg, err := DecodeBase(strings.NewReader(base))
-	if err != nil {
-		t.Fatalf("DecodeBase: %v", err)
-	}
+	must.NoError(err)
+
 	f := cfg.Fleet
-	if f.ModelKeyRef != "secret://MODEL_KEY" || f.SearchKeyRef != "secret://SEARCH_KEY" || f.KnowledgeKeyRef != "secret://KB_KEY" || f.MaxTurns != 4 {
-		t.Errorf("base fields lost: %+v", f)
-	}
+	must.Equal("secret://MODEL_KEY", f.ModelKeyRef)
+	must.Equal("secret://SEARCH_KEY", f.SearchKeyRef)
+	must.Equal("secret://KB_KEY", f.KnowledgeKeyRef)
+	must.Equal(4, f.MaxTurns)
 }
 
-// TestDecodeBaseKeepsDecodeErrors: a malformed base still fails as a decode
-// error, and an empty one still yields the defaults.
-func TestDecodeBaseKeepsDecodeErrors(t *testing.T) {
-	if _, err := DecodeBase(strings.NewReader("agnet: worker\n")); err == nil || !strings.Contains(err.Error(), "decode research config") {
-		t.Errorf("err = %v, want the decode error", err)
-	}
-	cfg, err := DecodeBase(strings.NewReader(""))
-	if err != nil || cfg.Agent != AgentDeepResearch {
-		t.Errorf("empty base = %+v, %v; want the defaults", cfg.Agent, err)
-	}
+// TestDecodeBase_DecodeErrorsAndDefaults: a malformed base still fails as a
+// decode error, and an empty one still yields the defaults.
+func TestDecodeBase_DecodeErrorsAndDefaults(t *testing.T) {
+	t.Run("malformed base fails to decode", func(t *testing.T) {
+		must := require.New(t)
+		_, err := DecodeBase(strings.NewReader("agnet: worker\n"))
+		must.ErrorContains(err, "decode research config")
+	})
+
+	t.Run("empty base yields defaults", func(t *testing.T) {
+		must := require.New(t)
+		cfg, err := DecodeBase(strings.NewReader(""))
+		must.NoError(err)
+		must.Equal(AgentDeepResearch, cfg.Agent)
+	})
 }
 
-// TestFleetEndpointsMatchFlagsAndKeys pins the provenance table to the flag
+// TestFleetEndpoints_MatchFlagsAndKeys pins the provenance table to the flag
 // surface and the wire keys: each entry's flag writes its Value, and its
 // Field names the key the value encodes under.
-func TestFleetEndpointsMatchFlagsAndKeys(t *testing.T) {
+func TestFleetEndpoints_MatchFlagsAndKeys(t *testing.T) {
+	must := require.New(t)
 	var probe FleetConfig
 	endpoints := FleetEndpoints(&probe)
-	if len(endpoints) != 4 {
-		t.Fatalf("FleetEndpoints returned %d entries, want model, search, knowledge and exa", len(endpoints))
-	}
+	must.Len(endpoints, 4, "want model, search, knowledge and exa entries")
+
 	for i, tt := range endpoints {
 		t.Run(tt.Flag, func(t *testing.T) {
+			must := require.New(t)
 			cfg := Default()
 			fs := newFlagSet(t)
-			if err := fs.Parse([]string{"--" + tt.Flag, "https://flag.example"}); err != nil {
-				t.Fatalf("parse --%s: %v", tt.Flag, err)
-			}
-			if err := ApplyFlags(&cfg, fs); err != nil {
-				t.Fatalf("ApplyFlags: %v", err)
-			}
-			if got := *FleetEndpoints(&cfg.Fleet)[i].Value; got != "https://flag.example" {
-				t.Errorf("--%s wrote %q to the entry's Value", tt.Flag, got)
-			}
+			must.NoError(fs.Parse([]string{"--" + tt.Flag, "https://flag.example"}))
+			must.NoError(ApplyFlags(&cfg, fs))
+			must.Equal("https://flag.example", *FleetEndpoints(&cfg.Fleet)[i].Value)
 
 			var buf bytes.Buffer
-			if err := cfg.EncodeJSON(&buf); err != nil {
-				t.Fatalf("EncodeJSON: %v", err)
-			}
+			must.NoError(cfg.EncodeJSON(&buf))
 			key := `"` + strings.TrimPrefix(tt.Field, "fleet.") + `": "https://flag.example"`
-			if !strings.Contains(buf.String(), key) {
-				t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
-			}
-			if !strings.HasPrefix(tt.Env, "CHIRON_FLEET_") {
-				t.Errorf("Env = %q, want the CHIRON_FLEET_ namespace", tt.Env)
-			}
+			must.Contains(buf.String(), key)
+
+			must.True(strings.HasPrefix(tt.Env, "CHIRON_FLEET_"), "Env = %q, want the CHIRON_FLEET_ namespace", tt.Env)
 		})
 	}
 }
 
-// TestFleetEndpointsCoverEveryDestinationField: every FleetConfig field whose
+// TestFleetEndpoints_CoverEveryDestinationField: every FleetConfig field whose
 // name or key suggests a destination is in FleetEndpoints, so DecodeBase
 // refuses it in a base config and the environment fallback can supply it.
-func TestFleetEndpointsCoverEveryDestinationField(t *testing.T) {
+func TestFleetEndpoints_CoverEveryDestinationField(t *testing.T) {
+	must := require.New(t)
 	covered := map[string]bool{}
 	for _, e := range FleetEndpoints(&FleetConfig{}) {
 		covered[strings.TrimPrefix(e.Field, "fleet.")] = true
@@ -125,12 +121,15 @@ func TestFleetEndpointsCoverEveryDestinationField(t *testing.T) {
 		s = strings.ToLower(s)
 		return strings.Contains(s, "endpoint") || strings.Contains(s, "url") || strings.Contains(s, "host")
 	}
+
+	var uncovered []string
 	ty := reflect.TypeOf(FleetConfig{})
 	for i := 0; i < ty.NumField(); i++ {
 		f := ty.Field(i)
 		key := strings.Split(f.Tag.Get("yaml"), ",")[0]
 		if (namesDestination(f.Name) || namesDestination(key)) && !covered[key] {
-			t.Errorf("FleetConfig.%s (fleet.%s) names a destination but is not in FleetEndpoints", f.Name, key)
+			uncovered = append(uncovered, fmt.Sprintf("FleetConfig.%s (fleet.%s)", f.Name, key))
 		}
 	}
+	must.Empty(uncovered, "destination fields missing from FleetEndpoints")
 }

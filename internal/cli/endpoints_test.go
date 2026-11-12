@@ -16,6 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/memory/billet/billettest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -73,28 +76,28 @@ const (
 // the way source names.
 func supplyBase(t *testing.T, source, base string) (io.Reader, []string) {
 	t.Helper()
+	must := require.New(t)
 	switch source {
 	case baseFromFile:
 		path := filepath.Join(t.TempDir(), "base.yaml")
-		if err := os.WriteFile(path, []byte(base), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must.NoError(os.WriteFile(path, []byte(base), 0o600))
 		return strings.NewReader(""), []string{"--config", path}
 	case baseFromConfigDash:
 		return strings.NewReader(base), []string{"--config", "-"}
 	case baseFromPipedStdin:
 		return pipedStdin(t, base), nil
 	default:
-		t.Fatalf("unknown base source %q", source)
+		must.FailNow("unknown base source", "source %q", source)
 		return nil, nil
 	}
 }
 
-// TestBaseConfigEndpointRefusedBeforeAnySecretResolves: a base naming a fleet
+// TestBaseConfig_EndpointRefusedBeforeSecretResolves: a base naming a fleet
 // endpoint and its key reference is refused however it arrives, even with the
 // same endpoint on a flag, before the resolver runs or anything is dialled.
 // The flags alone make a complete worker run.
-func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
+func TestBaseConfig_EndpointRefusedBeforeSecretResolves(t *testing.T) {
+	must := require.New(t)
 	modelSrv := modeltest.NewFakeServer(finalReply)
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
@@ -118,6 +121,7 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 	} {
 		for _, source := range []string{baseFromFile, baseFromConfigDash, baseFromPipedStdin} {
 			t.Run(tt.name+"/"+source, func(t *testing.T) {
+				must := require.New(t)
 				stdin, baseArgs := supplyBase(t, source, tt.base)
 				resolver := &countingResolver{}
 				args := append(workerArgs(modelSrv, searchSrv, "-o", "none",
@@ -126,30 +130,25 @@ func TestBaseConfigEndpointRefusedBeforeAnySecretResolves(t *testing.T) {
 				), baseArgs...)
 				var stderr bytes.Buffer
 				_, err := executeWith(t, resolver, stdin, &stderr, args...)
-				if err == nil {
-					t.Fatal("a base config naming an endpoint was accepted")
-				}
+				must.Error(err, "a base config naming an endpoint was accepted")
 				for _, want := range []string{tt.field + ":", "credentials are sent", tt.env} {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("error %q lacks %q", err, want)
-					}
+					must.ErrorContains(err, want)
 				}
-				if n := resolver.calls.Load(); n != 0 {
-					t.Errorf("resolver invoked %d times; a refused base must stop the run before any secret resolves", n)
-				}
+				must.Zero(resolver.calls.Load(), "a refused base must stop the run before any secret resolves")
 			})
 		}
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(kbSrv.Requests()) != 0 {
-		t.Error("a refused base config must not dial any endpoint")
-	}
+	must.Zero(modelSrv.CallCount(), "a refused base config must not dial the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a refused base config must not dial the search endpoint")
+	must.Empty(kbSrv.Requests(), "a refused base config must not dial the knowledge endpoint")
 }
 
-// TestEveryCommandRefusesBaseEndpointBeforeResolving: research on either
-// Gemini tier or the worker, get and follow-up all refuse a base naming a
-// fleet endpoint beside a key reference, before any secret resolves or any
-// endpoint is dialled, without echoing the endpoint.
-func TestEveryCommandRefusesBaseEndpointBeforeResolving(t *testing.T) {
+// TestCommands_BaseEndpointRefusedBeforeResolving: research on either Gemini
+// tier or the worker, get and follow-up all refuse a base naming a fleet
+// endpoint beside a key reference, before any secret resolves or any endpoint
+// is dialled, without echoing the endpoint.
+func TestCommands_BaseEndpointRefusedBeforeResolving(t *testing.T) {
+	must := require.New(t)
 	var geminiCalls atomic.Int32
 	gemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		geminiCalls.Add(1)
@@ -175,33 +174,29 @@ func TestEveryCommandRefusesBaseEndpointBeforeResolving(t *testing.T) {
 		{"research worker", workerArgs(modelSrv, searchSrv)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			resolver := &countingResolver{}
 			var stderr bytes.Buffer
 			_, err := executeWith(t, resolver, strings.NewReader(base), &stderr, append(tt.args, "--config", "-")...)
-			if err == nil {
-				t.Fatal("a base config naming an endpoint was accepted")
-			}
-			if !strings.Contains(err.Error(), "fleet.model_endpoint: must not come from a base config") {
-				t.Errorf("err = %v, want the base-config endpoint refusal", err)
-			}
-			if n := resolver.calls.Load(); n != 0 {
-				t.Errorf("resolver invoked %d times; a refused base must stop the command before any secret resolves", n)
-			}
-			if strings.Contains(err.Error()+stderr.String(), "attacker.example") {
-				t.Errorf("the refused endpoint was echoed: %v\nstderr: %s", err, stderr.String())
-			}
+			must.Error(err, "a base config naming an endpoint was accepted")
+			must.ErrorContains(err, "fleet.model_endpoint: must not come from a base config")
+			must.Zero(resolver.calls.Load(), "a refused base must stop the command before any secret resolves")
+			must.NotContains(err.Error()+stderr.String(), "attacker.example", "the refused endpoint was echoed")
 		})
 	}
-	if geminiCalls.Load() != 0 || modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-		t.Error("a refused base config must not dial any endpoint")
-	}
+	must.Zero(geminiCalls.Load(), "a refused base config must not dial the Gemini endpoint")
+	must.Zero(modelSrv.CallCount(), "a refused base config must not dial the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a refused base config must not dial the search endpoint")
 }
 
-// TestFlagEndpointsOverBaseKeyRefsResolve is the control for the refusal
-// test: the same worker run with the key references in the base and the
-// endpoints on flags resolves every reference, knowledge included, through
-// the injected resolver and sends its key to the flag-named endpoint.
-func TestFlagEndpointsOverBaseKeyRefsResolve(t *testing.T) {
+// TestWorker_FlagEndpoints_ResolveBaseKeyRefs is the control for
+// TestBaseConfig_EndpointRefusedBeforeSecretResolves: the same worker run with
+// the key references in the base and the endpoints on flags resolves every
+// reference, knowledge included, through the injected resolver and sends its
+// key to the flag-named endpoint.
+func TestWorker_FlagEndpoints_ResolveBaseKeyRefs(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
 		finalReply,
@@ -224,36 +219,25 @@ func TestFlagEndpointsOverBaseKeyRefsResolve(t *testing.T) {
 		"--fleet-search-endpoint", searchSrv.URL(),
 		"--fleet-knowledge-endpoint", kbSrv.URL(),
 	)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
-	}
-	if n := resolver.calls.Load(); n != 3 {
-		t.Errorf("resolver calls = %d, want 3 (model, search and knowledge key)", n)
-	}
+	must.NoError(err, "research --agent worker; stderr: %s", stderr.String())
+	check.EqualValues(3, resolver.calls.Load(), "one key resolution each for the model, search and knowledge keys")
 	reqs := modelSrv.Requests()
-	if len(reqs) != 2 {
-		t.Fatalf("model requests = %d, want the recall turn and the final turn", len(reqs))
-	}
+	must.Len(reqs, 2, "model requests, want the recall turn and the final turn")
 	for i, req := range reqs {
-		if req.Authorization != "Bearer test-resolved-key" {
-			t.Errorf("model request %d Authorization = %q, want the resolved key", i, req.Authorization)
-		}
+		check.Equal("Bearer test-resolved-key", req.Authorization, "model request %d", i)
 	}
-	if kbSrv.ToolCallCount() != 1 {
-		t.Fatalf("knowledge tool calls = %d, want the one recall", kbSrv.ToolCallCount())
-	}
+	must.Equal(1, kbSrv.ToolCallCount(), "knowledge tool calls, want the one recall")
 	for i, req := range kbSrv.Requests() {
-		if req.Authorization != "Bearer test-resolved-key" {
-			t.Errorf("knowledge request %d Authorization = %q, want the resolved key", i, req.Authorization)
-		}
+		check.Equal("Bearer test-resolved-key", req.Authorization, "knowledge request %d", i)
 	}
 }
 
-// TestFleetEndpointsFromEnvironment: CHIRON_FLEET_*_ENDPOINT supplies an
+// TestFleetEndpoints_FromEnvironment: CHIRON_FLEET_*_ENDPOINT supplies an
 // endpoint whose flag is unset, an explicitly set flag wins over it, and the
 // knowledge variable is consulted only with a knowledge provider.
-func TestFleetEndpointsFromEnvironment(t *testing.T) {
+func TestFleetEndpoints_FromEnvironment(t *testing.T) {
 	t.Run("env supplies every endpoint", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer(
 			modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"},
 			finalReply,
@@ -274,18 +258,13 @@ func TestFleetEndpointsFromEnvironment(t *testing.T) {
 			"--fleet-model-key-ref", "secret://MODEL_KEY",
 			"--fleet-knowledge-provider", "billet",
 		)
-		if err != nil {
-			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
-		}
-		if modelSrv.CallCount() != 2 {
-			t.Errorf("model calls = %d, want 2 through the env-named endpoint", modelSrv.CallCount())
-		}
-		if kbSrv.ToolCallCount() != 1 {
-			t.Errorf("knowledge tool calls = %d, want the recall through the env-named endpoint", kbSrv.ToolCallCount())
-		}
+		must.NoError(err, "research --agent worker; stderr: %s", stderr.String())
+		must.Equal(2, modelSrv.CallCount(), "model calls through the env-named endpoint")
+		must.Equal(1, kbSrv.ToolCallCount(), "knowledge recall through the env-named endpoint")
 	})
 
 	t.Run("flag wins over env", func(t *testing.T) {
+		must := require.New(t)
 		flagSrv := modeltest.NewFakeServer(finalReply)
 		defer flagSrv.Close()
 		envSrv := modeltest.NewFakeServer(finalReply)
@@ -298,15 +277,13 @@ func TestFleetEndpointsFromEnvironment(t *testing.T) {
 		var stderr bytes.Buffer
 		_, err := executeWith(t, &countingResolver{}, strings.NewReader(""), &stderr,
 			workerArgs(flagSrv, searchSrv, "-o", "none")...)
-		if err != nil {
-			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
-		}
-		if flagSrv.CallCount() != 1 || envSrv.CallCount() != 0 {
-			t.Errorf("calls: flag endpoint %d, env endpoint %d; want the flag to win", flagSrv.CallCount(), envSrv.CallCount())
-		}
+		must.NoError(err, "research --agent worker; stderr: %s", stderr.String())
+		must.Equal(1, flagSrv.CallCount(), "the flag endpoint should serve the run")
+		must.Zero(envSrv.CallCount(), "the env endpoint should be ignored when the flag is set")
 	})
 
 	t.Run("knowledge env unread without a provider", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer(finalReply)
 		defer modelSrv.Close()
 		searchSrv := searchtest.NewFakeServer(nil)
@@ -317,16 +294,15 @@ func TestFleetEndpointsFromEnvironment(t *testing.T) {
 		var stderr bytes.Buffer
 		_, err := executeWith(t, &countingResolver{}, strings.NewReader(""), &stderr,
 			workerArgs(modelSrv, searchSrv, "-o", "none")...)
-		if err != nil {
-			t.Fatalf("an unused knowledge variable failed the run: %v", err)
-		}
+		must.NoError(err, "an unused knowledge variable failed the run")
 	})
 }
 
-// TestFleetEndpointEnvRejectedWithoutEcho: an invalid CHIRON_FLEET_*_ENDPOINT
+// TestFleetEndpointEnv_RejectedWithoutEcho: an invalid CHIRON_FLEET_*_ENDPOINT
 // fails the run before any secret resolves or endpoint is dialled, naming
 // the variable but never echoing its path, query or credentials.
-func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
+func TestFleetEndpointEnv_RejectedWithoutEcho(t *testing.T) {
+	must := require.New(t)
 	const token = "sk-live-0123456789abcdefghijklmn"
 	modelSrv := modeltest.NewFakeServer(finalReply)
 	defer modelSrv.Close()
@@ -348,6 +324,7 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 			[]string{"--fleet-fetch-provider", "exa", "--fleet-exa-key-ref", "secret://EXA_KEY"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			clearEndpointEnv(t)
 			t.Setenv(tt.env, tt.value)
 			var args []string
@@ -362,26 +339,20 @@ func TestFleetEndpointEnvRejectedWithoutEcho(t *testing.T) {
 			resolver := &countingResolver{}
 			var stderr bytes.Buffer
 			_, err := executeWith(t, resolver, strings.NewReader(""), &stderr, args...)
-			if err == nil || !strings.Contains(err.Error(), tt.env) {
-				t.Fatalf("err = %v, want it to name %s", err, tt.env)
-			}
-			if strings.Contains(err.Error()+stderr.String(), token) {
-				t.Errorf("the rejected value leaked: %v\nstderr: %s", err, stderr.String())
-			}
-			if n := resolver.calls.Load(); n != 0 {
-				t.Errorf("resolver invoked %d times before the variable was validated", n)
-			}
+			must.ErrorContains(err, tt.env)
+			must.NotContains(err.Error()+stderr.String(), token, "the rejected value leaked")
+			must.Zero(resolver.calls.Load(), "resolver invoked before the variable was validated")
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-		t.Error("an invalid endpoint variable must not let the run dial anything")
-	}
+	must.Zero(modelSrv.CallCount(), "an invalid endpoint variable must not let the run dial the model endpoint")
+	must.Zero(searchSrv.CallCount(), "an invalid endpoint variable must not let the run dial the search endpoint")
 }
 
-// TestMissingEndpointErrorNamesFlagAndVariable: a worker run missing any
-// fleet endpoint it uses fails before any secret resolves, and the error
+// TestWorker_MissingEndpoint_ErrorNamesFlagAndVariable: a worker run missing
+// any fleet endpoint it uses fails before any secret resolves, and the error
 // names the flag and the environment variable that can supply it.
-func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
+func TestWorker_MissingEndpoint_ErrorNamesFlagAndVariable(t *testing.T) {
+	must := require.New(t)
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
@@ -393,6 +364,7 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 
 	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
 		t.Run(tt.Flag, func(t *testing.T) {
+			must := require.New(t)
 			clearEndpointEnv(t)
 			full := workerArgs(modelSrv, searchSrv, "-o", "none",
 				"--fleet-knowledge-provider", "billet",
@@ -412,62 +384,49 @@ func TestMissingEndpointErrorNamesFlagAndVariable(t *testing.T) {
 			resolver := &countingResolver{}
 			var stderr bytes.Buffer
 			_, err := executeWith(t, resolver, strings.NewReader(""), &stderr, args...)
-			if err == nil {
-				t.Fatalf("a worker run without --%s succeeded", tt.Flag)
-			}
+			must.Error(err, "a worker run without --%s succeeded", tt.Flag)
 			for _, want := range []string{tt.Field + " is required", "--" + tt.Flag, tt.Env} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q lacks %q", err, want)
-				}
+				must.ErrorContains(err, want)
 			}
-			if n := resolver.calls.Load(); n != 0 {
-				t.Errorf("resolver invoked %d times before the missing endpoint was reported", n)
-			}
+			must.Zero(resolver.calls.Load(), "resolver invoked before the missing endpoint was reported")
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(kbSrv.Requests()) != 0 || len(exaSrv.Requests()) != 0 {
-		t.Error("a worker run missing an endpoint must not dial any endpoint")
-	}
+	must.Zero(modelSrv.CallCount(), "a worker run missing an endpoint must not dial the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a worker run missing an endpoint must not dial the search endpoint")
+	must.Empty(kbSrv.Requests(), "a worker run missing an endpoint must not dial the knowledge endpoint")
+	must.Empty(exaSrv.Requests(), "a worker run missing an endpoint must not dial the exa endpoint")
 }
 
-// TestResearchConfigRefusesEndpointFlags: research-config never emits a
+// TestResearchConfig_RefusesEndpointFlags: research-config never emits a
 // fleet endpoint, since its output is the next stage's base config; the
 // error points at the final-stage flag and the environment variable.
-func TestResearchConfigRefusesEndpointFlags(t *testing.T) {
+func TestResearchConfig_RefusesEndpointFlags(t *testing.T) {
 	for _, tt := range config.FleetEndpoints(&config.FleetConfig{}) {
 		t.Run(tt.Flag, func(t *testing.T) {
+			must := require.New(t)
 			stdout, _, err := execute(t, "research-config", "--agent", "worker", "--"+tt.Flag, "https://gateway.example/v1")
-			if err == nil {
-				t.Fatalf("research-config emitted an endpoint:\n%s", stdout)
-			}
+			must.Error(err, "research-config emitted an endpoint:\n%s", stdout)
 			for _, want := range []string{"--" + tt.Flag, tt.Env, "final chiron research stage"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q lacks %q", err, want)
-				}
+				must.ErrorContains(err, want)
 			}
-			if stdout != "" {
-				t.Errorf("stdout = %q, want nothing emitted", stdout)
-			}
+			must.Empty(stdout, "research-config must emit nothing when it refuses")
 		})
 	}
 }
 
-// TestWorkerPipelineTakesEndpointsAtTheFinalStage: a research-config stage
-// carries the worker's key references and caps but no endpoint, and the final
-// research stage takes the endpoints from its environment or its own flags.
-func TestWorkerPipelineTakesEndpointsAtTheFinalStage(t *testing.T) {
+// TestWorkerPipeline_EndpointsAtFinalStage: a research-config stage carries the
+// worker's key references and caps but no endpoint, and the final research
+// stage takes the endpoints from its environment or its own flags.
+func TestWorkerPipeline_EndpointsAtFinalStage(t *testing.T) {
+	must := require.New(t)
 	clearEndpointEnv(t)
 	first, _, err := execute(t, "research-config", "--agent", "worker",
 		"--fleet-model-name", "test-model",
 		"--fleet-model-key-ref", "secret://MODEL_KEY",
 		"--fleet-max-turns", "3",
 	)
-	if err != nil {
-		t.Fatalf("first stage: %v", err)
-	}
-	if strings.Contains(first, "_endpoint") {
-		t.Fatalf("the emitted config names an endpoint:\n%s", first)
-	}
+	must.NoError(err, "first stage")
+	must.NotContains(first, "_endpoint", "the emitted config names an endpoint:\n%s", first)
 
 	for _, tt := range []struct {
 		name string
@@ -477,6 +436,7 @@ func TestWorkerPipelineTakesEndpointsAtTheFinalStage(t *testing.T) {
 		{"final-stage flags", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(finalReply)
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
@@ -492,12 +452,10 @@ func TestWorkerPipelineTakesEndpointsAtTheFinalStage(t *testing.T) {
 
 			resolver := &countingResolver{}
 			var stderr bytes.Buffer
-			if _, err := executeWith(t, resolver, pipedStdin(t, first), &stderr, args...); err != nil {
-				t.Fatalf("final stage: %v\nstderr: %s", err, stderr.String())
-			}
-			if modelSrv.CallCount() != 1 || resolver.calls.Load() != 1 {
-				t.Errorf("model calls %d, resolver calls %d; want the piped worker run to reach the model once", modelSrv.CallCount(), resolver.calls.Load())
-			}
+			_, err := executeWith(t, resolver, pipedStdin(t, first), &stderr, args...)
+			must.NoError(err, "final stage; stderr: %s", stderr.String())
+			must.Equal(1, modelSrv.CallCount(), "the piped worker run must reach the model once")
+			must.EqualValues(1, resolver.calls.Load(), "the piped worker run must resolve the model key once")
 		})
 	}
 }
@@ -548,10 +506,9 @@ type firstRequestProbe struct {
 
 func newFirstRequestProbe(t *testing.T, name string, stderr *syncBuffer, target string) *firstRequestProbe {
 	t.Helper()
+	must := require.New(t)
 	u, err := url.Parse(target)
-	if err != nil {
-		t.Fatalf("parse %s fake URL: %v", name, err)
-	}
+	must.NoError(err, "parse %s fake URL", name)
 	p := &firstRequestProbe{name: name}
 	proxy := httputil.NewSingleHostReverseProxy(u)
 	p.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -581,11 +538,11 @@ func (p *firstRequestProbe) stderrAtFirstRequest() (string, bool) {
 	return *p.snapshot, true
 }
 
-// TestWorkerEndpointsEventPrecedesEveryEndpointRequest: a worker run emits
+// TestWorker_EndpointsEvent_PrecedesEndpointRequests: a worker run emits
 // exactly one delta event naming its model, search and (with a provider)
 // knowledge destinations by scheme and host, before the first request
 // reaches any of them; a token in an endpoint path never reaches stderr.
-func TestWorkerEndpointsEventPrecedesEveryEndpointRequest(t *testing.T) {
+func TestWorker_EndpointsEvent_PrecedesEndpointRequests(t *testing.T) {
 	const token = "sk-live-0123456789abcdefghijklmn"
 	for _, tt := range []struct {
 		name      string
@@ -595,6 +552,7 @@ func TestWorkerEndpointsEventPrecedesEveryEndpointRequest(t *testing.T) {
 		{"without a knowledge provider", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			replies := []modeltest.FakeReply{{Content: `{"action":"search","query":"sky colour"}`, FinishReason: "stop"}}
 			if tt.knowledge {
 				replies = append(replies, modeltest.FakeReply{Content: `{"action":"recall","query":"sky colour"}`, FinishReason: "stop"})
@@ -630,34 +588,23 @@ func TestWorkerEndpointsEventPrecedesEveryEndpointRequest(t *testing.T) {
 				probes = append(probes, kbProbe)
 			}
 
-			if _, err := executeWith(t, &countingResolver{}, strings.NewReader(""), stderr, args...); err != nil {
-				t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
-			}
-			got := endpointsEvents(t, stderr.String())
-			if len(got) != 1 || got[0] != want {
-				t.Fatalf("endpoints events = %q, want exactly [%s]", got, want)
-			}
+			_, err := executeWith(t, &countingResolver{}, strings.NewReader(""), stderr, args...)
+			must.NoError(err, "research --agent worker; stderr: %s", stderr.String())
+			must.Equal([]string{want}, endpointsEvents(t, stderr.String()), "endpoints events on stderr")
 			for _, p := range probes {
 				at, ok := p.stderrAtFirstRequest()
-				if !ok {
-					t.Errorf("the %s endpoint was never called", p.name)
-					continue
-				}
-				if len(endpointsEvents(t, at)) != 1 {
-					t.Errorf("the endpoints event was not on stderr when the first %s request arrived:\n%s", p.name, at)
-				}
+				must.True(ok, "the %s endpoint was never called", p.name)
+				must.Len(endpointsEvents(t, at), 1, "the endpoints event was not on stderr when the first %s request arrived:\n%s", p.name, at)
 			}
-			if strings.Contains(stderr.String(), token) {
-				t.Errorf("an endpoint path reached stderr:\n%s", stderr.String())
-			}
+			must.NotContains(stderr.String(), token, "an endpoint path reached stderr")
 		})
 	}
 }
 
-// TestEndpointsEventCannotBeSuppressed: neither --quiet, a base turning
+// TestEndpointsEvent_CannotBeSuppressed: neither --quiet, a base turning
 // streaming off, nor JSON output stops a worker run naming its endpoints on
 // stderr.
-func TestEndpointsEventCannotBeSuppressed(t *testing.T) {
+func TestEndpointsEvent_CannotBeSuppressed(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		base  string
@@ -668,6 +615,7 @@ func TestEndpointsEventCannotBeSuppressed(t *testing.T) {
 		{"json output", "", []string{"-o", "json"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(finalReply)
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
@@ -676,12 +624,8 @@ func TestEndpointsEventCannotBeSuppressed(t *testing.T) {
 
 			var stderr bytes.Buffer
 			_, err := executeWith(t, &countingResolver{}, strings.NewReader(tt.base), &stderr, workerArgs(modelSrv, searchSrv, tt.extra...)...)
-			if err != nil {
-				t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr.String())
-			}
-			if n := len(endpointsEvents(t, stderr.String())); n != 1 {
-				t.Errorf("endpoints events = %d, want 1\nstderr: %s", n, stderr.String())
-			}
+			must.NoError(err, "research --agent worker; stderr: %s", stderr.String())
+			must.Len(endpointsEvents(t, stderr.String()), 1, "endpoints events on stderr\n%s", stderr.String())
 		})
 	}
 }

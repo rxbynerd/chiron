@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/memory/alexandria"
@@ -26,14 +28,13 @@ const (
 // construction error.
 func newClient(t *testing.T, endpoint string, mutate ...func(*alexandria.Options)) *alexandria.Client {
 	t.Helper()
+	must := require.New(t)
 	opts := alexandria.Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := alexandria.New(opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err)
 	return c
 }
 
@@ -52,7 +53,7 @@ func hits(n int) []alexandria.SearchResult {
 	return out
 }
 
-func TestNewValidation(t *testing.T) {
+func TestNew_ValidatesOptions(t *testing.T) {
 	tests := []struct {
 		name    string
 		opts    alexandria.Options
@@ -82,38 +83,31 @@ func TestNewValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := alexandria.New(tt.opts)
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("New: unexpected error %v", err)
-				}
+				must.NoError(err)
 				return
 			}
-			if err == nil {
-				t.Fatalf("New: want error containing %q, got nil", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error %q does not contain %q", err, tt.wantErr)
-			}
-			if !strings.HasPrefix(err.Error(), "alexandria: ") {
-				t.Errorf("error %q lacks the alexandria: prefix", err)
-			}
-			if tt.absent != "" && strings.Contains(err.Error(), tt.absent) {
-				t.Errorf("error %q echoes %q", err, tt.absent)
+			must.ErrorContains(err, tt.wantErr)
+			must.True(strings.HasPrefix(err.Error(), "alexandria: "), "error %q lacks the alexandria: prefix", err.Error())
+			if tt.absent != "" {
+				must.NotContains(err.Error(), tt.absent, "error echoes the secret")
 			}
 		})
 	}
 }
 
-func TestNewDoesNotMutateCallerClient(t *testing.T) {
+func TestNew_DoesNotMutateCallerHTTPClient(t *testing.T) {
+	must := require.New(t)
 	caller := &http.Client{}
 	newClient(t, "https://alexandria.example.com", func(o *alexandria.Options) { o.HTTPClient = caller })
-	if caller.CheckRedirect != nil {
-		t.Error("New set CheckRedirect on the caller's client")
-	}
+	must.Nil(caller.CheckRedirect, "New must not set CheckRedirect on the caller's client")
 }
 
-func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
+func TestRecall_MapsFragmentAndChunkHits(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{
 		AppliedMode: "hybrid",
 		Results: []alexandria.SearchResult{
@@ -139,9 +133,7 @@ func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
 	c := newClient(t, fake.URL())
 
 	got, err := c.Recall(context.Background(), "team-notes", memory.Query{Text: "how do we deploy?", Limit: 10})
-	if err != nil {
-		t.Fatalf("Recall: %v", err)
-	}
+	must.NoError(err)
 
 	want := []memory.Recalled{
 		{
@@ -195,36 +187,26 @@ func TestRecallMapsFragmentAndChunkHits(t *testing.T) {
 			Score: 0.1,
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Recall mapping mismatch\n got: %+v\nwant: %+v", got, want)
-	}
+	check.Equal(want, got)
 
 	reqs := fake.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("requests = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1)
 	r := reqs[0]
-	if r.Method != http.MethodGet || r.Path != "/v1/search" {
-		t.Errorf("request = %s %s, want GET /v1/search", r.Method, r.Path)
-	}
-	if r.Accept != "application/json" {
-		t.Errorf("Accept = %q, want application/json", r.Accept)
-	}
+	check.Equal(http.MethodGet, r.Method)
+	check.Equal("/v1/search", r.Path)
+	check.Equal("application/json", r.Accept, "Accept header")
 	wantQuery := map[string]string{"q": "how do we deploy?", "mode": "hybrid", "max_tokens": "4000", "space": "team-notes"}
-	if len(r.Query) != len(wantQuery) {
-		t.Errorf("query = %v, want exactly %v", r.Query, wantQuery)
-	}
+	check.Len(r.Query, len(wantQuery), "query %v, want exactly %v", r.Query, wantQuery)
 	for k, v := range wantQuery {
-		if got := r.Query.Get(k); got != v {
-			t.Errorf("query %s = %q, want %q", k, got, v)
-		}
+		check.Equal(v, r.Query.Get(k), "query param %s", k)
 	}
 }
 
-// TestRecallRefGrammar: only refs in Alexandria's grammar become hits; any
-// other ref, a hostile URL included, is dropped before the limit applies, so
-// it never reaches a Recalled and never displaces a valid hit.
-func TestRecallRefGrammar(t *testing.T) {
+// TestRecall_DropsRefsOutsideAlexandriaGrammar: only refs in Alexandria's
+// grammar become hits; any other ref, a hostile URL included, is dropped before
+// the limit applies, so it never reaches a Recalled and never displaces a valid
+// hit.
+func TestRecall_DropsRefsOutsideAlexandriaGrammar(t *testing.T) {
 	const id = "0f2e4d6c-1111-2222-3333-444455556666"
 	for _, tt := range []struct {
 		name string
@@ -250,6 +232,7 @@ func TestRecallRefGrammar(t *testing.T) {
 		{"trailing newline", "kb://fragment/" + id + "\n", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			const valid = "kb://source/22222222-2222-2222-2222-222222222222#L1-L2"
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{
 				{Ref: tt.ref, Unit: "chunk", ID: id, Title: "candidate", Snippet: "candidate"},
@@ -258,26 +241,23 @@ func TestRecallRefGrammar(t *testing.T) {
 			defer fake.Close()
 
 			got, err := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "x", Limit: 1})
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if len(got) != 1 {
-				t.Fatalf("hits = %d, want 1", len(got))
-			}
-			if accepted := got[0].Reference.Digest == tt.ref; accepted != tt.ok {
-				t.Errorf("ref %q accepted = %v, want %v (got %+v)", tt.ref, accepted, tt.ok, got[0].Reference)
-			}
-			if !tt.ok && got[0].Reference.Locator != valid {
-				t.Errorf("the rejected hit displaced the valid one: %+v", got[0].Reference)
+			must.NoError(err)
+			must.Len(got, 1)
+			accepted := got[0].Reference.Digest == tt.ref
+			must.Equal(tt.ok, accepted, "ref %q accepted, reference %+v", tt.ref, got[0].Reference)
+			if !tt.ok {
+				must.Equal(valid, got[0].Reference.Locator, "the rejected hit displaced the valid one")
 			}
 		})
 	}
 }
 
-// TestRecallBoundsTitleAndSnippet: a hit's title is cut to 200 runes and its
+// TestRecall_BoundsTitleAndSnippet: a hit's title is cut to 200 runes and its
 // snippet to 4 KiB, both on rune boundaries (see maxTitleRunes and
 // maxSnippetBytes in internal/memory/alexandria/recall.go).
-func TestRecallBoundsTitleAndSnippet(t *testing.T) {
+func TestRecall_BoundsTitleAndSnippet(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const (
 		maxTitleRunes   = 200
 		maxSnippetBytes = 4 << 10
@@ -292,19 +272,16 @@ func TestRecallBoundsTitleAndSnippet(t *testing.T) {
 	defer fake.Close()
 
 	got, err := newClient(t, fake.URL()).Recall(context.Background(), "", memory.Query{Text: "x"})
-	if err != nil || len(got) != 1 {
-		t.Fatalf("Recall = %d hits, %v; want 1", len(got), err)
-	}
+	must.NoError(err)
+	must.Len(got, 1)
 	m := got[0].Memory
-	if n := utf8.RuneCountInString(m.Meta.Name); n != maxTitleRunes {
-		t.Errorf("title is %d runes, want %d", n, maxTitleRunes)
-	}
-	if len(m.Text) > maxSnippetBytes || !utf8.ValidString(m.Text) || !strings.HasSuffix(m.Text, truncatedMarker) {
-		t.Errorf("snippet is %d bytes (valid UTF-8 %v), want at most %d ending in the marker", len(m.Text), utf8.ValidString(m.Text), maxSnippetBytes)
-	}
+	check.Equal(maxTitleRunes, utf8.RuneCountInString(m.Meta.Name), "title runes")
+	check.LessOrEqual(len(m.Text), maxSnippetBytes, "snippet bytes")
+	check.True(utf8.ValidString(m.Text), "snippet is valid UTF-8")
+	check.True(strings.HasSuffix(m.Text, truncatedMarker), "snippet ends with the truncation marker")
 }
 
-func TestRecallNamespaceFallsBackWhenResultHasNoSpace(t *testing.T) {
+func TestRecall_NamespaceFallsBackWhenResultHasNoSpace(t *testing.T) {
 	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(1)})
 	defer fake.Close()
 	c := newClient(t, fake.URL())
@@ -320,21 +297,17 @@ func TestRecallNamespaceFallsBackWhenResultHasNoSpace(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got, err := c.Recall(context.Background(), tt.ns, memory.Query{Text: "x"})
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if got[0].Reference.Namespace != tt.wantNS {
-				t.Errorf("Namespace = %q, want %q", got[0].Reference.Namespace, tt.wantNS)
-			}
-			if _, ok := got[0].Memory.Meta.Labels["space"]; ok != tt.wantLabel {
-				t.Errorf("space label present = %v, want %v", ok, tt.wantLabel)
-			}
+			must.NoError(err)
+			must.Equal(tt.wantNS, got[0].Reference.Namespace)
+			_, hasSpace := got[0].Memory.Meta.Labels["space"]
+			must.Equal(tt.wantLabel, hasSpace, "space label present")
 		})
 	}
 }
 
-func TestRecallLimit(t *testing.T) {
+func TestRecall_ClampsAndDefaultsLimit(t *testing.T) {
 	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(25)})
 	defer fake.Close()
 
@@ -354,33 +327,27 @@ func TestRecallLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) { o.DefaultLimit = tt.defaultLimit })
 			got, err := c.Recall(context.Background(), "", memory.Query{Text: "x", Limit: tt.limit})
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if len(got) != tt.want {
-				t.Errorf("hits = %d, want %d", len(got), tt.want)
-			}
+			must.NoError(err)
+			must.Len(got, tt.want)
 		})
 	}
 }
 
-func TestRecallFewerResultsThanLimit(t *testing.T) {
+func TestRecall_ReturnsFewerHitsThanLimit(t *testing.T) {
+	must := require.New(t)
 	fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(2)})
 	defer fake.Close()
 	c := newClient(t, fake.URL())
 
 	got, err := c.Recall(context.Background(), "", memory.Query{Text: "x", Limit: 10})
-	if err != nil {
-		t.Fatalf("Recall: %v", err)
-	}
-	if len(got) != 2 {
-		t.Errorf("hits = %d, want 2", len(got))
-	}
+	must.NoError(err)
+	must.Len(got, 2)
 }
 
-func TestRecallSpaceValidation(t *testing.T) {
+func TestRecall_ValidatesSpaceSlug(t *testing.T) {
 	tests := []struct {
 		name      string
 		ns        memory.Namespace
@@ -402,6 +369,7 @@ func TestRecallSpaceValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
@@ -409,31 +377,20 @@ func TestRecallSpaceValidation(t *testing.T) {
 			_, err := c.Recall(context.Background(), tt.ns, memory.Query{Text: "x"})
 			reqs := fake.Requests()
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
-				}
-				if len(reqs) != 0 {
-					t.Errorf("requests = %d, want none before validation passes", len(reqs))
-				}
+				must.ErrorContains(err, tt.wantErr)
+				must.Empty(reqs, "no request before validation passes")
 				return
 			}
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if len(reqs) != 1 {
-				t.Fatalf("requests = %d, want 1", len(reqs))
-			}
-			if _, present := reqs[0].Query["space"]; present != (tt.wantSpace != "") {
-				t.Errorf("space param present = %v, want %v", present, tt.wantSpace != "")
-			}
-			if got := reqs[0].Query.Get("space"); got != tt.wantSpace {
-				t.Errorf("space = %q, want %q", got, tt.wantSpace)
-			}
+			must.NoError(err)
+			must.Len(reqs, 1)
+			_, present := reqs[0].Query["space"]
+			must.Equal(tt.wantSpace != "", present, "space param present")
+			must.Equal(tt.wantSpace, reqs[0].Query.Get("space"))
 		})
 	}
 }
 
-func TestRecallHeaders(t *testing.T) {
+func TestRecall_SendsAuthHeadersAndKeepsKeyOutOfQuery(t *testing.T) {
 	tests := []struct {
 		name       string
 		accessID   string
@@ -446,37 +403,31 @@ func TestRecallHeaders(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
 				o.AccessClientID, o.AccessClientSecret, o.MaxTokens = tt.accessID, tt.accessSec, tt.maxTokens
 			})
 
-			if _, err := c.Recall(context.Background(), "", memory.Query{Text: "x"}); err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
+			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
+			must.NoError(err)
 			r := fake.Requests()[0]
-			if r.Authorization != "Bearer "+testKey {
-				t.Errorf("Authorization = %q, want bearer token", r.Authorization)
-			}
-			if r.AccessClientID != tt.accessID || r.AccessClientSecret != tt.accessSec {
-				t.Errorf("Access headers = (%q, %q), want (%q, %q)", r.AccessClientID, r.AccessClientSecret, tt.accessID, tt.accessSec)
-			}
-			if got := r.Query.Get("max_tokens"); got != tt.wantTokens {
-				t.Errorf("max_tokens = %q, want %q", got, tt.wantTokens)
-			}
+			must.Equal("Bearer "+testKey, r.Authorization)
+			must.Equal(tt.accessID, r.AccessClientID, "Access client ID header")
+			must.Equal(tt.accessSec, r.AccessClientSecret, "Access client secret header")
+			must.Equal(tt.wantTokens, r.Query.Get("max_tokens"))
 			for k, vs := range r.Query {
 				for _, v := range vs {
-					if strings.Contains(v, testKey) {
-						t.Errorf("query param %s carries the API key", k)
-					}
+					must.NotContains(v, testKey, "query param %s carries the API key", k)
 				}
 			}
 		})
 	}
 }
 
-func TestRecallRefusesRedirect(t *testing.T) {
+func TestRecall_RefusesRedirects(t *testing.T) {
+	must := require.New(t)
 	var targetHits atomic.Int32
 	var targetAuth atomic.Value
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,6 +446,7 @@ func TestRecallRefusesRedirect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRedirect(tt.location()))
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
@@ -502,26 +454,20 @@ func TestRecallRefusesRedirect(t *testing.T) {
 			})
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
-			if err == nil || !strings.Contains(err.Error(), "redirect") {
-				t.Fatalf("err = %v, want a redirect refusal", err)
-			}
-			if strings.Contains(err.Error(), testKey) || strings.Contains(err.Error(), testAccessSecret) {
-				t.Errorf("error echoes a credential: %v", err)
-			}
-			if n := len(fake.Requests()); n != 1 {
-				t.Errorf("fake requests = %d, want 1 (redirect not followed)", n)
-			}
+			must.ErrorContains(err, "redirect")
+			must.NotContains(err.Error(), testKey, "error echoes the API key")
+			must.NotContains(err.Error(), testAccessSecret, "error echoes the Access secret")
+			must.Len(fake.Requests(), 1, "redirect not followed")
 		})
 	}
-	if n := targetHits.Load(); n != 0 {
-		t.Errorf("redirect target received %d requests (Authorization %v), want 0", n, targetAuth.Load())
-	}
+	must.Zero(targetHits.Load(), "redirect target received requests (Authorization %v)", targetAuth.Load())
 }
 
-func TestRecallOverridesCallerCheckRedirect(t *testing.T) {
+func TestRecall_RefusesRedirectsDespiteCallerPolicy(t *testing.T) {
 	// New must impose RefuseAllRedirects even when the caller's http.Client
 	// already carries a permissive policy, for every redirect including one
 	// that stays on the same origin.
+	must := require.New(t)
 	var targetHits atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetHits.Add(1)
@@ -538,6 +484,7 @@ func TestRecallOverridesCallerCheckRedirect(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRedirect(tt.location()))
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
@@ -546,28 +493,21 @@ func TestRecallOverridesCallerCheckRedirect(t *testing.T) {
 			})
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
-			if err == nil || !strings.Contains(err.Error(), "redirect") {
-				t.Fatalf("err = %v, want a redirect refusal even though the caller's client permits redirects", err)
-			}
-			if n := len(fake.Requests()); n != 1 {
-				t.Errorf("fake requests = %d, want 1 (redirect not followed)", n)
-			}
+			must.ErrorContains(err, "redirect", "refusal must hold even though the caller's client permits redirects")
+			must.Len(fake.Requests(), 1, "redirect not followed")
 		})
 	}
-	if n := targetHits.Load(); n != 0 {
-		t.Errorf("redirect target received %d requests, want 0", n)
-	}
+	must.Zero(targetHits.Load(), "redirect target received requests")
 }
 
-func TestRecallErrorStatuses(t *testing.T) {
+func TestRecall_ErrorStatusesAreScrubbedAndBounded(t *testing.T) {
 	echo := `{"error":"invalid token ` + testKey + `"}`
 	tests := []struct {
-		name    string
-		opts    []alexandriatest.FakeOption
-		want    []string
-		absent  []string
-		maxLen  int
-		keyBody bool
+		name   string
+		opts   []alexandriatest.FakeOption
+		want   []string
+		absent []string
+		maxLen int
 	}{
 		{
 			name: "429 with Retry-After",
@@ -617,6 +557,7 @@ func TestRecallErrorStatuses(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, tt.opts...)
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) {
@@ -624,34 +565,24 @@ func TestRecallErrorStatuses(t *testing.T) {
 			})
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
-			if err == nil {
-				t.Fatal("Recall: want error, got nil")
-			}
+			must.Error(err)
 			msg := err.Error()
-			if !strings.HasPrefix(msg, "alexandria: ") {
-				t.Errorf("error %q lacks the alexandria: prefix", msg)
-			}
+			must.True(strings.HasPrefix(msg, "alexandria: "), "error %q lacks the alexandria: prefix", msg)
 			for _, w := range tt.want {
-				if !strings.Contains(msg, w) {
-					t.Errorf("error %q does not contain %q", msg, w)
-				}
+				must.ErrorContains(err, w)
 			}
 			for _, a := range tt.absent {
-				if strings.Contains(msg, a) {
-					t.Errorf("error %q contains %q", msg, a)
-				}
+				must.NotContains(msg, a)
 			}
-			if tt.maxLen > 0 && len(msg) > tt.maxLen {
-				t.Errorf("error length %d exceeds %d", len(msg), tt.maxLen)
+			if tt.maxLen > 0 {
+				must.LessOrEqual(len(msg), tt.maxLen, "error length")
 			}
-			if n := len(fake.Requests()); n != 1 {
-				t.Errorf("requests = %d, want exactly 1 (no retry)", n)
-			}
+			must.Len(fake.Requests(), 1, "no retry")
 		})
 	}
 }
 
-func TestRecallBodyBound(t *testing.T) {
+func TestRecall_BodySizeBound(t *testing.T) {
 	tests := []struct {
 		name    string
 		size    int
@@ -664,25 +595,22 @@ func TestRecallBodyBound(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithOversizedBody(tt.size))
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *alexandria.Options) { o.MaxBodyBytes = tt.bound })
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
 			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "exceeds") {
-					t.Fatalf("err = %v, want a body-bound failure", err)
-				}
+				must.ErrorContains(err, "exceeds")
 				return
 			}
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
+			must.NoError(err)
 		})
 	}
 }
 
-func TestRecallDegradedLabel(t *testing.T) {
+func TestRecall_DegradedLabelFollowsResponse(t *testing.T) {
 	tests := []struct {
 		name     string
 		degraded *string
@@ -694,28 +622,24 @@ func TestRecallDegradedLabel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: hits(3), Degraded: tt.degraded})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
 			got, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if len(got) != 3 {
-				t.Fatalf("hits = %d, want 3", len(got))
-			}
+			must.NoError(err)
+			must.Len(got, 3)
 			for i, h := range got {
-				v, ok := h.Memory.Meta.Labels["degraded"]
-				if ok != (tt.want != "") || v != tt.want {
-					t.Errorf("hit %d degraded label = (%q, %v), want %q", i, v, ok, tt.want)
-				}
+				label, present := h.Memory.Meta.Labels["degraded"]
+				must.Equal(tt.want != "", present, "hit %d has a degraded label", i)
+				must.Equal(tt.want, label, "hit %d degraded label", i)
 			}
 		})
 	}
 }
 
-func TestRecallStrictDecode(t *testing.T) {
+func TestRecall_DecodesResponseStrictly(t *testing.T) {
 	tests := []struct {
 		name     string
 		body     string
@@ -736,28 +660,23 @@ func TestRecallStrictDecode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{}, alexandriatest.WithRawBody(tt.body))
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
 			got, err := c.Recall(context.Background(), "", memory.Query{Text: "x"})
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
-				}
+				must.ErrorContains(err, tt.wantErr)
 				return
 			}
-			if err != nil {
-				t.Fatalf("Recall: %v", err)
-			}
-			if len(got) != tt.wantHits {
-				t.Errorf("hits = %d, want %d", len(got), tt.wantHits)
-			}
+			must.NoError(err)
+			must.Len(got, tt.wantHits)
 		})
 	}
 }
 
-func TestRecallRejectsEmptyQuery(t *testing.T) {
+func TestRecall_RejectsEmptyQueryBeforeRequest(t *testing.T) {
 	tests := []struct {
 		name string
 		text string
@@ -767,35 +686,27 @@ func TestRecallRejectsEmptyQuery(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := alexandriatest.NewFakeServer(alexandria.SearchResponse{})
 			defer fake.Close()
 			c := newClient(t, fake.URL())
 
 			_, err := c.Recall(context.Background(), "", memory.Query{Text: tt.text})
-			if err == nil || !strings.Contains(err.Error(), "query text must not be empty") {
-				t.Fatalf("err = %v, want an empty-query error", err)
-			}
-			if n := len(fake.Requests()); n != 0 {
-				t.Errorf("requests = %d, want none", n)
-			}
+			must.ErrorContains(err, "query text must not be empty")
+			must.Empty(fake.Requests(), "no request before validation passes")
 		})
 	}
 }
 
-func TestRecallTransportErrorScrubbed(t *testing.T) {
+func TestRecall_TransportErrorIsScrubbed(t *testing.T) {
+	must := require.New(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	endpoint := srv.URL
 	srv.Close()
 	c := newClient(t, endpoint)
 
 	_, err := c.Recall(context.Background(), "", memory.Query{Text: testKey})
-	if err == nil {
-		t.Fatal("Recall: want a transport error, got nil")
-	}
-	if !strings.HasPrefix(err.Error(), "alexandria: GET /v1/search: ") {
-		t.Errorf("error %q lacks the transport prefix", err)
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Errorf("transport error echoes the key: %v", err)
-	}
+	must.Error(err, "want a transport error")
+	must.True(strings.HasPrefix(err.Error(), "alexandria: GET /v1/search: "), "error %q lacks the transport prefix", err.Error())
+	must.NotContains(err.Error(), testKey, "transport error echoes the key")
 }

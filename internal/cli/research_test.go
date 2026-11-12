@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -27,10 +30,9 @@ import (
 // chart (the --quiet poll path and the post-await re-fetch).
 func newInteractionsServer(t *testing.T, finalStatus string) *httptest.Server {
 	t.Helper()
+	check := assert.New(t)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("x-goog-api-key") == "" {
-			t.Error("request without the API key header")
-		}
+		check.NotEmpty(r.Header.Get("x-goog-api-key"), "request without the API key header")
 		if r.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_smoke","status":"in_progress","created":"2026-06-07T12:00:00Z"}`))
 			return
@@ -81,47 +83,31 @@ func execute(t *testing.T, args ...string) (stdout, stderr string, err error) {
 }
 
 func TestResearchEndToEndText(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "research", "--query", "smoke question", "-o", "text")
-	if err != nil {
-		t.Fatalf("research: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "research stderr:\n%s", stderr)
 
 	// The report lands on stdout: front matter (with the tool set and
 	// sources) and body, clean enough to pipe into a file.
-	if !strings.Contains(stdout, "# Smoke report") {
-		t.Errorf("stdout missing report body:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "query: smoke question") {
-		t.Errorf("stdout missing front-matter query:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "tools: [google_search, url_context, code_execution]") {
-		t.Errorf("stdout missing the tool set:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "https://example.org/src") {
-		t.Errorf("stdout missing the cited source:\n%s", stdout)
-	}
+	check.Contains(stdout, "# Smoke report", "stdout missing report body")
+	check.Contains(stdout, "query: smoke question", "stdout missing front-matter query")
+	check.Contains(stdout, "tools: [google_search, url_context, code_execution]", "stdout missing the tool set")
+	check.Contains(stdout, "https://example.org/src", "stdout missing the cited source")
 
 	// Run events go to stderr as NDJSON, resume handle first among
 	// them; the streamed thought summary appears as a delta event
 	// between the resume handle and the status change.
 	want := []string{"run_started", "interaction_created", "delta", "status_changed", "run_completed", "cost_summary"}
-	if kinds := eventKinds(t, stderr); strings.Join(kinds, ",") != strings.Join(want, ",") {
-		t.Errorf("event kinds = %v, want %v", kinds, want)
-	}
-	if !strings.Contains(stderr, "v1_smoke") {
-		t.Error("stderr events must carry the interaction id — the resume handle")
-	}
-	if !strings.Contains(stderr, "weighing sources") {
-		t.Error("stderr must carry the streamed thought summary")
-	}
-	if strings.Contains(stdout, "weighing sources") {
-		t.Error("thought summaries must never reach stdout — it belongs to the report")
-	}
+	check.Equal(want, eventKinds(t, stderr), "event kinds")
+	check.Contains(stderr, "v1_smoke", "stderr events must carry the interaction id — the resume handle")
+	check.Contains(stderr, "weighing sources", "stderr must carry the streamed thought summary")
+	check.NotContains(stdout, "weighing sources", "thought summaries must never reach stdout — it belongs to the report")
 }
 
 // sseStatus serves a minimal SSE stream concluding the interaction with
@@ -145,20 +131,21 @@ func flush(w http.ResponseWriter) {
 // eventKinds parses the NDJSON event stream from stderr into its kinds.
 func eventKinds(t *testing.T, stderr string) []string {
 	t.Helper()
+	must := require.New(t)
 	var kinds []string
 	for line := range strings.Lines(stderr) {
 		var ev struct {
 			Kind string `json:"kind"`
 		}
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("stderr is not NDJSON: %q: %v", line, err)
-		}
+		must.NoError(json.Unmarshal([]byte(line), &ev), "stderr is not NDJSON: %q", line)
 		kinds = append(kinds, ev.Kind)
 	}
 	return kinds
 }
 
 func TestResearchQuietPolls(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var streamGets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("stream") == "true" {
@@ -181,20 +168,10 @@ func TestResearchQuietPolls(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "research", "--query", "smoke question", "--quiet")
-	if err != nil {
-		t.Fatalf("research --quiet: %v\nstderr: %s", err, stderr)
-	}
-	if streamGets.Load() != 0 {
-		t.Errorf("--quiet attached %d streams, want none", streamGets.Load())
-	}
-	if !strings.Contains(stdout, "# Smoke report") {
-		t.Errorf("stdout missing report body:\n%s", stdout)
-	}
-	for _, kind := range eventKinds(t, stderr) {
-		if kind == "delta" {
-			t.Error("--quiet must not emit delta events")
-		}
-	}
+	must.NoError(err, "research --quiet stderr:\n%s", stderr)
+	check.Zero(streamGets.Load(), "--quiet must not attach a stream")
+	check.Contains(stdout, "# Smoke report", "stdout missing report body")
+	check.NotContains(eventKinds(t, stderr), "delta", "--quiet must not emit delta events")
 }
 
 func TestStreamTogglesThinkingSummaries(t *testing.T) {
@@ -207,6 +184,8 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 		{"quiet", []string{"--quiet"}, "none"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
 			var (
 				mu     sync.Mutex
 				bodies []map[string]any
@@ -214,9 +193,7 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodPost {
 					var body map[string]any
-					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-						t.Errorf("decoding create body: %v", err)
-					}
+					check.NoError(json.NewDecoder(r.Body).Decode(&body), "decoding create body")
 					mu.Lock()
 					bodies = append(bodies, body)
 					mu.Unlock()
@@ -235,53 +212,43 @@ func TestStreamTogglesThinkingSummaries(t *testing.T) {
 			t.Setenv("GEMINI_API_KEY", "test-key")
 
 			args := append([]string{"research", "--query", "q", "-o", "none"}, tt.args...)
-			if _, stderr, err := execute(t, args...); err != nil {
-				t.Fatalf("research: %v\nstderr: %s", err, stderr)
-			}
+			_, stderr, err := execute(t, args...)
+			must.NoError(err, "research stderr:\n%s", stderr)
 
 			mu.Lock()
 			defer mu.Unlock()
-			if len(bodies) != 1 {
-				t.Fatalf("creates = %d, want 1", len(bodies))
-			}
+			must.Len(bodies, 1, "create requests")
 			cfg, _ := bodies[0]["agent_config"].(map[string]any)
-			if cfg == nil {
-				t.Fatal("create request missing agent_config")
-			}
-			if got := cfg["thinking_summaries"]; got != tt.want {
-				t.Errorf("thinking_summaries = %v, want %q — cfg.Stream must toggle the API request", got, tt.want)
-			}
+			must.NotNil(cfg, "create request missing agent_config")
+			must.Equal(tt.want, cfg["thinking_summaries"], "cfg.Stream must toggle the API request")
 		})
 	}
 }
 
 func TestResearchEndToEndJSON(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "research", "smoke question", "-o", "json")
-	if err != nil {
-		t.Fatalf("research: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "research stderr:\n%s", stderr)
 
 	var result types.RunResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("stdout is not one RunResult JSON document: %v\n%s", err, stdout)
-	}
-	if result.InteractionID != "v1_smoke" || result.Status != types.StatusCompleted {
-		t.Errorf("result = %s/%s", result.InteractionID, result.Status)
-	}
-	if result.Usage.SearchCount != 5 || result.Usage.EstimatedCostGBP == 0 {
-		t.Errorf("usage = %+v, want search count and cost estimate", result.Usage)
-	}
-	if result.Report == nil || len(result.Report.Assets) != 1 {
-		t.Errorf("report = %+v, want the chart asset inline", result.Report)
-	}
+	must.NoError(json.Unmarshal([]byte(stdout), &result), "stdout is not one RunResult JSON document:\n%s", stdout)
+	check.Equal("v1_smoke", result.InteractionID, "interaction id")
+	check.Equal(types.StatusCompleted, result.Status, "status")
+	check.Equal(5, result.Usage.SearchCount, "search count from grounding")
+	check.NotZero(result.Usage.EstimatedCostGBP, "cost estimate")
+	must.NotNil(result.Report, "report must be inline")
+	check.Len(result.Report.Assets, 1, "chart asset inline")
 }
 
 func TestResearchEndToEndFileSink(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
@@ -290,62 +257,47 @@ func TestResearchEndToEndFileSink(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "report.md")
 	stdout, stderr, err := execute(t, "research", "--query", "smoke question", "--out", out)
-	if err != nil {
-		t.Fatalf("research: %v\nstderr: %s", err, stderr)
-	}
-	if stdout != "" {
-		t.Errorf("with --out and -o text the report must not be duplicated on stdout, got:\n%s", stdout)
-	}
+	must.NoError(err, "research stderr:\n%s", stderr)
+	check.Empty(stdout, "with --out and -o text the report must not be duplicated on stdout")
 
 	report, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatalf("report not written: %v", err)
-	}
-	if !strings.Contains(string(report), "# Smoke report") {
-		t.Errorf("report = %s", report)
-	}
+	must.NoError(err, "report not written")
+	check.Contains(string(report), "# Smoke report", "report body")
+
 	chart, err := os.ReadFile(filepath.Join(dir, "chart-1.png"))
-	if err != nil {
-		t.Fatalf("chart asset not written next to the report: %v", err)
-	}
-	if string(chart) != "png-bytes" {
-		t.Errorf("chart bytes = %q", chart)
-	}
+	must.NoError(err, "chart asset not written next to the report")
+	check.Equal("png-bytes", string(chart), "chart bytes")
 }
 
 func TestResearchFailedExitCode(t *testing.T) {
+	must := require.New(t)
 	server := newInteractionsServer(t, "failed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	_, _, err := execute(t, "research", "--query", "smoke question", "-o", "none")
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok {
-		t.Fatalf("error = %v, want an ExitError", err)
-	}
-	if exitErr.Code != ExitResearchFailed {
-		t.Errorf("exit code = %d, want %d for a failed task", exitErr.Code, ExitResearchFailed)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr, "want an ExitError")
+	must.Equal(ExitResearchFailed, exitErr.Code, "exit code for a failed task")
 }
 
 func TestResearchBudgetExceededExitCode(t *testing.T) {
+	must := require.New(t)
 	server := newInteractionsServer(t, "budget_exceeded")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	_, _, err := execute(t, "research", "--query", "smoke question", "-o", "none")
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok {
-		t.Fatalf("error = %v, want an ExitError", err)
-	}
-	if exitErr.Code != ExitResearchStopped {
-		t.Errorf("exit code = %d, want %d for budget_exceeded", exitErr.Code, ExitResearchStopped)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr, "want an ExitError")
+	must.Equal(ExitResearchStopped, exitErr.Code, "exit code for budget_exceeded")
 }
 
 func TestResearchRequiresActionExitCode(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// requires_action aborts the await with a typed error; the CLI maps
 	// it to the failed-research exit code — it is a research outcome,
 	// not an infrastructure fault.
@@ -355,22 +307,16 @@ func TestResearchRequiresActionExitCode(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	_, _, err := execute(t, "research", "--query", "smoke question", "-o", "none")
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok {
-		t.Fatalf("error = %v, want an ExitError", err)
-	}
-	if exitErr.Code != ExitResearchFailed {
-		t.Errorf("exit code = %d, want %d for requires_action", exitErr.Code, ExitResearchFailed)
-	}
-	if !strings.Contains(err.Error(), "requires client action") {
-		t.Errorf("error %q must carry the requires_action detail", err)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr, "want an ExitError")
+	check.Equal(ExitResearchFailed, exitErr.Code, "exit code for requires_action")
+	check.ErrorContains(err, "requires client action", "error must carry the requires_action detail")
 }
 
 func TestResearchRequiresQuery(t *testing.T) {
-	if _, _, err := execute(t, "research"); err == nil {
-		t.Error("research without a query must fail before any seam is constructed")
-	}
+	must := require.New(t)
+	_, _, err := execute(t, "research")
+	must.Error(err, "research without a query must fail before any seam is constructed")
 }
 
 // TestWorkerAgentIsWired proves --agent worker constructs a real in-process
@@ -380,6 +326,8 @@ func TestResearchRequiresQuery(t *testing.T) {
 // and a fake search MCP; the report lands on stdout with the worker's front
 // matter. The fuller golden-report assertion lives in the fleet package.
 func TestWorkerAgentIsWired(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: 20, OutputTokens: 6, TotalTokens: 26}},
 		modeltest.FakeReply{
@@ -401,21 +349,14 @@ func TestWorkerAgentIsWired(t *testing.T) {
 		"--fleet-model-key-ref", "secret://MODEL_KEY",
 		"--fleet-search-endpoint", searchSrv.URL(),
 	)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
-	if !strings.Contains(stdout, "# Worker answer") {
-		t.Errorf("stdout missing the worker's report body:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "agent: worker") {
-		t.Errorf("stdout missing the worker agent in front matter:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "https://example.org/sky") {
-		t.Errorf("stdout missing the cited source:\n%s", stdout)
-	}
+	must.NoError(err, "research --agent worker stderr:\n%s", stderr)
+	check.Contains(stdout, "# Worker answer", "stdout missing the worker's report body")
+	check.Contains(stdout, "agent: worker", "stdout missing the worker agent in front matter")
+	check.Contains(stdout, "https://example.org/sky", "stdout missing the cited source")
 }
 
 func TestResearchUnresolvableSecret(t *testing.T) {
+	must := require.New(t)
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
@@ -424,19 +365,18 @@ func TestResearchUnresolvableSecret(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "")
 
 	_, _, err := execute(t, "research", "--query", "q")
-	if err == nil {
-		t.Fatal("an unresolvable secret must fail the run")
-	}
-	if _, ok := errors.AsType[*ExitError](err); ok {
-		t.Error("secret failures are usage errors, not research outcomes")
-	}
+	must.Error(err, "an unresolvable secret must fail the run")
+	_, isExitErr := errors.AsType[*ExitError](err)
+	must.False(isExitErr, "secret failures are usage errors, not research outcomes")
 }
 
-// TestThoughtSummariesAreScrubbed pins C2-SEC-1: --input documents may
-// contain credentials the agent quotes back in its thinking, so thought
-// deltas pass through secret.Scrub before reaching stderr — the same
-// structural guarantee every other output path carries.
-func TestThoughtSummariesAreScrubbed(t *testing.T) {
+// TestResearch_ThoughtSummaries_AreScrubbed covers credentials that --input
+// documents may contain and the agent quotes back in its thinking: thought
+// deltas pass through secret.Scrub before reaching stderr, the same guarantee
+// every other output path carries.
+func TestResearch_ThoughtSummaries_AreScrubbed(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// A Google-API-key-shaped credential (AIza + 35 key characters).
 	const leaked = "AIzaSyA1234567890abcdefghijklmnopqrstuv"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -459,13 +399,7 @@ func TestThoughtSummariesAreScrubbed(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	_, stderr, err := execute(t, "research", "--query", "q", "-o", "none")
-	if err != nil {
-		t.Fatalf("research: %v\nstderr: %s", err, stderr)
-	}
-	if strings.Contains(stderr, leaked) {
-		t.Errorf("the credential reached stderr unscrubbed:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "[REDACTED:google-api-key]") {
-		t.Errorf("stderr must carry the redaction marker where the credential was:\n%s", stderr)
-	}
+	must.NoError(err, "research stderr:\n%s", stderr)
+	check.NotContains(stderr, leaked, "the credential reached stderr unscrubbed")
+	check.Contains(stderr, "[REDACTED:google-api-key]", "stderr must carry the redaction marker where the credential was")
 }

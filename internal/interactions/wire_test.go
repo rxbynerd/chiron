@@ -2,34 +2,36 @@ package interactions
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStatusTerminalAndFailed(t *testing.T) {
 	tests := []struct {
+		name     string
 		status   Status
 		terminal bool
 		failed   bool
 	}{
-		{StatusInProgress, false, false},
-		{StatusRequiresAction, false, false}, // handled via ErrRequiresAction, matching types.Status
-		{StatusCompleted, true, false},
-		{StatusFailed, true, true},
-		{StatusCancelled, true, true},
-		{StatusIncomplete, true, true},
-		{StatusBudgetExceeded, true, true},
-		{Status(""), false, false},
-		{Status("some_future_status"), true, true},
+		{"in progress", StatusInProgress, false, false},
+		{"requires action", StatusRequiresAction, false, false}, // handled via ErrRequiresAction, matching types.Status
+		{"completed", StatusCompleted, true, false},
+		{"failed", StatusFailed, true, true},
+		{"cancelled", StatusCancelled, true, true},
+		{"incomplete", StatusIncomplete, true, true},
+		{"budget exceeded", StatusBudgetExceeded, true, true},
+		{"empty status", Status(""), false, false},
+		{"unknown future status", Status("some_future_status"), true, true},
 	}
 	for _, tt := range tests {
-		if got := tt.status.Terminal(); got != tt.terminal {
-			t.Errorf("Status(%q).Terminal() = %v, want %v", tt.status, got, tt.terminal)
-		}
-		if got := tt.status.Failed(); got != tt.failed {
-			t.Errorf("Status(%q).Failed() = %v, want %v", tt.status, got, tt.failed)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.terminal, tt.status.Terminal())
+			must.Equal(tt.failed, tt.status.Failed())
+		})
 	}
 }
 
@@ -61,46 +63,46 @@ const referenceExample = `{
 }`
 
 func TestInteractionDecodesReferenceExample(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var in Interaction
-	if err := json.Unmarshal([]byte(referenceExample), &in); err != nil {
-		t.Fatalf("decoding reference example: %v", err)
-	}
-	if in.ID != "v1_abc" || in.Object != "interaction" || in.Agent != AgentDeepResearch {
-		t.Errorf("identity fields = %q/%q/%q", in.ID, in.Object, in.Agent)
-	}
-	if in.Status != StatusCompleted {
-		t.Errorf("Status = %q, want completed", in.Status)
-	}
-	if want := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC); !in.Created.Equal(want) {
-		t.Errorf("Created = %v, want %v", in.Created, want)
-	}
-	if len(in.Steps) != 2 || in.Steps[0].Type != StepUserInput || in.Steps[1].Type != StepModelOutput {
-		t.Fatalf("steps = %+v", in.Steps)
-	}
-	if in.PreviousInteractionID != "v1_prev" {
-		t.Errorf("PreviousInteractionID = %q", in.PreviousInteractionID)
-	}
-	if in.Usage.TotalTokens != 320200 || in.Usage.TotalCachedTokens != 150000 {
-		t.Errorf("usage totals = %+v", in.Usage)
-	}
-	if len(in.Usage.GroundingToolCount) != 1 || in.Usage.GroundingToolCount[0].Count != 80 {
-		t.Errorf("grounding counts = %+v", in.Usage.GroundingToolCount)
+	must.NoError(json.Unmarshal([]byte(referenceExample), &in), "decoding reference example")
+
+	check.Equal("v1_abc", in.ID)
+	check.Equal("interaction", in.Object)
+	check.Equal(AgentDeepResearch, in.Agent)
+	check.Equal(StatusCompleted, in.Status)
+	wantCreated := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	check.True(in.Created.Equal(wantCreated), "Created = %v, want %v", in.Created, wantCreated)
+
+	must.Len(in.Steps, 2, "steps = %+v", in.Steps)
+	must.Equal(StepUserInput, in.Steps[0].Type)
+	must.Equal(StepModelOutput, in.Steps[1].Type)
+
+	check.Equal("v1_prev", in.PreviousInteractionID)
+	check.Equal(320200, in.Usage.TotalTokens)
+	check.Equal(150000, in.Usage.TotalCachedTokens)
+	if counts := in.Usage.GroundingToolCount; check.Len(counts, 1, "grounding counts = %+v", counts) {
+		check.Equal(80, counts[0].Count)
 	}
 
-	if got := in.FinalText(); got != "# Report on the topic" {
-		t.Errorf("FinalText() = %q", got)
+	check.Equal("# Report on the topic", in.FinalText())
+
+	if images := in.Images(); check.Len(images, 1, "Images() = %+v", images) {
+		check.Equal("image/png", images[0].MIMEType)
+		check.Equal("png-bytes", string(images[0].Data))
 	}
-	images := in.Images()
-	if len(images) != 1 || images[0].MIMEType != "image/png" || string(images[0].Data) != "png-bytes" {
-		t.Errorf("Images() = %+v", images)
-	}
-	citations := in.URLCitations()
-	if len(citations) != 1 || citations[0].URL != "https://example.org/a" || citations[0].EndIndex != 20 {
-		t.Errorf("URLCitations() = %+v", citations)
+
+	if citations := in.URLCitations(); check.Len(citations, 1, "URLCitations() = %+v", citations) {
+		check.Equal("https://example.org/a", citations[0].URL)
+		check.Equal(20, citations[0].EndIndex)
 	}
 }
 
-func TestFinalTextJoinsTextPartsAndSkipsThoughts(t *testing.T) {
+func TestFinalText_JoinsTextAndSkipsThoughts(t *testing.T) {
+	check := assert.New(t)
+
 	in := Interaction{Steps: []Step{
 		{Type: StepUserInput, Content: []Content{{Type: ContentText, Text: "query"}}},
 		{Type: StepModelOutput, Content: []Content{{Type: ContentText, Text: "draft"}}},
@@ -110,20 +112,17 @@ func TestFinalTextJoinsTextPartsAndSkipsThoughts(t *testing.T) {
 			{Type: ContentText, Text: "Part two."},
 		}},
 	}}
-	if got, want := in.FinalText(), "Part one.\n\nPart two."; got != want {
-		t.Errorf("FinalText() = %q, want %q", got, want)
-	}
+	check.Equal("Part one.\n\nPart two.", in.FinalText())
 
 	var empty Interaction
-	if got := empty.FinalText(); got != "" {
-		t.Errorf("FinalText() on empty interaction = %q, want empty", got)
-	}
-	if _, ok := empty.FinalOutput(); ok {
-		t.Error("FinalOutput() on empty interaction reported ok")
-	}
+	check.Empty(empty.FinalText(), "FinalText() on empty interaction")
+	_, ok := empty.FinalOutput()
+	check.False(ok, "FinalOutput() on empty interaction")
 }
 
-func TestURLCitationsDedupesByURL(t *testing.T) {
+func TestURLCitations_DedupesByURL(t *testing.T) {
+	must := require.New(t)
+
 	cite := func(u string) Annotation { return Annotation{Type: AnnotationURLCitation, URL: u} }
 	in := Interaction{Steps: []Step{
 		{Type: StepModelOutput, Content: []Content{
@@ -135,12 +134,14 @@ func TestURLCitationsDedupesByURL(t *testing.T) {
 		}},
 	}}
 	got := in.URLCitations()
-	if len(got) != 2 || got[0].URL != "https://x" || got[1].URL != "https://y" {
-		t.Errorf("URLCitations() = %+v, want x then y", got)
-	}
+	must.Len(got, 2, "URLCitations() = %+v", got)
+	must.Equal("https://x", got[0].URL)
+	must.Equal("https://y", got[1].URL)
 }
 
 func TestCitationsMapsBothKindsAndDedupes(t *testing.T) {
+	must := require.New(t)
+
 	in := Interaction{Steps: []Step{
 		{Type: StepModelOutput, Content: []Content{
 			{Type: ContentText, Text: "a", Annotations: []Annotation{
@@ -160,14 +161,7 @@ func TestCitationsMapsBothKindsAndDedupes(t *testing.T) {
 		{URI: "files/doc1", Title: "doc1.pdf"},
 		{URI: "https://y", Title: "Source Y"},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Citations() = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("Citations()[%d] = %+v, want %+v", i, got[i], want[i])
-		}
-	}
+	must.Equal(want, got)
 }
 
 func TestAllowedToolsUnmarshalBothForms(t *testing.T) {
@@ -183,40 +177,35 @@ func TestAllowedToolsUnmarshalBothForms(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			var got AllowedTools
-			if err := json.Unmarshal([]byte(tt.json), &got); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			if got.Mode != tt.want.Mode || strings.Join(got.Tools, ",") != strings.Join(tt.want.Tools, ",") {
-				t.Errorf("got %+v, want %+v", got, tt.want)
-			}
+			must.NoError(json.Unmarshal([]byte(tt.json), &got), "unmarshal")
+			must.Equal(tt.want.Mode, got.Mode)
+			must.Equal(tt.want.Tools, got.Tools)
 		})
 	}
 }
 
 func TestCreateRequestEmitsExplicitBooleans(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	data, err := json.Marshal(&CreateRequest{
 		Agent:       AgentDeepResearch,
 		Input:       "q",
 		AgentConfig: &AgentConfig{Type: AgentConfigDeepResearch},
 	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
+	must.NoError(err, "marshal")
+
 	var got map[string]any
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("round-trip: %v", err)
-	}
+	must.NoError(json.Unmarshal(data, &got), "round-trip")
+
 	for _, key := range []string{"background", "store", "stream", "input"} {
-		if _, ok := got[key]; !ok {
-			t.Errorf("create request missing explicit %q: %s", key, data)
-		}
+		check.Contains(got, key, "create request missing explicit %q: %s", key, data)
 	}
+
 	cfg, ok := got["agent_config"].(map[string]any)
-	if !ok {
-		t.Fatalf("agent_config missing: %s", data)
-	}
-	if _, ok := cfg["collaborative_planning"]; !ok {
-		t.Errorf("agent_config missing explicit collaborative_planning: %s", data)
-	}
+	must.True(ok, "agent_config missing: %s", data)
+	check.Contains(cfg, "collaborative_planning", "agent_config missing explicit collaborative_planning: %s", data)
 }

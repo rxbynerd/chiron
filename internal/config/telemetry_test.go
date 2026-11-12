@@ -2,9 +2,10 @@ package config
 
 import (
 	"bytes"
-	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // langfuseRefs is a TelemetryConfig carrying both Langfuse key references.
@@ -15,9 +16,9 @@ func langfuseRefs() TelemetryConfig {
 	}
 }
 
-// TestValidateTelemetryAcceptsValidShapes: each supported destination
+// TestTelemetry_Validate_AcceptsSupportedDestinations: each supported destination
 // validates for a deep-research run and a worker run alike.
-func TestValidateTelemetryAcceptsValidShapes(t *testing.T) {
+func TestTelemetry_Validate_AcceptsSupportedDestinations(t *testing.T) {
 	withEndpoint := func(endpoint string) TelemetryConfig {
 		tc := langfuseRefs()
 		tc.LangfuseEndpoint = endpoint
@@ -35,19 +36,20 @@ func TestValidateTelemetryAcceptsValidShapes(t *testing.T) {
 		{"langfuse localhost", withEndpoint("http://localhost:3000/api/public/otel")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, cfg := range []ResearchConfig{Default(), validWorker()} {
-				cfg.Telemetry = tt.tc
-				if err := cfg.Validate(); err != nil {
-					t.Errorf("agent %s: %v", cfg.Agent, err)
-				}
+			for _, base := range []ResearchConfig{Default(), validWorker()} {
+				t.Run(base.Agent, func(t *testing.T) {
+					must := require.New(t)
+					base.Telemetry = tt.tc
+					must.NoError(base.Validate())
+				})
 			}
 		})
 	}
 }
 
-// TestValidateTelemetryRejects: every rejection names the offending field
+// TestTelemetry_Validate_RejectsBadDestinations: every rejection names the offending field
 // and never echoes the value, which may be a pasted credential.
-func TestValidateTelemetryRejects(t *testing.T) {
+func TestTelemetry_Validate_RejectsBadDestinations(t *testing.T) {
 	const literal = "sk-lf-6d5c4b3a-2f1e-0d9c-8b7a-6f5e4d3c2b1a"
 	for _, tt := range []struct {
 		name   string
@@ -107,26 +109,24 @@ func TestValidateTelemetryRejects(t *testing.T) {
 		}, "one destination"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, cfg := range []ResearchConfig{Default(), validWorker()} {
-				tt.mutate(&cfg.Telemetry)
-				err := cfg.Validate()
-				if err == nil {
-					t.Fatalf("agent %s: validated", cfg.Agent)
-				}
-				if !strings.Contains(err.Error(), tt.want) {
-					t.Errorf("agent %s: err = %v, want it to contain %q", cfg.Agent, err, tt.want)
-				}
-				if strings.Contains(err.Error(), literal) {
-					t.Errorf("agent %s: validation error leaked the literal: %v", cfg.Agent, err)
-				}
+			for _, base := range []ResearchConfig{Default(), validWorker()} {
+				t.Run(base.Agent, func(t *testing.T) {
+					must := require.New(t)
+					tt.mutate(&base.Telemetry)
+					err := base.Validate()
+					must.Error(err, "validation must reject the config")
+					must.ErrorContains(err, tt.want)
+					must.NotContains(err.Error(), literal, "validation error leaked the literal")
+				})
 			}
 		})
 	}
 }
 
-// TestLangfuseTarget: the default endpoint applies only when both key
+// TestTelemetry_LangfuseTarget_DefaultsOnlyWithKeys: the default endpoint applies only when both key
 // references are set and no endpoint is given.
-func TestLangfuseTarget(t *testing.T) {
+func TestTelemetry_LangfuseTarget_DefaultsOnlyWithKeys(t *testing.T) {
+	must := require.New(t)
 	custom := langfuseRefs()
 	custom.LangfuseEndpoint = "https://langfuse.internal/api/public/otel"
 	for _, tt := range []struct {
@@ -141,19 +141,16 @@ func TestLangfuseTarget(t *testing.T) {
 		{"keys and endpoint", custom, custom.LangfuseEndpoint},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.tc.LangfuseTarget(); got != tt.want {
-				t.Errorf("LangfuseTarget() = %q, want %q", got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, tt.tc.LangfuseTarget())
 		})
 	}
-	if Default().Telemetry != (TelemetryConfig{}) {
-		t.Errorf("Default() sets telemetry: %+v", Default().Telemetry)
-	}
+	must.Zero(Default().Telemetry, "Default() must leave telemetry unset")
 }
 
-// TestApplyFlagsTelemetry pins each telemetry flag to its own field: set
-// alone, only that field may change from Default().
-func TestApplyFlagsTelemetry(t *testing.T) {
+// TestTelemetry_ApplyFlags_SetsOnlyItsOwnField: set alone, each telemetry flag may change
+// only its own field from Default().
+func TestTelemetry_ApplyFlags_SetsOnlyItsOwnField(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -165,29 +162,22 @@ func TestApplyFlagsTelemetry(t *testing.T) {
 		{"langfuse-secret-key-ref", []string{"--langfuse-secret-key-ref", "secret://LF_SECRET"}, TelemetryConfig{LangfuseSecretKeyRef: "secret://LF_SECRET"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := Default()
 			fs := newFlagSet(t)
-			if err := fs.Parse(tt.args); err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if err := ApplyFlags(&cfg, fs); err != nil {
-				t.Fatalf("ApplyFlags: %v", err)
-			}
-			if cfg.Telemetry != tt.want {
-				t.Errorf("Telemetry = %+v, want %+v", cfg.Telemetry, tt.want)
-			}
+			must.NoError(fs.Parse(tt.args), "fs.Parse")
+			must.NoError(ApplyFlags(&cfg, fs), "ApplyFlags")
+			must.Equal(tt.want, cfg.Telemetry)
 			rest := cfg
 			rest.Telemetry = TelemetryConfig{}
-			if !reflect.DeepEqual(rest, Default()) {
-				t.Errorf("an unrelated field changed: %+v", cfg)
-			}
+			must.Equal(Default(), rest, "an unrelated field changed")
 		})
 	}
 }
 
-// TestApplyFlagsTelemetryLayersOverBase: a base config's telemetry block
+// TestTelemetry_ApplyFlags_LayersOverBaseBlock: a base config's telemetry block
 // survives unset flags, and a set flag overrides only its own field.
-func TestApplyFlagsTelemetryLayersOverBase(t *testing.T) {
+func TestTelemetry_ApplyFlags_LayersOverBaseBlock(t *testing.T) {
 	const base = "telemetry:\n" +
 		"  langfuse_endpoint: https://langfuse.internal/api/public/otel\n" +
 		"  langfuse_public_key_ref: secret://FILE_PUBLIC\n" +
@@ -209,60 +199,41 @@ func TestApplyFlagsTelemetryLayersOverBase(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg, err := DecodeBase(strings.NewReader(base))
-			if err != nil {
-				t.Fatalf("DecodeBase: %v", err)
-			}
+			must.NoError(err, "DecodeBase")
 			fs := newFlagSet(t)
-			if err := fs.Parse(tt.args); err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if err := ApplyFlags(&cfg, fs); err != nil {
-				t.Fatalf("ApplyFlags: %v", err)
-			}
-			if cfg.Telemetry != tt.want {
-				t.Errorf("Telemetry = %+v, want %+v", cfg.Telemetry, tt.want)
-			}
+			must.NoError(fs.Parse(tt.args), "fs.Parse")
+			must.NoError(ApplyFlags(&cfg, fs), "ApplyFlags")
+			must.Equal(tt.want, cfg.Telemetry)
 		})
 	}
 }
 
-// TestTelemetryRoundTrip: the telemetry block survives EncodeJSON -> DecodeBase
+// TestTelemetry_EncodeDecode_RoundTrip: the telemetry block survives EncodeJSON -> DecodeBase
 // under its documented keys, and an unset block is omitted.
-func TestTelemetryRoundTrip(t *testing.T) {
+func TestTelemetry_EncodeDecode_RoundTrip(t *testing.T) {
+	must := require.New(t)
 	var empty bytes.Buffer
-	if err := Default().EncodeJSON(&empty); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
-	if strings.Contains(empty.String(), `"telemetry"`) {
-		t.Errorf("an unset telemetry block is encoded:\n%s", empty.String())
-	}
+	must.NoError(Default().EncodeJSON(&empty), "EncodeJSON")
+	must.NotContains(empty.String(), `"telemetry"`, "an unset telemetry block is encoded")
 
 	in := Default()
 	in.Telemetry = langfuseRefs()
 	in.Telemetry.LangfuseEndpoint = "https://langfuse.internal/api/public/otel"
 	var buf bytes.Buffer
-	if err := in.EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
-	for _, key := range []string{`"telemetry"`, `"langfuse_endpoint"`, `"langfuse_public_key_ref"`, `"langfuse_secret_key_ref"`} {
-		if !strings.Contains(buf.String(), key) {
-			t.Errorf("encoded config lacks %s:\n%s", key, buf.String())
-		}
+	must.NoError(in.EncodeJSON(&buf), "EncodeJSON")
+	for _, key := range []string{"telemetry", "langfuse_endpoint", "langfuse_public_key_ref", "langfuse_secret_key_ref"} {
+		t.Run(key, func(t *testing.T) {
+			must := require.New(t)
+			must.Contains(buf.String(), `"`+key+`"`, "encoded config lacks the key")
+		})
 	}
 	out, err := DecodeBase(&buf)
-	if err != nil {
-		t.Fatalf("DecodeBase: %v", err)
-	}
-	if out.Telemetry != in.Telemetry {
-		t.Errorf("round trip lost data:\n got %+v\nwant %+v", out.Telemetry, in.Telemetry)
-	}
+	must.NoError(err, "DecodeBase")
+	must.Equal(in.Telemetry, out.Telemetry, "round trip lost data")
 
 	otlp, err := DecodeBase(strings.NewReader("telemetry:\n  otlp_endpoint: https://otel.example\n"))
-	if err != nil {
-		t.Fatalf("DecodeBase YAML: %v", err)
-	}
-	if otlp.Telemetry.OTLPEndpoint != "https://otel.example" {
-		t.Errorf("otlp_endpoint = %q", otlp.Telemetry.OTLPEndpoint)
-	}
+	must.NoError(err, "DecodeBase YAML")
+	must.Equal("https://otel.example", otlp.Telemetry.OTLPEndpoint)
 }

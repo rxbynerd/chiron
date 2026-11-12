@@ -8,9 +8,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestStdioEmitsNDJSONLines(t *testing.T) {
+func TestStdio_Emit_WritesNDJSONLines(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var buf bytes.Buffer
 	tr := NewStdio(&buf)
 	ctx := context.Background()
@@ -23,64 +29,49 @@ func TestStdioEmitsNDJSONLines(t *testing.T) {
 		{Kind: KindCostSummary, Payload: json.RawMessage(`{"total_tokens":42}`)},
 	}
 	for _, ev := range events {
-		if err := tr.Emit(ctx, ev); err != nil {
-			t.Fatalf("Emit(%q): %v", ev.Kind, err)
-		}
+		must.NoError(tr.Emit(ctx, ev), "Emit(%q)", ev.Kind)
 	}
-	if err := tr.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	must.NoError(tr.Close())
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if got, want := len(lines), len(events); got != want {
-		t.Fatalf("got %d lines, want %d", got, want)
-	}
+	must.Len(lines, len(events))
 	for i, line := range lines {
 		var ev Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("line %d is not valid JSON: %v\n%s", i, err, line)
-		}
-		if ev.Kind != events[i].Kind {
-			t.Errorf("line %d kind = %q, want %q", i, ev.Kind, events[i].Kind)
-		}
-		if ev.Time.IsZero() {
-			t.Errorf("line %d has a zero time; Emit should stamp it", i)
-		}
+		must.NoError(json.Unmarshal([]byte(line), &ev), "line %d is not valid JSON: %s", i, line)
+		check.Equal(events[i].Kind, ev.Kind, "line %d kind", i)
+		check.False(ev.Time.IsZero(), "line %d has a zero time; Emit should stamp it", i)
 	}
 }
 
-func TestStdioPreservesExplicitTime(t *testing.T) {
+func TestStdio_Emit_PreservesExplicitTime(t *testing.T) {
+	must := require.New(t)
+
 	var buf bytes.Buffer
 	tr := NewStdio(&buf)
 	want := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
 
-	if err := tr.Emit(context.Background(), Event{Time: want, Kind: KindDelta}); err != nil {
-		t.Fatalf("Emit: %v", err)
-	}
+	must.NoError(tr.Emit(context.Background(), Event{Time: want, Kind: KindDelta}))
+
 	var ev Event
-	if err := json.Unmarshal(buf.Bytes(), &ev); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !ev.Time.Equal(want) {
-		t.Errorf("time = %v, want %v", ev.Time, want)
-	}
+	must.NoError(json.Unmarshal(buf.Bytes(), &ev))
+	must.True(ev.Time.Equal(want), "time = %v, want %v", ev.Time, want)
 }
 
-func TestStdioRespectsCancelledContext(t *testing.T) {
+func TestStdio_Emit_RespectsCancelledContext(t *testing.T) {
+	must := require.New(t)
+
 	var buf bytes.Buffer
 	tr := NewStdio(&buf)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := tr.Emit(ctx, Event{Kind: KindRunStarted}); err == nil {
-		t.Fatal("Emit with cancelled context: got nil error")
-	}
-	if buf.Len() != 0 {
-		t.Errorf("Emit with cancelled context wrote %d bytes", buf.Len())
-	}
+	must.Error(tr.Emit(ctx, Event{Kind: KindRunStarted}))
+	must.Zero(buf.Len(), "Emit with cancelled context should write nothing")
 }
 
-func TestStdioConcurrentEmitsDoNotInterleave(t *testing.T) {
+func TestStdio_Emit_ConcurrentWritesDoNotInterleave(t *testing.T) {
+	must := require.New(t)
+
 	var buf bytes.Buffer
 	tr := NewStdio(&buf)
 	ctx := context.Background()
@@ -95,22 +86,18 @@ func TestStdioConcurrentEmitsDoNotInterleave(t *testing.T) {
 	wg.Wait()
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if got := len(lines); got != n {
-		t.Fatalf("got %d lines, want %d", got, n)
-	}
+	must.Len(lines, n)
 	for i, line := range lines {
 		var ev Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("line %d corrupted by interleaving: %v\n%s", i, err, line)
-		}
+		must.NoError(json.Unmarshal([]byte(line), &ev), "line %d corrupted by interleaving: %s", i, line)
 	}
 }
 
-func TestStdioDefaultsNilWriterToStderr(t *testing.T) {
+func TestStdio_New_DefaultsNilWriterToStderr(t *testing.T) {
+	must := require.New(t)
+
 	// NewStdio(nil) must not panic and must produce a usable transport;
 	// the write goes to the test process's stderr, which is harmless.
 	tr := NewStdio(nil)
-	if tr.w == nil {
-		t.Fatal("NewStdio(nil) left writer nil")
-	}
+	must.NotNil(tr.w, "NewStdio(nil) should default the writer")
 }

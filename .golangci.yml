@@ -10,6 +10,8 @@
 #     *.Close, fmt.*print*, os.Std* and friends).
 #   - errcheck is relaxed in _test.go files, where httptest handler
 #     writes and similar are conventionally unchecked.
+#   - testifylint rejects common testify misuse in tests (swapped
+#     expected/actual, Equal on errors, require off the test goroutine).
 #
 # The CI workflow pins the golangci-lint version for the same reason
 # the actions are SHA-pinned (C1-SEC-3): main must not break without a
@@ -17,6 +19,8 @@
 version: "2"
 
 linters:
+  enable:
+    - testifylint
   exclusions:
     presets:
       - std-error-handling

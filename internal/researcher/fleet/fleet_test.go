@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -17,6 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
@@ -112,6 +113,7 @@ func (r *recordedSession) Close(ctx context.Context) error {
 // the deps first.
 func newTestFleet(t *testing.T, modelURL string, searchSrv *searchtest.FakeServer, store memory.ContextStore, edit func(*FleetDeps)) *Fleet {
 	t.Helper()
+	must := require.New(t)
 	deps := FleetDeps{
 		Worker:      poolWorkerDeps(t, newModelClientAt(t, modelURL), searchSrv),
 		Store:       store,
@@ -122,27 +124,27 @@ func newTestFleet(t *testing.T, modelURL string, searchSrv *searchtest.FakeServe
 		edit(&deps)
 	}
 	f, err := NewFleet(deps)
-	if err != nil {
-		t.Fatalf("NewFleet: %v", err)
-	}
+	must.NoError(err, "NewFleet")
 	return f
 }
 
 // runState returns the Fleet's record for id.
 func runState(t *testing.T, f *Fleet, id string) *fleetState {
 	t.Helper()
+	must := require.New(t)
 	st, err := f.state(id)
-	if err != nil {
-		t.Fatalf("state: %v", err)
-	}
+	must.NoError(err, "state")
 	return st
 }
 
-// TestFleetStartAwaitResult: a fleet run through the Researcher seam opens
-// and closes a session under its flt_ id, and Result carries the synthesised
-// report, sources from both workers and one Usage with the lead's calls
-// priced at the workers' rates.
-func TestFleetStartAwaitResult(t *testing.T) {
+// TestFleet_Start_ResultCarriesReportSourcesAndUsage: a fleet run through the
+// Researcher seam opens and closes a session under its flt_ id, and Result
+// carries the synthesised report, sources from both workers and one Usage with
+// the lead's calls priced at the workers' rates.
+func TestFleet_Start_ResultCarriesReportSourcesAndUsage(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := syntheticFleetModel(t)
 	modelSrv := httptest.NewServer(fm)
 	defer modelSrv.Close()
@@ -156,50 +158,35 @@ func TestFleetStartAwaitResult(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := f.Start(ctx, researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if !IsFleetInteractionID(id) || IsWorkerInteractionID(id) || len(id) != len(FleetInteractionIDPrefix)+32 {
-		t.Errorf("id = %q, want a local flt_ handle", id)
-	}
-	if opened, _ := store.sessions(); !slices.Equal(opened, []string{id}) {
-		t.Errorf("sessions opened = %v, want one under the interaction id", opened)
-	}
+	must.NoError(err, "Start")
+	check.True(IsFleetInteractionID(id) && !IsWorkerInteractionID(id) && len(id) == len(FleetInteractionIDPrefix)+32,
+		"id = %q, want a local flt_ handle", id)
+	opened, _ := store.sessions()
+	check.Equal([]string{id}, opened, "sessions opened, want one under the interaction id")
 
-	if err := f.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(f.Await(ctx, id), "Await")
 	awaited := time.Now()
-	if _, closed := store.sessions(); !slices.Equal(closed, []memory.Namespace{memory.Namespace("session/" + id)}) {
-		t.Errorf("sessions closed = %v, want the run's own", closed)
-	}
+	_, closed := store.sessions()
+	check.Equal([]memory.Namespace{memory.Namespace("session/" + id)}, closed, "sessions closed, want the run's own")
 	in, err := f.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
+	must.NoError(err, "Result")
 
-	if in.Status != types.StatusCompleted || in.StatusDetail != "" {
-		t.Errorf("status = %s (%s), want completed", in.Status, in.StatusDetail)
-	}
-	if in.ID != id || in.Agent != "fleet" || in.Query != testQuery {
-		t.Errorf("identity = %q/%q/%q, want %q/fleet/the query", in.ID, in.Agent, in.Query, id)
-	}
-	if want := []string{"web_search", "web_fetch"}; !slices.Equal(in.Tools, want) {
-		t.Errorf("tools = %v, want %v", in.Tools, want)
-	}
-	if len(in.Outputs) != 1 || in.Outputs[0].Type != types.OutputText || in.Outputs[0].Text != syntheticReport {
-		t.Errorf("outputs = %+v, want the synthesised report", in.Outputs)
-	}
-	wantCites := []types.Citation{
+	check.Equal(types.StatusCompleted, in.Status, "status")
+	check.Empty(in.StatusDetail, "status detail")
+	check.Equal(id, in.ID, "interaction id")
+	check.Equal("fleet", in.Agent, "agent")
+	check.Equal(testQuery, in.Query, "query")
+	check.Equal([]string{"web_search", "web_fetch"}, in.Tools, "tools")
+	must.Len(in.Outputs, 1, "outputs")
+	check.Equal(types.OutputText, in.Outputs[0].Type, "output type")
+	check.Equal(syntheticReport, in.Outputs[0].Text, "report text")
+	check.Equal([]types.Citation{
 		{URI: heatPumpURL, Title: "Heat pump running costs"},
 		{URI: boilerURL, Title: "Gas boiler running costs"},
-	}
-	if !reflect.DeepEqual(in.Citations, wantCites) {
-		t.Errorf("citations = %+v, want one source from each worker %+v", in.Citations, wantCites)
-	}
-	if in.CreatedAt.IsZero() || in.CompletedAt.Before(in.CreatedAt) || in.CompletedAt.After(awaited) {
-		t.Errorf("timestamps = %v / %v, want the run's start and its conclusion before Await returned", in.CreatedAt, in.CompletedAt)
-	}
+	}, in.Citations, "citations, want one source from each worker")
+	check.False(in.CreatedAt.IsZero(), "the run has a start time")
+	check.False(in.CompletedAt.Before(in.CreatedAt), "the run concluded before it started")
+	check.False(in.CompletedAt.After(awaited), "the run concluded after Await returned")
 
 	// Three workers of two turns at 10 input and 5 output tokens each, one
 	// search each, plus the decompose, synthesis and citation calls.
@@ -207,22 +194,21 @@ func TestFleetStartAwaitResult(t *testing.T) {
 	leadIn := decomposeUsage.InputTokens + synthesisUsage.InputTokens + citeUsage.InputTokens
 	leadOut := decomposeUsage.OutputTokens + synthesisUsage.OutputTokens + citeUsage.OutputTokens
 	u := in.Usage
-	if u.InputTokens != workerIn+leadIn || u.OutputTokens != workerOut+leadOut || u.SearchCount != 3 {
-		t.Errorf("usage tokens = %d in / %d out / %d searches, want %d / %d / 3", u.InputTokens, u.OutputTokens, u.SearchCount, workerIn+leadIn, workerOut+leadOut)
-	}
+	check.Equal(workerIn+leadIn, u.InputTokens, "input tokens")
+	check.Equal(workerOut+leadOut, u.OutputTokens, "output tokens")
+	check.Equal(3, u.SearchCount, "searches, want one per worker")
 	wantCost := costGBP(workerIn, workerOut, inPrice, outPrice) + costGBP(leadIn, leadOut, inPrice, outPrice)
-	if math.Abs(u.EstimatedCostGBP-wantCost) > 1e-12 {
-		t.Errorf("estimated cost = %v, want %v: the lead's calls priced at the workers' rates", u.EstimatedCostGBP, wantCost)
-	}
-	if n := searchSrv.ToolCallCount(); n != 3 {
-		t.Errorf("search calls = %d, want one per worker", n)
-	}
+	check.InDelta(wantCost, u.EstimatedCostGBP, 1e-12, "estimated cost, want the lead's calls priced at the workers' rates")
+	check.Equal(3, searchSrv.ToolCallCount(), "search calls, want one per worker")
 }
 
-// TestFleetComponentsShareRoutesAndPrices: a run's lead validates its plan
+// TestFleet_Components_ShareRoutesAndPrices: a run's lead validates its plan
 // against the same routing table its pool dispatches through, and prices
 // its calls at the workers' Caps rates.
-func TestFleetComponentsShareRoutesAndPrices(t *testing.T) {
+func TestFleet_Components_ShareRoutesAndPrices(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
@@ -234,29 +220,22 @@ func TestFleetComponentsShareRoutesAndPrices(t *testing.T) {
 	f.routes = countingRoutes(&dispatched)
 
 	l, p, err := f.components("session/test")
-	if err != nil {
-		t.Fatalf("components: %v", err)
-	}
+	must.NoError(err, "components")
 	fleetTable := reflect.ValueOf(f.routes).UnsafePointer()
-	if reflect.ValueOf(l.deps.Routes).UnsafePointer() != fleetTable || reflect.ValueOf(p.deps.Routes).UnsafePointer() != fleetTable {
-		t.Error("the lead and the pool must share the Fleet's one routing table")
-	}
-	if l.deps.InputGBPPerMTok != 1.25 || l.deps.OutputGBPPerMTok != 7.5 {
-		t.Errorf("lead prices = %v / %v, want the workers' 1.25 / 7.5", l.deps.InputGBPPerMTok, l.deps.OutputGBPPerMTok)
-	}
-	if p.deps.Worker.Caps != f.deps.Worker.Caps {
-		t.Errorf("pool caps = %+v, want the Fleet's %+v", p.deps.Worker.Caps, f.deps.Worker.Caps)
-	}
-	if l.deps.Namespace != "session/test" || p.deps.Namespace != "session/test" {
-		t.Errorf("namespaces = %q / %q, want the run's session", l.deps.Namespace, p.deps.Namespace)
-	}
+	check.Equal(fleetTable, reflect.ValueOf(l.deps.Routes).UnsafePointer(), "the lead must share the Fleet's one routing table")
+	check.Equal(fleetTable, reflect.ValueOf(p.deps.Routes).UnsafePointer(), "the pool must share the Fleet's one routing table")
+	check.InDelta(1.25, l.deps.InputGBPPerMTok, 0, "lead input price, want the workers' 1.25")
+	check.InDelta(7.5, l.deps.OutputGBPPerMTok, 0, "lead output price, want the workers' 7.5")
+	check.Equal(f.deps.Worker.Caps, p.deps.Worker.Caps, "pool caps, want the Fleet's")
+	check.Equal(memory.Namespace("session/test"), l.deps.Namespace, "lead namespace, want the run's session")
+	check.Equal(memory.Namespace("session/test"), p.deps.Namespace, "pool namespace, want the run's session")
 }
 
-// TestFleetRefusesBeforeStarting: an empty query, a follow-up, a report
+// TestFleet_Start_RefusalsRegisterNoRun: an empty query, a follow-up, a report
 // template that fails to render for the query and a session the store
 // refuses all fail Start with no id and no model request; only the last
 // reaches the store.
-func TestFleetRefusesBeforeStarting(t *testing.T) {
+func TestFleet_Start_RefusalsRegisterNoRun(t *testing.T) {
 	failingTemplate := `{{if eq .Query "` + reportTemplateSampleQuery + `"}}Format.{{else}}{{.Missing}}{{end}}`
 	for _, tt := range []struct {
 		name     string
@@ -272,6 +251,8 @@ func TestFleetRefusesBeforeStarting(t *testing.T) {
 		{name: "session open failure", task: researcher.Task{Query: "q"}, openErr: memory.ErrSessionExists, wantErr: "opening the run's session", wantOpen: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			modelSrv := modeltest.NewFakeServer()
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
@@ -285,32 +266,29 @@ func TestFleetRefusesBeforeStarting(t *testing.T) {
 			})
 
 			id, err := f.Start(context.Background(), tt.task)
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("Start = %q, %v, want an error containing %q", id, err, tt.wantErr)
+			must.ErrorContains(err, tt.wantErr, "Start")
+			if tt.openErr != nil {
+				must.ErrorIs(err, tt.openErr, "Start should wrap the store's error")
 			}
-			if tt.openErr != nil && !errors.Is(err, tt.openErr) {
-				t.Errorf("Start error = %v, want it to wrap the store's error", err)
-			}
-			if id != "" {
-				t.Errorf("Start returned id %q alongside its error", id)
-			}
-			if opened, _ := store.sessions(); len(opened) != tt.wantOpen {
-				t.Errorf("sessions opened = %v, want %d", opened, tt.wantOpen)
-			}
+			must.Empty(id, "Start returned an id alongside its error")
+			opened, _ := store.sessions()
+			must.Len(opened, tt.wantOpen, "sessions opened")
 			f.mu.Lock()
 			runs := len(f.runs)
 			f.mu.Unlock()
-			if runs != 0 || modelSrv.CallCount() != 0 {
-				t.Errorf("runs registered = %d, model requests = %d, want neither", runs, modelSrv.CallCount())
-			}
+			must.Zero(runs, "runs registered")
+			must.Zero(modelSrv.CallCount(), "model requests")
 		})
 	}
 }
 
-// TestFleetAwaitCancellationStopsEveryPaidCall: when Await's context ends
+// TestFleet_Await_CancellationStopsEveryPaidCall: when Await's context ends
 // mid-run, Await returns only once the run has unwound, so no model request
 // follows it, and Result reports the failed run and the decomposition spend.
-func TestFleetAwaitCancellationStopsEveryPaidCall(t *testing.T) {
+func TestFleet_Await_CancellationStopsEveryPaidCall(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var inFlight atomic.Int32
 	release := make(chan struct{})
 	fm := &fleetModel{
@@ -331,9 +309,7 @@ func TestFleetAwaitCancellationStopsEveryPaidCall(t *testing.T) {
 	f := newTestFleet(t, modelSrv.URL, searchSrv, store, nil)
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	ctx, cancel := context.WithCancel(context.Background())
 	awaitErr := make(chan error, 1)
 	go func() { awaitErr <- f.Await(ctx, id) }()
@@ -343,54 +319,47 @@ func TestFleetAwaitCancellationStopsEveryPaidCall(t *testing.T) {
 	select {
 	case err = <-awaitErr:
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await did not return after its context was cancelled")
+		must.Fail("Await did not return after its context was cancelled")
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Await = %v, want the context error", err)
-	}
+	must.ErrorIs(err, context.Canceled, "Await")
 	select {
 	case <-runState(t, f, id).done:
 	default:
-		t.Error("Await returned before the run unwound")
+		check.Fail("Await returned before the run unwound")
 	}
 	atReturn := len(fm.requestsOf(kindDecompose)) + len(fm.requestsOf(kindWorker))
 	time.Sleep(100 * time.Millisecond)
 	after := len(fm.requestsOf(kindDecompose)) + len(fm.requestsOf(kindWorker)) +
 		len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite))
-	if atReturn != 4 || after != atReturn {
-		t.Errorf("model requests: %d at Await's return, %d after a grace; want 4 (decompose and three worker turns) and no more", atReturn, after)
-	}
-	if n := poolGoroutines(); n != 0 {
-		t.Errorf("pool goroutines after Await = %d, want 0", n)
-	}
-	if _, closed := store.sessions(); len(closed) != 1 {
-		t.Errorf("sessions closed = %v, want the run's", closed)
-	}
+	check.Equal(4, atReturn, "model requests at Await's return, want the decomposition and three worker turns")
+	check.Equal(atReturn, after, "model requests after a grace, want no more than at Await's return")
+	check.Zero(poolGoroutines(), "pool goroutines after Await")
+	_, closed := store.sessions()
+	check.Len(closed, 1, "sessions closed, want the run's")
 
 	in, err := f.Result(context.Background(), id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusFailed || !strings.Contains(in.StatusDetail, "no worker produced a finding with text") ||
-		!strings.Contains(in.StatusDetail, "context ended") {
-		t.Errorf("Result = %s (%s), want failed with the cancelled workers named", in.Status, in.StatusDetail)
-	}
-	if in.Usage.InputTokens != decomposeUsage.InputTokens || in.Usage.OutputTokens != decomposeUsage.OutputTokens {
-		t.Errorf("usage = %+v, want the decomposition's %+v", in.Usage, decomposeUsage)
-	}
+	must.NoError(err, "Result")
+	check.Equal(types.StatusFailed, in.Status, "status")
+	check.Contains(in.StatusDetail, "no worker produced a finding with text", "status detail, want the workers' outcome")
+	check.Contains(in.StatusDetail, "context ended", "status detail, want the cancellation named")
+	check.Equal(decomposeUsage.InputTokens, in.Usage.InputTokens, "input tokens, want the decomposition's")
+	check.Equal(decomposeUsage.OutputTokens, in.Usage.OutputTokens, "output tokens, want the decomposition's")
 }
 
-// TestFleetAwaitGraceBoundsTheUnwind: a store that stalls past the run's
+// TestFleet_Await_GraceBoundsTheUnwind: a store that stalls past the run's
 // cancellation cannot hold Await beyond its grace; Result then reports the
 // run still in progress, and no spend is logged because none was recorded.
 // Once the store answers, the cancelled run dispatches no worker and
 // concludes.
-func TestFleetAwaitGraceBoundsTheUnwind(t *testing.T) {
+func TestFleet_Await_GraceBoundsTheUnwind(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := &fleetModel{
 		t:         t,
 		decompose: decomposeReply(decompositionJSON(t, testBriefs(3))),
 		worker: func(int, int) string {
-			t.Error("a worker ran after the run was cancelled")
+			check.Fail("a worker ran after the run was cancelled")
 			return ""
 		},
 	}
@@ -407,43 +376,33 @@ func TestFleetAwaitGraceBoundsTheUnwind(t *testing.T) {
 	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	waitFor(t, "the decomposition", func() bool { return len(fm.requestsOf(kindDecompose)) == 1 })
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	begun := time.Now()
-	if err := f.Await(ctx, id); !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("Await = %v, want the context error", err)
-	}
-	if waited := time.Since(begun); waited > 5*time.Second {
-		t.Errorf("Await took %v, want it bounded by the grace", waited)
-	}
-	if in, _ := f.Result(context.Background(), id); in.Status != types.StatusInProgress {
-		t.Errorf("Result before the run unwound = %s, want in_progress", in.Status)
-	}
+	must.ErrorIs(f.Await(ctx, id), context.DeadlineExceeded, "Await")
+	check.LessOrEqual(time.Since(begun), 5*time.Second, "Await's wait, want it bounded by the grace")
+	in, _ := f.Result(context.Background(), id)
+	check.Equal(types.StatusInProgress, in.Status, "Result before the run unwound")
 
 	close(store.putGate)
-	if err := f.Await(context.Background(), id); err != nil {
-		t.Fatalf("Await after the store answered: %v", err)
-	}
-	if in, _ := f.Result(context.Background(), id); in.Status != types.StatusFailed {
-		t.Errorf("Result after the unwind = %s (%s), want failed", in.Status, in.StatusDetail)
-	}
-	if n := len(fm.requestsOf(kindWorker)) + len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite)); n != 0 {
-		t.Errorf("model requests after the decomposition = %d, want 0", n)
-	}
-	if logs.Len() != 0 {
-		t.Errorf("Await logged with no outcome recorded when its context ended:\n%s", logs.String())
-	}
+	must.NoError(f.Await(context.Background(), id), "Await after the store answered")
+	in, _ = f.Result(context.Background(), id)
+	check.Equal(types.StatusFailed, in.Status, "Result after the unwind")
+	requests := len(fm.requestsOf(kindWorker)) + len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite))
+	check.Zero(requests, "model requests after the decomposition")
+	check.Empty(logs.String(), "Await logged with no outcome recorded when its context ended")
 }
 
-// TestFleetAwaitReturnsNilOnceConcluded: a context that ends after the lead
+// TestFleet_Await_ReturnsNilOnceConcluded: a context that ends after the lead
 // has concluded, while the session close is still running, does not turn a
 // paid, complete run into an error, and the run's spend is logged once
 // because its report can no longer be emitted.
-func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
+func TestFleet_Await_ReturnsNilOnceConcluded(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := httptest.NewServer(syntheticFleetModel(t))
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(syntheticSearchResults)
@@ -456,9 +415,7 @@ func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
 	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	ctx, cancel := context.WithCancel(context.Background())
 	awaitErr := make(chan error, 1)
 	go func() { awaitErr <- f.Await(ctx, id) }()
@@ -469,38 +426,36 @@ func TestFleetAwaitReturnsNilOnceConcluded(t *testing.T) {
 	cancel()
 	select {
 	case err := <-awaitErr:
-		if err != nil {
-			t.Errorf("Await = %v, want nil once the run has concluded", err)
-		}
+		must.NoError(err, "Await once the run has concluded")
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await did not return")
+		must.Fail("Await did not return")
 	}
 	close(store.closeGate)
-	if err := f.Await(context.Background(), id); err != nil {
-		t.Errorf("Await after the session closed: %v", err)
-	}
-	if in, _ := f.Result(context.Background(), id); in.Status != types.StatusCompleted {
-		t.Errorf("Result = %s (%s), want completed", in.Status, in.StatusDetail)
-	}
+	must.NoError(f.Await(context.Background(), id), "Await after the session closed")
+	in, _ := f.Result(context.Background(), id)
+	check.Equal(types.StatusCompleted, in.Status, "status, want completed (status detail %q)", in.StatusDetail)
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], `"interaction_id":"`+id+`"`) || !strings.Contains(lines[0], `"status":"completed"`) {
-		t.Errorf("log = %q, want one spend record for the completed run", logs.String())
-	}
+	check.Len(lines, 1, "log = %q, want one spend record for the completed run", logs.String())
+	check.Contains(lines[0], `"interaction_id":"`+id+`"`, "spend record names the run")
+	check.Contains(lines[0], `"status":"completed"`, "spend record reports completion")
 }
 
-// TestFleetAwaitLogsSpendWhenItsContextEnds: when Await's context ends while
+// TestFleet_Await_LogsSpendWhenContextEnds: when Await's context ends while
 // the synthesis call is in flight, after every worker finished, Await
 // cancels the run, waits for it to conclude on the stitched findings and
 // returns the context error. It logs the run's rolled-up spend once, at
 // Warn, with no report or finding text, and no model request follows it.
-func TestFleetAwaitLogsSpendWhenItsContextEnds(t *testing.T) {
+func TestFleet_Await_LogsSpendWhenContextEnds(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := syntheticFleetModel(t)
 	var synthesisCalls atomic.Int32
 	synthesisHeld := make(chan struct{})
 	modelSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Errorf("read model request: %v", err)
+			check.NoError(err, "read model request")
 			return
 		}
 		if !bytes.Contains(body, []byte(`"response_format"`)) {
@@ -523,58 +478,45 @@ func TestFleetAwaitLogsSpendWhenItsContextEnds(t *testing.T) {
 	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	ctx, cancel := context.WithCancel(context.Background())
 	awaitErr := make(chan error, 1)
 	go func() { awaitErr <- f.Await(ctx, id) }()
 	select {
 	case <-synthesisHeld:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the synthesis call never arrived")
+		must.Fail("the synthesis call never arrived")
 	}
 	cancel()
 	select {
 	case err = <-awaitErr:
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await did not return after its context was cancelled")
+		must.Fail("Await did not return after its context was cancelled")
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Await = %v, want the context error", err)
-	}
+	must.ErrorIs(err, context.Canceled, "Await")
 	select {
 	case <-runState(t, f, id).done:
 	default:
-		t.Error("Await returned before the run unwound, so a paid call could outlive it")
+		check.Fail("Await returned before the run unwound, so a paid call could outlive it")
 	}
-	if n := len(fm.requestsOf(kindWorker)); n != 6 {
-		t.Errorf("worker requests = %d, want every worker's two turns before synthesis", n)
-	}
-	if s, c := synthesisCalls.Load(), len(fm.requestsOf(kindCite)); s != 1 || c != 0 {
-		t.Errorf("synthesis and citation requests = %d and %d, want 1 and 0", s, c)
-	}
+	check.Len(fm.requestsOf(kindWorker), 6, "worker requests, want every worker's two turns before synthesis")
+	check.EqualValues(1, synthesisCalls.Load(), "synthesis requests")
+	check.Empty(fm.requestsOf(kindCite), "citation requests")
 	logged := logs.String()
-	if err := f.Await(ctx, id); err != nil {
-		t.Errorf("a second Await on the concluded run = %v, want nil", err)
-	}
-	if logs.String() != logged {
-		t.Errorf("a second Await logged again:\n%s", logs.String())
-	}
+	must.NoError(f.Await(ctx, id), "a second Await on the concluded run")
+	check.Equal(logged, logs.String(), "a second Await logged again")
 
 	in, err := f.Result(context.Background(), id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
+	must.NoError(err, "Result")
 	wantIn, wantOut := 3*2*10+decomposeUsage.InputTokens, 3*2*5+decomposeUsage.OutputTokens
-	if in.Status != types.StatusIncomplete || in.Usage.InputTokens != wantIn || in.Usage.OutputTokens != wantOut || in.Usage.SearchCount != 3 {
-		t.Fatalf("Result = %s with usage %+v, want incomplete with %d/%d tokens and 3 searches", in.Status, in.Usage, wantIn, wantOut)
-	}
+	must.Equal(types.StatusIncomplete, in.Status, "status")
+	must.Equal(wantIn, in.Usage.InputTokens, "input tokens")
+	must.Equal(wantOut, in.Usage.OutputTokens, "output tokens")
+	must.Equal(3, in.Usage.SearchCount, "searches")
 
+	must.NotEmpty(logged, "no spend record was logged when Await returned")
 	lines := strings.Split(strings.TrimSpace(logged), "\n")
-	if logged == "" || len(lines) != 1 {
-		t.Fatalf("log records when Await returned = %d, want exactly one:\n%s", len(lines), logged)
-	}
+	must.Len(lines, 1, "spend records logged when Await returned:\n%s", logged)
 	var rec struct {
 		Level         string  `json:"level"`
 		InteractionID string  `json:"interaction_id"`
@@ -584,32 +526,37 @@ func TestFleetAwaitLogsSpendWhenItsContextEnds(t *testing.T) {
 		SearchCount   int     `json:"search_count"`
 		CostGBP       float64 `json:"estimated_cost_gbp"`
 	}
-	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
-		t.Fatalf("decode log record: %v\n%s", err, lines[0])
-	}
-	if rec.Level != "WARN" || rec.InteractionID != id || rec.Status != string(types.StatusIncomplete) {
-		t.Errorf("log record = %+v, want a Warn naming %s and its incomplete status", rec, id)
-	}
-	if rec.InputTokens != wantIn || rec.OutputTokens != wantOut || rec.SearchCount != 3 ||
-		math.Abs(rec.CostGBP-in.Usage.EstimatedCostGBP) > 1e-12 || rec.CostGBP == 0 {
-		t.Errorf("logged spend = %+v, want the run's rollup %+v", rec, in.Usage)
-	}
-	for _, text := range []string{"three units of heat", "nine-tenths of its fuel", "Grants cover part"} {
-		if strings.Contains(logs.String(), text) {
-			t.Errorf("the log carries finding text %q:\n%s", text, logs.String())
-		}
+	err = json.Unmarshal([]byte(lines[0]), &rec)
+	must.NoError(err, "decode log record:\n%s", lines[0])
+	check.Equal("WARN", rec.Level, "log level")
+	check.Equal(id, rec.InteractionID, "log interaction id")
+	check.Equal(string(types.StatusIncomplete), rec.Status, "log status")
+	check.Equal(wantIn, rec.InputTokens, "logged input tokens")
+	check.Equal(wantOut, rec.OutputTokens, "logged output tokens")
+	check.Equal(3, rec.SearchCount, "logged searches")
+	check.InDelta(in.Usage.EstimatedCostGBP, rec.CostGBP, 1e-12, "logged cost, want the run's rollup")
+	check.NotZero(rec.CostGBP, "logged cost")
+
+	for _, tt := range []string{"three units of heat", "nine-tenths of its fuel", "Grants cover part"} {
+		t.Run("log omits "+tt, func(t *testing.T) {
+			must := require.New(t)
+			must.NotContains(logs.String(), tt)
+		})
 	}
 }
 
-// TestFleetDecomposeFailureFailsTheRun: a refused decomposition dispatches
+// TestFleet_Decompose_FailureFailsRun: a refused decomposition dispatches
 // no worker; the run is Failed with a bounded detail and the refused call's
 // usage, priced, and its session is still closed.
-func TestFleetDecomposeFailureFailsTheRun(t *testing.T) {
+func TestFleet_Decompose_FailureFailsRun(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := &fleetModel{
 		t:         t,
 		decompose: decomposeReply(decompositionJSON(t, testBriefs(2))),
 		worker: func(int, int) string {
-			t.Error("a worker ran without a plan")
+			check.Fail("a worker ran without a plan")
 			return ""
 		},
 	}
@@ -624,31 +571,23 @@ func TestFleetDecomposeFailureFailsTheRun(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := f.Start(ctx, researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := f.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err, "Start")
+	must.NoError(f.Await(ctx, id), "Await")
 	in, err := f.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusFailed || !strings.Contains(in.StatusDetail, "the reply has 2 briefs") ||
-		len(in.StatusDetail) > maxDetailBytes || len(in.Outputs) != 0 || len(in.Citations) != 0 {
-		t.Errorf("Result = %+v, want failed on the decomposition with no report", in)
-	}
+	must.NoError(err, "Result")
+
+	check.Equal(types.StatusFailed, in.Status, "status")
+	check.Contains(in.StatusDetail, "the reply has 2 briefs", "status detail")
+	check.LessOrEqual(len(in.StatusDetail), maxDetailBytes, "status detail length, want it bounded")
+	check.Empty(in.Outputs, "outputs")
+	check.Empty(in.Citations, "citations")
 	wantCost := costGBP(decomposeUsage.InputTokens, decomposeUsage.OutputTokens, 2, 10)
-	if in.Usage.InputTokens != decomposeUsage.InputTokens || in.Usage.OutputTokens != decomposeUsage.OutputTokens ||
-		math.Abs(in.Usage.EstimatedCostGBP-wantCost) > 1e-12 {
-		t.Errorf("usage = %+v, want the decomposition's, priced at %v", in.Usage, wantCost)
-	}
-	if searchSrv.CallCount() != 0 {
-		t.Errorf("search requests = %d, want 0", searchSrv.CallCount())
-	}
-	if _, closed := store.sessions(); len(closed) != 1 {
-		t.Errorf("sessions closed = %v, want the run's", closed)
-	}
+	check.Equal(decomposeUsage.InputTokens, in.Usage.InputTokens, "input tokens, want the decomposition's")
+	check.Equal(decomposeUsage.OutputTokens, in.Usage.OutputTokens, "output tokens, want the decomposition's")
+	check.InDelta(wantCost, in.Usage.EstimatedCostGBP, 1e-12, "estimated cost, want the decomposition priced at the Caps rates")
+	check.Zero(searchSrv.CallCount(), "search requests")
+	_, closed := store.sessions()
+	check.Len(closed, 1, "sessions closed, want the run's")
 }
 
 // skipPanickingTracer's spans panic when the pool records why it skipped a
@@ -670,13 +609,13 @@ func (s skipPanickingSpan) SetAttr(key string, value any) {
 	s.Span.SetAttr(key, value)
 }
 
-// TestFleetRecoversALeadPanic: a panic while the lead decomposes, or while
+// TestFleet_Await_RecoversLeadPanic: a panic while the lead decomposes, or while
 // its pool dispatches with a worker already running, never reaches the
 // process. The run is Failed under the fixed lead panic detail, never the
 // recovered value, with the decomposition's usage when that call returned.
 // A worker already running is cancelled and has stored its finding before
 // the session closes, and Await returns nil once the session is closed.
-func TestFleetRecoversALeadPanic(t *testing.T) {
+func TestFleet_Await_RecoversLeadPanic(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
 		tracer     trace.Tracer
@@ -688,6 +627,8 @@ func TestFleetRecoversALeadPanic(t *testing.T) {
 		{name: "pool dispatch", tracer: skipPanickingTracer{}, decomposed: true, wantPuts: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			release := make(chan struct{})
 			fm := &fleetModel{
 				t:         t,
@@ -710,54 +651,44 @@ func TestFleetRecoversALeadPanic(t *testing.T) {
 
 			ctx := context.Background()
 			id, err := f.Start(ctx, researcher.Task{Query: testQuery})
-			if err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if err := f.Await(ctx, id); err != nil {
-				t.Fatalf("Await: %v", err)
-			}
-			if _, closed := store.sessions(); len(closed) != 1 {
-				t.Errorf("sessions closed = %v, want the run's", closed)
-			}
+			must.NoError(err, "Start")
+			must.NoError(f.Await(ctx, id), "Await")
+
+			_, closed := store.sessions()
+			must.Len(closed, 1, "sessions closed, want the run's")
 			// The started worker's model call is held until the test ends,
 			// so its finding is stored before the close only if the panic
 			// cancelled it and the pool waited it out.
-			if got := store.putCountsAtClose(); !slices.Equal(got, []int{tt.wantPuts}) {
-				t.Errorf("puts when the session closed = %v, want [%d]", got, tt.wantPuts)
-			}
+			must.Equal([]int{tt.wantPuts}, store.putCountsAtClose(), "puts when the session closed")
 
 			in, err := f.Result(ctx, id)
-			if err != nil {
-				t.Fatalf("Result: %v", err)
-			}
-			if in.Status != types.StatusFailed || in.StatusDetail != leadPanicDetail || len(in.Outputs) != 0 || len(in.Citations) != 0 {
-				t.Errorf("Result = %s %q with %d outputs and %d citations, want failed %q with neither",
-					in.Status, in.StatusDetail, len(in.Outputs), len(in.Citations), leadPanicDetail)
-			}
+			must.NoError(err, "Result")
+			must.Equal(types.StatusFailed, in.Status, "status")
+			must.Equal(leadPanicDetail, in.StatusDetail, "status detail")
+			must.Empty(in.Outputs, "outputs")
+			must.Empty(in.Citations, "citations")
+
 			wantIn, wantOut, wantDecompose := 0, 0, 0
 			if tt.decomposed {
 				wantIn, wantOut, wantDecompose = decomposeUsage.InputTokens, decomposeUsage.OutputTokens, 1
 			}
-			if in.Usage.InputTokens != wantIn || in.Usage.OutputTokens != wantOut {
-				t.Errorf("usage = %+v, want %d input and %d output tokens", in.Usage, wantIn, wantOut)
-			}
-			if n := len(fm.requestsOf(kindDecompose)); n != wantDecompose {
-				t.Errorf("decompose requests = %d, want %d", n, wantDecompose)
-			}
-			if n := len(fm.requestsOf(kindWorker)); n > 1 {
-				t.Errorf("worker requests = %d, want at most the one started worker's first turn", n)
-			}
-			if n := len(fm.requestsOf(kindSynthesise)) + len(fm.requestsOf(kindCite)); n != 0 {
-				t.Errorf("synthesis and citation requests = %d, want 0", n)
-			}
+			must.Equal(wantIn, in.Usage.InputTokens, "input tokens")
+			must.Equal(wantOut, in.Usage.OutputTokens, "output tokens")
+			must.Len(fm.requestsOf(kindDecompose), wantDecompose, "decompose requests")
+			must.LessOrEqual(len(fm.requestsOf(kindWorker)), 1, "worker requests, want at most the one started worker's first turn")
+			must.Empty(fm.requestsOf(kindSynthesise), "synthesis requests")
+			must.Empty(fm.requestsOf(kindCite), "citation requests")
 		})
 	}
 }
 
-// TestFleetProgressIsHeldUntilAwait: every worker's progress is held while
+// TestFleet_Progress_HeldUntilAwait: every worker's progress is held while
 // no Await has been entered for the run, then delivered stamped with its
 // worker id.
-func TestFleetProgressIsHeldUntilAwait(t *testing.T) {
+func TestFleet_Progress_HeldUntilAwait(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := syntheticFleetModel(t)
 	modelSrv := httptest.NewServer(fm)
 	defer modelSrv.Close()
@@ -770,21 +701,13 @@ func TestFleetProgressIsHeldUntilAwait(t *testing.T) {
 	})
 
 	id, err := f.Start(context.Background(), researcher.Task{Query: testQuery})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	waitFor(t, "each worker's first turn", func() bool { return len(fm.requestsOf(kindWorker)) == 3 })
 	time.Sleep(50 * time.Millisecond)
-	if got := log.snapshot(); len(got) != 0 {
-		t.Fatalf("deliveries before Await = %+v, want none", got)
-	}
-	if n := len(fm.requestsOf(kindWorker)); n != 3 {
-		t.Errorf("worker requests before Await = %d, want each worker held at its first report", n)
-	}
+	must.Empty(log.snapshot(), "deliveries before Await")
+	check.Len(fm.requestsOf(kindWorker), 3, "worker requests before Await, want each worker held at its first report")
 
-	if err := f.Await(context.Background(), id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(f.Await(context.Background(), id), "Await")
 	var got []string
 	for _, pr := range log.snapshot() {
 		got = append(got, pr.WorkerID+" "+pr.Action)
@@ -795,23 +718,24 @@ func TestFleetProgressIsHeldUntilAwait(t *testing.T) {
 		"worker-2 final", "worker-2 search",
 		"worker-3 final", "worker-3 search",
 	}
-	if !slices.Equal(got, want) {
-		t.Errorf("deliveries = %v, want each worker's search and final", got)
-	}
+	check.Equal(want, got, "deliveries, want each worker's search and final")
 }
 
-// TestFleetHasNoWriteSurface: the tool list names only the read-only tools,
+// TestFleet_Tools_HasNoWriteSurface: the tool list names only the read-only tools,
 // with knowledge_recall only when a knowledge store is configured and never
 // knowledge_remember; a Fleet refuses a Rememberer outright, and a run's
 // pool hands its workers neither the Rememberer nor the template.
-func TestFleetHasNoWriteSurface(t *testing.T) {
+func TestFleet_Tools_HasNoWriteSurface(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	recall := recallFunc(func(context.Context, memory.Namespace, memory.Query) ([]memory.Recalled, error) { return nil, nil })
 	remember := rememberFunc(func(context.Context, memory.Namespace, memory.Memory) (memory.Reference, error) {
-		t.Error("a fleet saved to the knowledge store")
+		check.Fail("a fleet saved to the knowledge store")
 		return memory.Reference{}, nil
 	})
 
@@ -822,9 +746,8 @@ func TestFleetHasNoWriteSurface(t *testing.T) {
 		Concurrency: 3,
 	}
 	withRemember.Worker.Remember = remember
-	if _, err := NewFleet(withRemember); err == nil || !strings.Contains(err.Error(), "Remember must be nil") {
-		t.Errorf("NewFleet with a Rememberer = %v, want it refused", err)
-	}
+	_, err := NewFleet(withRemember)
+	must.ErrorContains(err, "Remember must be nil", "NewFleet with a Rememberer")
 
 	for _, tt := range []struct {
 		name      string
@@ -835,32 +758,32 @@ func TestFleetHasNoWriteSurface(t *testing.T) {
 		{"with recall", recall, []string{"web_search", "web_fetch", "knowledge_recall"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			f := newTestFleet(t, modelSrv.URL(), searchSrv, newSessionStore(), func(d *FleetDeps) {
 				d.Worker.Knowledge = tt.knowledge
 				d.Worker.ReportTemplate = mustLoadTemplate(t, "Sections.")
 			})
-			if got := fleetTools(f.deps.Worker); !slices.Equal(got, tt.want) {
-				t.Errorf("tools = %v, want %v", got, tt.want)
-			}
+			must.Equal(tt.want, fleetTools(f.deps.Worker), "tools")
+
 			_, p, err := f.components("session/test")
-			if err != nil {
-				t.Fatalf("components: %v", err)
-			}
-			if p.deps.Worker.Remember != nil || p.deps.Worker.ReportTemplate != nil {
-				t.Error("a fleet worker must receive neither the Rememberer nor the report template")
-			}
+			must.NoError(err, "components")
+			must.Nil(p.deps.Worker.Remember, "a fleet worker must receive no Rememberer")
+			must.Nil(p.deps.Worker.ReportTemplate, "a fleet worker must receive no report template")
 		})
 	}
 }
 
-// TestNewFleetValidates: a store, the worker collaborators and positive
-// fan-out caps within each other are required at construction.
-func TestNewFleetValidates(t *testing.T) {
+// TestNewFleet_Validate_RejectsBadDeps: a store, the worker collaborators and
+// positive fan-out caps within each other are required at construction.
+func TestNewFleet_Validate_RejectsBadDeps(t *testing.T) {
+	must := require.New(t)
+
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
-	good := func() FleetDeps {
+	good := func(t *testing.T) FleetDeps {
 		return FleetDeps{
 			Worker:      poolWorkerDeps(t, newModelClientAt(t, modelSrv.URL()), searchSrv),
 			Store:       newSessionStore(),
@@ -868,9 +791,9 @@ func TestNewFleetValidates(t *testing.T) {
 			Concurrency: 2,
 		}
 	}
-	if _, err := NewFleet(good()); err != nil {
-		t.Fatalf("NewFleet(valid) = %v", err)
-	}
+	_, err := NewFleet(good(t))
+	must.NoError(err, "NewFleet(valid)")
+
 	for _, tt := range []struct {
 		name    string
 		edit    func(*FleetDeps)
@@ -885,28 +808,30 @@ func TestNewFleetValidates(t *testing.T) {
 		{"concurrency past the cap", func(d *FleetDeps) { d.Concurrency = 4 }, "exceeds its worker cap"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			deps := good()
+			must := require.New(t)
+
+			deps := good(t)
 			tt.edit(&deps)
-			if f, err := NewFleet(deps); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("NewFleet = %v, %v, want an error containing %q", f, err, tt.wantErr)
-			}
+			_, err := NewFleet(deps)
+			must.ErrorContains(err, tt.wantErr, "NewFleet")
 		})
 	}
 }
 
-// TestFleetUnknownIDRejected: Await and Result on an id this Fleet never
+// TestFleet_Lookup_RejectsUnknownID: Await and Result on an id this Fleet never
 // issued are programming faults reported as errors.
-func TestFleetUnknownIDRejected(t *testing.T) {
+func TestFleet_Lookup_RejectsUnknownID(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	f := newTestFleet(t, modelSrv.URL(), searchSrv, newSessionStore(), nil)
 
-	if err := f.Await(context.Background(), "flt_not_issued"); err == nil || !strings.Contains(err.Error(), "no fleet run") {
-		t.Errorf("Await(unknown) = %v, want a no-fleet-run error", err)
-	}
-	if in, err := f.Result(context.Background(), "flt_not_issued"); err == nil || in != nil {
-		t.Errorf("Result(unknown) = %+v, %v, want nil and an error", in, err)
-	}
+	must.ErrorContains(f.Await(context.Background(), "flt_not_issued"), "no fleet run", "Await(unknown)")
+	in, err := f.Result(context.Background(), "flt_not_issued")
+	must.Error(err, "Result(unknown) should return an error")
+	check.Nil(in, "Result(unknown) should return no interaction")
 }

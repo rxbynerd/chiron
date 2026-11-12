@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/researcher"
@@ -18,61 +20,52 @@ import (
 // does not write 50 MiB to disk).
 func sparseFile(t *testing.T, name string, size int64) string {
 	t.Helper()
+	must := require.New(t)
 	in := filepath.Join(t.TempDir(), name)
 	f, err := os.Create(in)
-	if err != nil {
-		t.Fatalf("creating %s: %v", name, err)
-	}
-	if err := f.Truncate(size); err != nil {
-		t.Fatalf("sizing %s: %v", name, err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("closing %s: %v", name, err)
-	}
+	must.NoError(err, "creating %s", name)
+	must.NoError(f.Truncate(size), "sizing %s", name)
+	must.NoError(f.Close(), "closing %s", name)
 	return in
 }
 
-// TestInputFileOverBound pins C1-CODE-1: an --input file one byte over
-// the cap is rejected with the path and the limit, not read whole into
-// memory.
+// TestInputFileOverBound: an --input file one byte over the cap is
+// rejected with the path and the limit, not read whole into memory.
 func TestInputFileOverBound(t *testing.T) {
+	must := require.New(t)
 	in := sparseFile(t, "big.txt", maxInputBytes+1)
 	_, err := inputPart(in)
-	if err == nil {
-		t.Fatal("a file over the input bound must be rejected")
-	}
-	if !strings.Contains(err.Error(), in) {
-		t.Errorf("error %q must name the offending file", err)
-	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("%d-byte limit", int64(maxInputBytes))) {
-		t.Errorf("error %q must name the limit", err)
-	}
+	must.Error(err)
+	must.ErrorContains(err, in)
+	must.ErrorContains(err, fmt.Sprintf("%d-byte limit", int64(maxInputBytes)))
 }
 
 // TestInputFileAtBound: the bound is inclusive — exactly maxInputBytes
 // is accepted.
 func TestInputFileAtBound(t *testing.T) {
+	must := require.New(t)
 	in := sparseFile(t, "exact.txt", maxInputBytes)
 	part, err := inputPart(in)
-	if err != nil {
-		t.Fatalf("a file exactly at the bound must be accepted: %v", err)
-	}
-	if int64(len(part.Data)) != int64(maxInputBytes) {
-		t.Errorf("read %d bytes, want %d", len(part.Data), int64(maxInputBytes))
-	}
+	must.NoError(err, "a file exactly at the bound must be accepted")
+	must.Len(part.Data, maxInputBytes)
 }
 
-// TestStartRejectsConcurrentRun pins C1-CODE-2: the one-run-at-a-time
-// contract is enforced at runtime, not just documented.
+// TestStartRejectsConcurrentRun: the one-run-at-a-time contract is
+// enforced at runtime, not just documented.
 func TestStartRejectsConcurrentRun(t *testing.T) {
+	must := require.New(t)
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		close(entered) // the first Start is now in flight
 		<-release
 		w.Write([]byte(`{"id":"v1_first","status":"in_progress"}`))
 	}))
 	defer server.Close()
+	// Runs before server.Close so a failed assertion cannot leave the first request blocked.
+	defer releaseFirst()
 
 	r := newResearcher(t, server)
 	firstErr := make(chan error, 1)
@@ -82,21 +75,18 @@ func TestStartRejectsConcurrentRun(t *testing.T) {
 	}()
 	<-entered
 
-	if _, err := r.Start(context.Background(), researcher.Task{Query: "second"}); err == nil ||
-		!strings.Contains(err.Error(), "already has a run in flight") {
-		t.Errorf("second Start = %v, want the in-flight refusal", err)
-	}
+	_, secondErr := r.Start(context.Background(), researcher.Task{Query: "second"})
+	must.ErrorContains(secondErr, "already has a run in flight")
 
-	close(release)
-	if err := <-firstErr; err != nil {
-		t.Errorf("first Start must be unaffected by the refused second: %v", err)
-	}
+	releaseFirst()
+	must.NoError(<-firstErr, "first Start must be unaffected by the refused second")
 }
 
 // TestPollCountResetsOnFreshStart: after a completed run, a fresh Start
 // on the same instance reports a zero poll count, not the previous
 // run's.
 func TestPollCountResetsOnFreshStart(t *testing.T) {
+	must := require.New(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_reuse","status":"in_progress"}`))
@@ -109,56 +99,43 @@ func TestPollCountResetsOnFreshStart(t *testing.T) {
 	r := newResearcher(t, server)
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "first"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err, "Start")
+	must.NoError(r.Await(ctx, id), "Await")
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Usage.PollCount == 0 {
-		t.Fatal("the first run must have polled at least once")
-	}
+	must.NoError(err, "Result")
+	must.NotZero(in.Usage.PollCount, "the first run must have polled at least once")
 
-	if _, err := r.Start(ctx, researcher.Task{Query: "second"}); err != nil {
-		t.Fatalf("second Start: %v", err)
-	}
+	_, err = r.Start(ctx, researcher.Task{Query: "second"})
+	must.NoError(err, "second Start")
 	in, err = r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result after fresh Start: %v", err)
-	}
-	if in.Usage.PollCount != 0 {
-		t.Errorf("poll count = %d after a fresh Start, want 0", in.Usage.PollCount)
-	}
+	must.NoError(err, "Result after fresh Start")
+	must.Zero(in.Usage.PollCount, "poll count after a fresh Start")
 }
 
-// TestInputPartMIMETypes pins C2-TEST-7: the MIME type on every
-// grounding part reaches the API verbatim, so each extension the table
-// recognises — and the content-sniff fallback for unknown ones — is
-// asserted in the decoded create-request body.
+// TestInputPartMIMETypes: the MIME type on every grounding part reaches
+// the API verbatim. Each recognised extension, and the content-sniff
+// fallback for unknown ones, is asserted in the decoded create-request
+// body.
 func TestInputPartMIMETypes(t *testing.T) {
 	cases := []struct {
+		name    string
 		file    string
 		content []byte
 		want    string
 	}{
-		{"photo.jpg", []byte("jpeg-data"), "image/jpeg"},
-		{"photo.jpeg", []byte("jpeg-data"), "image/jpeg"},
-		{"anim.gif", []byte("gif-data"), "image/gif"},
-		{"notes.txt", []byte("plain words"), "text/plain"},
+		{"jpg extension", "photo.jpg", []byte("jpeg-data"), "image/jpeg"},
+		{"jpeg extension", "photo.jpeg", []byte("jpeg-data"), "image/jpeg"},
+		{"gif extension", "anim.gif", []byte("gif-data"), "image/gif"},
+		{"txt extension", "notes.txt", []byte("plain words"), "text/plain"},
 		// Unknown extension and unprintable bytes: the table returns
 		// nothing and http.DetectContentType sniffs binary.
-		{"blob.bin", []byte{0x00, 0x01, 0xfe, 0xff}, "application/octet-stream"},
+		{"unknown extension sniffs binary", "blob.bin", []byte{0x00, 0x01, 0xfe, 0xff}, "application/octet-stream"},
 	}
 	for _, tt := range cases {
-		t.Run(tt.file, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			in := filepath.Join(t.TempDir(), tt.file)
-			if err := os.WriteFile(in, tt.content, 0o600); err != nil {
-				t.Fatal(err)
-			}
+			must.NoError(os.WriteFile(in, tt.content, 0o600))
 
 			var body struct {
 				Input []interactions.Content `json:"input"`
@@ -170,15 +147,10 @@ func TestInputPartMIMETypes(t *testing.T) {
 			defer server.Close()
 
 			r := newResearcher(t, server, func(o *Options) { o.Inputs = []string{in} })
-			if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if len(body.Input) != 2 {
-				t.Fatalf("input parts = %+v, want prompt + 1 grounding part", body.Input)
-			}
-			if got := body.Input[1].MIMEType; got != tt.want {
-				t.Errorf("MIME type = %q, want %q", got, tt.want)
-			}
+			_, err := r.Start(context.Background(), researcher.Task{Query: "q"})
+			must.NoError(err, "Start")
+			must.Len(body.Input, 2, "input parts: want prompt + 1 grounding part")
+			must.Equal(tt.want, body.Input[1].MIMEType)
 		})
 	}
 }

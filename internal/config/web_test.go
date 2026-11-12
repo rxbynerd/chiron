@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // validExa is validWorker with Exa serving both web roles.
@@ -18,7 +20,7 @@ func validExa() ResearchConfig {
 	return cfg
 }
 
-func TestValidateWebAccepts(t *testing.T) {
+func TestConfig_Validate_AcceptsWebProviders(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mutate func(*ResearchConfig)
@@ -35,16 +37,15 @@ func TestValidateWebAccepts(t *testing.T) {
 		{"exa endpoint left to the environment", func(c *ResearchConfig) { *c = validExa(); c.Fleet.ExaEndpoint = "" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validWorker()
 			tt.mutate(&cfg)
-			if err := cfg.Validate(); err != nil {
-				t.Errorf("Validate: %v", err)
-			}
+			must.NoError(cfg.Validate())
 		})
 	}
 }
 
-func TestValidateWebRejects(t *testing.T) {
+func TestConfig_Validate_RejectsWebProviders(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mutate func(*ResearchConfig)
@@ -73,55 +74,50 @@ func TestValidateWebRejects(t *testing.T) {
 		{"page bound over exa's limit", func(c *ResearchConfig) { c.Fleet.MaxPageBytes = 1_000_001 }, "fleet.max_page_bytes"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validExa()
 			tt.mutate(&cfg)
 			err := cfg.Validate()
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Validate = %v, want %q", err, tt.want)
-			}
-			if strings.Contains(err.Error(), "exa-literal-key") {
-				t.Errorf("error echoes the literal key: %v", err)
-			}
+			must.ErrorContains(err, tt.want)
+			must.NotContains(err.Error(), "exa-literal-key")
 		})
 	}
 }
 
-// TestWebFlagsApply: each web provider flag writes its field, and a config
-// that sets none encodes without the new keys, so research-config output is
-// unchanged for existing pipelines.
-func TestWebFlagsApply(t *testing.T) {
+// TestWebFlags_Apply_SetsFieldsAndOmitsUnsetKeys: each web provider flag writes
+// its field, and a config that sets none encodes without the new keys, so
+// research-config output is unchanged for existing pipelines.
+func TestWebFlags_Apply_SetsFieldsAndOmitsUnsetKeys(t *testing.T) {
+	must := require.New(t)
 	cfg := Default()
 	fs := newFlagSet(t)
-	if err := fs.Parse([]string{
+	must.NoError(fs.Parse([]string{
 		"--fleet-search-provider", "exa", "--fleet-fetch-provider", "exa",
 		"--fleet-exa-endpoint", "https://api.exa.ai", "--fleet-exa-key-ref", "secret://EXA",
 		"--fleet-search-send-objective",
-	}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if err := ApplyFlags(&cfg, fs); err != nil {
-		t.Fatalf("ApplyFlags: %v", err)
-	}
+	}))
+	must.NoError(ApplyFlags(&cfg, fs))
+
 	f := cfg.Fleet
-	if f.SearchProvider != SearchExa || f.FetchProvider != FetchExa || f.ExaEndpoint != "https://api.exa.ai" ||
-		f.ExaKeyRef != "secret://EXA" || !f.SearchSendObjective {
-		t.Errorf("flags not applied: %+v", f)
-	}
+	must.Equal(SearchExa, f.SearchProvider)
+	must.Equal(FetchExa, f.FetchProvider)
+	must.Equal("https://api.exa.ai", f.ExaEndpoint)
+	must.Equal("secret://EXA", f.ExaKeyRef)
+	must.True(f.SearchSendObjective)
 
 	var buf bytes.Buffer
-	if err := Default().EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
+	must.NoError(Default().EncodeJSON(&buf))
 	for _, key := range []string{"search_provider", "fetch_provider", "exa_endpoint", "exa_key_ref", "search_send_objective"} {
-		if strings.Contains(buf.String(), key) {
-			t.Errorf("default config encodes %s:\n%s", key, buf.String())
-		}
+		t.Run(key, func(t *testing.T) {
+			must := require.New(t)
+			must.NotContains(buf.String(), key)
+		})
 	}
 }
 
-// TestFleetEndpointsNeeded: each endpoint variable is read only when the
-// configuration uses its endpoint.
-func TestFleetEndpointsNeeded(t *testing.T) {
+// TestFleetEndpoints_Needed_FollowsProviderChoice: each endpoint variable is
+// read only when the configuration uses its endpoint.
+func TestFleetEndpoints_Needed_FollowsProviderChoice(t *testing.T) {
 	needed := func(f FleetConfig) map[string]bool {
 		out := map[string]bool{}
 		for _, e := range FleetEndpoints(&f) {
@@ -142,35 +138,31 @@ func TestFleetEndpointsNeeded(t *testing.T) {
 			"fleet.model_endpoint": true, "fleet.search_endpoint": true, "fleet.knowledge_endpoint": true, "fleet.exa_endpoint": true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got := needed(tt.f)
 			for field, want := range tt.want {
-				if got[field] != want {
-					t.Errorf("%s needed = %v, want %v", field, got[field], want)
-				}
+				must.Equal(want, got[field], "%s needed", field)
 			}
 		})
 	}
 }
 
-func TestDecodeBaseRejectsExaEndpoint(t *testing.T) {
+func TestDecodeBase_RejectsExaEndpoint(t *testing.T) {
+	must := require.New(t)
 	_, err := DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  exa_endpoint: https://exa.example\n  exa_key_ref: secret://EXA\n"))
-	if err == nil || !strings.Contains(err.Error(), "fleet.exa_endpoint:") || !strings.Contains(err.Error(), EnvFleetExaEndpoint) {
-		t.Fatalf("err = %v, want the exa endpoint refused with its variable named", err)
-	}
-	if strings.Contains(err.Error(), "exa.example") {
-		t.Errorf("error echoes the endpoint: %v", err)
-	}
+	must.ErrorContains(err, "fleet.exa_endpoint:")
+	must.ErrorContains(err, EnvFleetExaEndpoint)
+	must.NotContains(err.Error(), "exa.example")
 }
 
-// TestDecodeBaseRefusesSendObjective: a shared config cannot choose to send
+// TestDecodeBase_RefusesSendObjective: a shared config cannot choose to send
 // the research question to a search provider; only the flag can.
-func TestDecodeBaseRefusesSendObjective(t *testing.T) {
+func TestDecodeBase_RefusesSendObjective(t *testing.T) {
+	must := require.New(t)
 	_, err := DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  search_send_objective: true\n"))
-	if err == nil || !strings.Contains(err.Error(), "fleet.search_send_objective: must not come from a base config") ||
-		!strings.Contains(err.Error(), "--"+FlagSearchSendObjective) {
-		t.Fatalf("err = %v, want the objective refused with its flag named", err)
-	}
-	if _, err := DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  search_send_objective: false\n")); err != nil {
-		t.Errorf("a base leaving the objective off was refused: %v", err)
-	}
+	must.ErrorContains(err, "fleet.search_send_objective: must not come from a base config")
+	must.ErrorContains(err, "--"+FlagSearchSendObjective)
+
+	_, err = DecodeBase(strings.NewReader("agent: worker\nfleet:\n  search_provider: exa\n  search_send_objective: false\n"))
+	must.NoError(err, "a base leaving the objective off was refused")
 }

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -161,10 +163,9 @@ type citedClaims []citedClaim
 // json marshals the claims as a citation reply.
 func (c citedClaims) json(t *testing.T) string {
 	t.Helper()
+	must := require.New(t)
 	b, err := json.Marshal(citeReply{Claims: append([]citedClaim{}, c...)})
-	if err != nil {
-		t.Fatalf("marshal cite reply: %v", err)
-	}
+	must.NoError(err, "marshal cite reply")
 	return string(b)
 }
 
@@ -177,6 +178,7 @@ func citeReplyOf(content string) modeltest.FakeReply {
 // finding, and returns its reference.
 func putFinding(t *testing.T, store memory.ContextStore, ns memory.Namespace, workerID, briefID string, f Finding) memory.Reference {
 	t.Helper()
+	must := require.New(t)
 	body, err := json.Marshal(findingDocument{
 		Kind:     findingDocumentKind,
 		Version:  findingDocumentVersion,
@@ -184,16 +186,12 @@ func putFinding(t *testing.T, store memory.ContextStore, ns memory.Namespace, wo
 		BriefID:  briefID,
 		Finding:  findingRecord(f),
 	})
-	if err != nil {
-		t.Fatalf("marshal finding: %v", err)
-	}
+	must.NoError(err, "marshal finding")
 	ref, err := store.Put(context.Background(), ns, bytes.NewReader(body), memory.ArtifactMeta{
 		Name:      "fleet-finding-" + briefID + ".json",
 		MediaType: findingMediaType,
 	})
-	if err != nil {
-		t.Fatalf("Put finding: %v", err)
-	}
+	must.NoError(err, "Put finding")
 	return ref
 }
 

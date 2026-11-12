@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // extract reduces src as pageText does for HTML, without the byte bound.
@@ -16,7 +19,7 @@ func extract(src string) string {
 // para is long enough to earn paragraph credit.
 const para = "This paragraph carries the real content of the page, long enough to score."
 
-func TestAttrWords(t *testing.T) {
+func TestAttrWords_ClassifiesBoilerplateAndContent(t *testing.T) {
 	for _, tt := range []struct {
 		value       string
 		boilerplate bool
@@ -55,15 +58,15 @@ func TestAttrWords(t *testing.T) {
 		{"post comments", true, true},
 	} {
 		t.Run(tt.value, func(t *testing.T) {
+			must := require.New(t)
 			b, c := attrWords(tt.value)
-			if b != tt.boilerplate || c != tt.content {
-				t.Errorf("attrWords(%q) = (%v, %v), want (%v, %v)", tt.value, b, c, tt.boilerplate, tt.content)
-			}
+			must.Equal(tt.boilerplate, b, "boilerplate flag")
+			must.Equal(tt.content, c, "content flag")
 		})
 	}
 }
 
-func TestTagAttrs(t *testing.T) {
+func TestTagAttrs_ParsesIDClassAndRole(t *testing.T) {
 	for _, tt := range []struct {
 		inner, id, class, role string
 	}{
@@ -76,33 +79,33 @@ func TestTagAttrs(t *testing.T) {
 		{`br/`, "", "", ""},
 	} {
 		t.Run(tt.inner, func(t *testing.T) {
+			must := require.New(t)
 			id, class, role := tagAttrs(tt.inner)
-			if id != tt.id || class != tt.class || role != tt.role {
-				t.Errorf("tagAttrs(%q) = (%q, %q, %q), want (%q, %q, %q)", tt.inner, id, class, role, tt.id, tt.class, tt.role)
-			}
+			must.Equal(tt.id, id, "id")
+			must.Equal(tt.class, class, "class")
+			must.Equal(tt.role, role, "role")
 		})
 	}
 }
 
-// TestExtractBoilerplateRoles: every boilerplate role drops its element,
+// TestExtract_DropsBoilerplateRoles: every boilerplate role drops its element,
 // matched case-insensitively on the first role token.
-func TestExtractBoilerplateRoles(t *testing.T) {
+func TestExtract_DropsBoilerplateRoles(t *testing.T) {
+	must := require.New(t)
 	roles := append([]string{"Navigation", "navigation menu"}, boilerplateRoles...)
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
+			must := require.New(t)
 			got := extract(`<main><div role="` + role + `">Furniture text</div><p>` + para + `</p></main>`)
-			if strings.Contains(got, "Furniture") || !strings.Contains(got, para) {
-				t.Errorf("role %q: got %q", role, got)
-			}
+			must.NotContains(got, "Furniture")
+			must.Contains(got, para)
 		})
 	}
 	got := extract(`<main><div role="presentation">Kept text</div><p>` + para + `</p></main>`)
-	if !strings.Contains(got, "Kept text") {
-		t.Errorf("a non-boilerplate role dropped its element: %q", got)
-	}
+	must.Contains(got, "Kept text", "a non-boilerplate role dropped its element")
 }
 
-func TestExtractSelection(t *testing.T) {
+func TestExtract_SelectsContentRoot(t *testing.T) {
 	const other = "Some other paragraph that is outside the chosen content, also long enough."
 	for _, tt := range []struct {
 		name   string
@@ -246,74 +249,71 @@ func TestExtractSelection(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got := extract(tt.src)
 			for _, w := range tt.want {
-				if !strings.Contains(got, w) {
-					t.Errorf("missing %q in %q", w, got)
-				}
+				must.Contains(got, w)
 			}
 			for _, a := range tt.absent {
-				if strings.Contains(got, a) {
-					t.Errorf("unexpected %q in %q", a, got)
-				}
+				must.NotContains(got, a)
 			}
 		})
 	}
 }
 
-// TestLinkTextNested: text in elements nested inside a link counts as link
-// text exactly as text directly inside the link does.
-func TestLinkTextNested(t *testing.T) {
+// TestParsePage_NestedLinkTextCountsAsLinkText: text in elements nested inside a
+// link counts as link text exactly as text directly inside the link does.
+func TestParsePage_NestedLinkTextCountsAsLinkText(t *testing.T) {
+	must := require.New(t)
 	const label = "Read more about this story"
 	want := parsePage(`<div><p>` + para + `</p><a href="/x">` + label + `</a></div>`).elems[1]
-	if want.link == 0 || want.link == want.text {
-		t.Fatalf("direct link text = %d of %d bytes, want part of the text", want.link, want.text)
-	}
-	for _, src := range []string{
-		`<div><p>` + para + `</p><a href="/x"><span>` + label + `</span></a></div>`,
-		`<div><p>` + para + `</p><a href="/x"><b><span>Read more</span> about this story</b></a></div>`,
+	must.NotZero(want.link, "direct link text should be counted as link text")
+	must.NotEqual(want.text, want.link, "direct link text should be part of the text")
+	for _, tt := range []struct {
+		name, src string
+	}{
+		{"nested in span", `<div><p>` + para + `</p><a href="/x"><span>` + label + `</span></a></div>`},
+		{"nested in bold", `<div><p>` + para + `</p><a href="/x"><b><span>Read more</span> about this story</b></a></div>`},
 	} {
-		if got := parsePage(src).elems[1]; got.link != want.link || got.text != want.text {
-			t.Errorf("%s: link text = %d of %d bytes, want %d of %d", src, got.link, got.text, want.link, want.text)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got := parsePage(tt.src).elems[1]
+			must.Equal(want.link, got.link, "link bytes")
+			must.Equal(want.text, got.text, "text bytes")
+		})
 	}
 }
 
-// TestExtractCommaCreditCapped: a comma-stuffed paragraph earns at most ten
+// TestExtract_CommaCreditIsCapped: a comma-stuffed paragraph earns at most ten
 // points for its commas, so a block of it cannot outscore real prose.
-func TestExtractCommaCreditCapped(t *testing.T) {
+func TestExtract_CommaCreditIsCapped(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const story = "The council met on Tuesday evening and, after a long debate, approved the plan " +
 		"to build new cycle lanes across the city centre, starting in January."
 	src := `<div>` + strings.Repeat(`<p>`+story+`</p>`, 4) + `</div>` +
 		`<div id="responses"><p>` + strings.Repeat("Great, ", 200) + `</p></div>`
 	d := parsePage(src)
 	top := d.bestCandidate()
-	if top <= 0 {
-		t.Fatalf("no candidate scored")
-	}
-	if got := d.render([]int32{top}, true); !strings.Contains(got, story) {
-		t.Errorf("the comma-stuffed block outscored the story: top block renders %q", got[:min(len(got), 60)])
-	}
-	if got := extract(src); !strings.Contains(got, story) {
-		t.Errorf("story missing from %q", got[:min(len(got), 60)])
-	}
+	must.Positive(top, "no candidate scored")
+	check.Contains(d.render([]int32{top}, true), story, "the comma-stuffed block outscored the story")
+	check.Contains(extract(src), story, "story missing from the extracted text")
 }
 
-// TestExtractSafetyNet: when the chosen content renders no letters or
-// digits, the whole document's visible text is returned instead.
-func TestExtractSafetyNet(t *testing.T) {
+// TestExtract_FallsBackToWholeDocument: when the chosen content renders no
+// letters or digits, the whole document's visible text is returned instead.
+func TestExtract_FallsBackToWholeDocument(t *testing.T) {
+	must := require.New(t)
 	src := `<body><form><b>Loose text</b> in a form<nav>Menu</nav><script>hidden()</script></form></body>`
 	doc := parsePage(src)
-	if content := doc.render(doc.contentRoots(), true); hasLetterOrDigit(content) {
-		t.Fatalf("content rendering = %q, want no text", content)
-	}
-	got := extract(src)
-	if got != "Loose text in a form\nMenu" {
-		t.Errorf("got %q, want the whole document's visible text", got)
-	}
+	content := doc.render(doc.contentRoots(), true)
+	must.False(hasLetterOrDigit(content), "content rendering should have no text: %q", content)
+	must.Equal("Loose text in a form\nMenu", extract(src), "the whole document's visible text")
 }
 
-func TestParsePageStructure(t *testing.T) {
+func TestParsePage_BuildsElementTree(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// parents returns name->parent-name pairs in document order.
 	parents := func(d *pageDoc) string {
 		var out []string
@@ -339,29 +339,23 @@ func TestParsePageStructure(t *testing.T) {
 		{"raw-text elements are not elements", `<div><script>x</script><style>y</style></div>`, "div<#root"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := parents(parsePage(tt.src)); got != tt.want {
-				t.Errorf("structure = %q, want %q", got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, parents(parsePage(tt.src)))
 		})
 	}
 
 	d := parsePage(`<div><section><p>text`)
 	for i, e := range d.elems {
-		if e.end != int32(len(d.tokens)) || e.elemEnd != int32(len(d.elems)) {
-			t.Errorf("element %d (%s) is not closed at end of input: end %d, elemEnd %d", i, e.name, e.end, e.elemEnd)
-		}
+		check.Equal(int32(len(d.tokens)), e.end, "element %d (%s) is not closed at end of input: end", i, e.name)
+		check.Equal(int32(len(d.elems)), e.elemEnd, "element %d (%s) is not closed at end of input: elemEnd", i, e.name)
 	}
-	if got := extract(`<div><section><p>text`); got != "text" {
-		t.Errorf("unclosed elements: got %q", got)
-	}
+	must.Equal("text", extract(`<div><section><p>text`), "unclosed elements")
 }
 
-func TestHTMLToTextEntities(t *testing.T) {
+func TestHTMLToText_DecodesEntities(t *testing.T) {
+	must := require.New(t)
 	got := extract(`<p>R&amp;D &pound;5 &#8212; &#x2014; a&nbsp;b &lt;p&gt; &copy &unknown;</p>`)
-	want := "R&D £5 — — a b <p> © &unknown;"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
+	must.Equal("R&D £5 — — a b <p> © &unknown;", got)
 }
 
 // adversarialPages are hostile or malformed inputs extraction must handle in
@@ -388,36 +382,31 @@ func adversarialPages() []struct {
 			name: "many scripts",
 			src:  strings.Repeat("<script>var s = '</div>';</script>", 50000) + "<p>after scripts</p>",
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if !strings.HasSuffix(text, "after scripts") || strings.Contains(text, "var s") {
-					t.Errorf("text ends %q", text[max(0, len(text)-40):])
-				}
+				must := require.New(t)
+				must.True(strings.HasSuffix(text, "after scripts"), "text ends %q", text[max(0, len(text)-40):])
+				must.NotContains(text, "var s")
 			},
 		},
 		{
 			name: "nesting beyond the depth cap",
 			src:  strings.Repeat("<div>", deepDivs) + "deep text" + strings.Repeat("</div>", deepDivs) + "<p>after</p>",
 			check: func(t *testing.T, p *pageParser, text string) {
-				if len(p.elems) > maxPageDepth+2 {
-					t.Errorf("%d elements, want at most the depth cap", len(p.elems))
-				}
-				if !strings.Contains(text, "deep text") || !strings.HasSuffix(text, "after") {
-					t.Errorf("text lost: %q", text[max(0, len(text)-60):])
-				}
-				if last := p.elems[len(p.elems)-1]; last.name != "p" || last.parent != 0 {
-					t.Errorf("close tags beyond the cap popped pushed elements: last is %s under %d", last.name, last.parent)
-				}
+				check := assert.New(t)
+				check.LessOrEqual(len(p.elems), maxPageDepth+2, "elements should stay within the depth cap")
+				check.Contains(text, "deep text", "text lost")
+				check.True(strings.HasSuffix(text, "after"), "text lost: %q", text[max(0, len(text)-60):])
+				last := p.elems[len(p.elems)-1]
+				check.Equal("p", last.name, "close tags beyond the cap must not pop pushed elements")
+				check.Zero(last.parent, "the trailing paragraph must sit under the root")
 			},
 		},
 		{
 			name: "distinct unclosed tags beyond the depth cap",
 			src:  distinct.String() + "tail text",
 			check: func(t *testing.T, p *pageParser, text string) {
-				if len(p.overflow) > maxPageDepth {
-					t.Errorf("overflow tracks %d names, want at most %d", len(p.overflow), maxPageDepth)
-				}
-				if !strings.Contains(text, "tail text") {
-					t.Errorf("text lost: %q", text)
-				}
+				check := assert.New(t)
+				check.LessOrEqual(len(p.overflow), maxPageDepth, "overflow names should stay within the depth cap")
+				check.Contains(text, "tail text", "text lost")
 			},
 		},
 		{
@@ -425,13 +414,10 @@ func adversarialPages() []struct {
 			src: strings.Repeat("<div>", maxPageDepth) + "<table><tr>" + strings.Repeat("<td>cell", manyCells) +
 				"</table>" + strings.Repeat("</div>", maxPageDepth) + "<p>after</p>",
 			check: func(t *testing.T, p *pageParser, _ string) {
+				check := assert.New(t)
 				all := p.render([]int32{0}, false)
-				if n := strings.Count(all, "\tcell"); n != manyCells {
-					t.Errorf("%d of %d cells follow a tab", n, manyCells)
-				}
-				if !strings.HasSuffix(all, "\nafter") {
-					t.Errorf("text after the table is lost: %q", all[max(0, len(all)-40):])
-				}
+				check.Equal(manyCells, strings.Count(all, "\tcell"), "every cell should follow a tab")
+				check.True(strings.HasSuffix(all, "\nafter"), "text after the table is lost: %q", all[max(0, len(all)-40):])
 			},
 		},
 		{
@@ -440,115 +426,98 @@ func adversarialPages() []struct {
 			name: "close tag of an uncounted overflow name",
 			src:  "<section>" + strings.Repeat("<div>", maxPageDepth) + distinct.String() + "<section>inner</section>tail",
 			check: func(t *testing.T, p *pageParser, _ string) {
-				if p.elems[1].name != "section" {
-					t.Fatalf("element 1 is %s, want section", p.elems[1].name)
-				}
-				if got := p.render([]int32{1}, false); !strings.HasSuffix(got, "tail") {
-					t.Errorf("the pushed section closed early: its text ends %q", got[max(0, len(got)-40):])
-				}
+				must := require.New(t)
+				must.Equal("section", p.elems[1].name, "element 1 should be the pushed section")
+				got := p.render([]int32{1}, false)
+				must.True(strings.HasSuffix(got, "tail"), "the pushed section closed early: its text ends %q", got[max(0, len(got)-40):])
 			},
 		},
 		{
 			name: "element count beyond the cap",
 			src:  strings.Repeat("<span>x</span>", manyElements),
 			check: func(t *testing.T, p *pageParser, text string) {
-				if len(p.elems) != maxPageElements {
-					t.Errorf("%d elements, want the cap %d", len(p.elems), maxPageElements)
-				}
-				if n := strings.Count(text, "x"); n != manyElements {
-					t.Errorf("text has %d of %d spans' text", n, manyElements)
-				}
+				check := assert.New(t)
+				check.Len(p.elems, maxPageElements, "element count should be capped")
+				check.Equal(manyElements, strings.Count(text, "x"), "text should keep every span's text")
 			},
 		},
 		{
 			name: "unmatched close tags under a deep stack",
 			src:  strings.Repeat("<div>", 600) + strings.Repeat("</span>", 200000) + "kept" + strings.Repeat("</div>", 600),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if !strings.Contains(text, "kept") {
-					t.Errorf("text lost: %q", text)
-				}
+				must := require.New(t)
+				must.Contains(text, "kept", "text lost")
 			},
 		},
 		{
 			name: "unclosed paragraphs",
 			src:  strings.Repeat("<p>x", 200000),
 			check: func(t *testing.T, p *pageParser, text string) {
+				must := require.New(t)
 				for i, e := range p.elems[1:] {
-					if e.parent != 0 {
-						t.Fatalf("paragraph %d is nested under element %d", i+1, e.parent)
-					}
+					must.Zero(e.parent, "paragraph %d is nested under an element", i+1)
 				}
-				if n := strings.Count(text, "x"); n != 200000 {
-					t.Errorf("text has %d of 200000 paragraphs", n)
-				}
+				must.Equal(200000, strings.Count(text, "x"), "text should keep every paragraph")
 			},
 		},
 		{
 			name: "unterminated quote",
 			src:  `<p>before</p><a href="x>` + strings.Repeat("swallowed ", 100000),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if text != "before" {
-					t.Errorf("got %q, want only the text before the tag", text[:min(len(text), 40)])
-				}
+				must := require.New(t)
+				must.Equal("before", text[:min(len(text), 40)], "text should stop before the tag")
 			},
 		},
 		{
 			name: "unterminated comment",
 			src:  `<p>before</p><!--` + strings.Repeat("swallowed -- > ", 100000),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if text != "before" {
-					t.Errorf("got %q, want only the text before the comment", text[:min(len(text), 40)])
-				}
+				must := require.New(t)
+				must.Equal("before", text[:min(len(text), 40)], "text should stop before the comment")
 			},
 		},
 		{
 			name: "unterminated script full of close tags",
 			src:  `<p>before</p><script>` + strings.Repeat("</div></scrip></SCRIPTS>", 50000),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if text != "before" {
-					t.Errorf("got %q, want only the text before the script", text[:min(len(text), 40)])
-				}
+				must := require.New(t)
+				must.Equal("before", text[:min(len(text), 40)], "text should stop before the script")
 			},
 		},
 		{
 			name: "tag openers without an end",
 			src:  "before" + strings.Repeat("<a", 1<<19),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if text != "before" {
-					t.Errorf("got %q, want only the text before the tag", text[:min(len(text), 40)])
-				}
+				must := require.New(t)
+				must.Equal("before", text[:min(len(text), 40)], "text should stop before the tag")
 			},
 		},
 		{
 			name: "many unclosed attributes",
 			src:  strings.Repeat(`<div class=a'b id="c`, 20000),
 			check: func(t *testing.T, _ *pageParser, text string) {
-				if text != "" {
-					t.Errorf("got %q, want no text", text[:min(len(text), 40)])
-				}
+				must := require.New(t)
+				must.Empty(text[:min(len(text), 40)], "text should be empty")
 			},
 		},
 	}
 }
 
-// TestExtractAdversarial runs every adversarial page; each must complete
-// promptly (quadratic behaviour would not), keep the element and token
-// slices within their up-front reservation, and degrade as its check
-// expects.
-func TestExtractAdversarial(t *testing.T) {
+// TestExtract_AdversarialInputsStayBounded runs every adversarial page; each must
+// complete promptly (quadratic behaviour would not), keep the element and token
+// slices within their up-front reservation, and degrade as its check expects.
+func TestExtract_AdversarialInputsStayBounded(t *testing.T) {
 	for _, tt := range adversarialPages() {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			p := newPageParser(tt.src)
 			markup, starts := countMarkup(tt.src)
 			tokenCap, elemCap := cap(p.tokens), cap(p.elems)
-			if tokenCap != 2*markup+1 || elemCap != min(starts, maxPageElements-1)+1 {
-				t.Fatalf("reservation = %d tokens, %d elements; want %d, %d", tokenCap, elemCap, 2*markup+1, min(starts, maxPageElements-1)+1)
-			}
+			must.Equal(2*markup+1, tokenCap, "token reservation")
+			must.Equal(min(starts, maxPageElements-1)+1, elemCap, "element reservation")
 			p.parse()
-			if cap(p.tokens) != tokenCap || cap(p.elems) != elemCap {
-				t.Errorf("parse grew the slices: %d tokens (reserved %d), %d elements (reserved %d)",
-					cap(p.tokens), tokenCap, cap(p.elems), elemCap)
-			}
+			must.Equal(tokenCap, cap(p.tokens), "parse grew the token slice")
+			must.Equal(elemCap, cap(p.elems), "parse grew the element slice")
 			tt.check(t, p, extract(tt.src))
 		})
 	}

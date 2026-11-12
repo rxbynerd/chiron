@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // fakeKey is shaped exactly like a Google API key (AIza + 35 key
@@ -11,13 +13,12 @@ import (
 // transit the tracer.
 const fakeKey = "AIzaAb1-x9QzAb1-x9QzAb1-x9QzAb1-x9QzAb1"
 
-func TestNoop(t *testing.T) {
+func TestNoop_ReturnsContextAndIgnoresTelemetry(t *testing.T) {
+	must := require.New(t)
 	tr := Noop{}
 	ctx := context.Background()
 	got, span := tr.StartSpan(ctx, SpanResearch)
-	if got != ctx {
-		t.Fatal("Noop.StartSpan must return the context unchanged")
-	}
+	must.Equal(ctx, got, "Noop.StartSpan must return the context unchanged")
 	span.SetAttr("query", "anything")
 	span.End(errors.New("ignored"))
 	span.End(nil) // double End must be safe

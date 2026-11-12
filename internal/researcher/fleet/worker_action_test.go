@@ -3,15 +3,17 @@ package fleet
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseAction(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		raw     string
-		recall  bool
-		wantErr string
-		want    actionKind
+		name     string
+		raw      string
+		recall   bool
+		wantErr  string
+		wantKind actionKind
 	}{
 		{"search", `{"action":"search","query":"q","url":null,"answer":null,"citations":null}`, false, "", actionSearch},
 		{"fetch", `{"action":"fetch","url":"https://x","query":null,"answer":null,"citations":null}`, false, "", actionFetch},
@@ -34,22 +36,15 @@ func TestParseAction(t *testing.T) {
 		{"unknown kind when recall enabled", `{"action":"shell"}`, true, "only search, fetch, recall and final exist", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got, err := parseAction(tt.raw, tt.recall)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
-				}
-				if !strings.HasPrefix(err.Error(), "fleet: ") {
-					t.Errorf("err = %q, want the fleet: prefix", err)
-				}
+				must.ErrorContains(err, tt.wantErr)
+				must.True(strings.HasPrefix(err.Error(), "fleet: "), "err = %q, want the fleet: prefix", err.Error())
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Kind != tt.want {
-				t.Errorf("kind = %q, want %q", got.Kind, tt.want)
-			}
+			must.NoError(err)
+			must.Equal(tt.wantKind, got.Kind)
 		})
 	}
 }

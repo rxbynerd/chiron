@@ -4,10 +4,12 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
-func TestInternalAddr(t *testing.T) {
+func TestInternalAddr_ClassifiesRanges(t *testing.T) {
 	// internal is the verdict with AllowLoopback off; allowed is the verdict
 	// with it on, which may differ only for loopback and unspecified.
 	tests := []struct {
@@ -70,19 +72,15 @@ func TestInternalAddr(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			ip := netip.MustParseAddr(tt.addr)
-			if got := httpx.InternalAddr(ip, false); got != tt.internal {
-				t.Errorf("InternalAddr(%s, false) = %v, want %v", tt.addr, got, tt.internal)
-			}
-			if got := httpx.InternalAddr(ip, true); got != tt.allowed {
-				t.Errorf("InternalAddr(%s, true) = %v, want %v", tt.addr, got, tt.allowed)
-			}
+			must.Equal(tt.internal, httpx.InternalAddr(ip, false), "%s with allowLoopback false", tt.addr)
+			must.Equal(tt.allowed, httpx.InternalAddr(ip, true), "%s with allowLoopback true", tt.addr)
 		})
 	}
 }
 
-func TestInternalAddrRefusesInvalidAddress(t *testing.T) {
-	if !httpx.InternalAddr(netip.Addr{}, true) {
-		t.Fatal("InternalAddr(zero Addr) = false, want an unparseable address refused")
-	}
+func TestInternalAddr_RefusesInvalidAddress(t *testing.T) {
+	must := require.New(t)
+	must.True(httpx.InternalAddr(netip.Addr{}, true), "zero Addr must be refused even when loopback is allowed")
 }

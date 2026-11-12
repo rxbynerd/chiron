@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -54,13 +57,12 @@ func (c *captureSink) Write(_ context.Context, r *types.RunResult) error {
 
 // TestWorkerGoldenReportThroughRunCore is the end-to-end golden: a Worker over
 // a scripted model (search -> fetch -> final with citations), a fake search
-// MCP, and a loopback web_fetch, driven through the UNCHANGED run core, must
-// produce the expected Markdown report (body and citations). This proves the
-// whole Wave 3 path — worker loop, Finding -> Interaction mapping, and the
-// existing formatter/sink — hangs together, per docs/V2-RESEARCH-AGENT §5
-// acceptance criteria and §8 golden-report requirement. The templated variant
-// loads a report template fixture and also pins the system prompt the model
-// received.
+// MCP, and a loopback web_fetch, driven through the unchanged run core, must
+// produce the expected Markdown report (body and citations). It exercises the
+// worker loop, the Finding -> Interaction mapping, and the existing
+// formatter/sink together, per docs/V2-RESEARCH-AGENT §5 acceptance criteria
+// and §8 golden-report requirement. The templated variant loads a report
+// template fixture and also pins the system prompt the model received.
 func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -93,6 +95,8 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			// A loopback page the worker fetches. Its text is what the model
 			// synthesises the report from.
 			page := httptest.NewServer(plainTextPage("10BASE-T1L is a long-reach single-pair Ethernet PHY standardised in IEEE 802.3cg."))
@@ -125,70 +129,54 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 			}
 			if tt.template != "" {
 				rt, err := LoadReportTemplate(filepath.Join("testdata", tt.template))
-				if err != nil {
-					t.Fatalf("LoadReportTemplate: %v", err)
-				}
+				must.NoError(err)
 				workerDeps.ReportTemplate = rt
 			}
 			w, err := NewWorker(workerDeps)
-			if err != nil {
-				t.Fatalf("NewWorker: %v", err)
-			}
+			must.NoError(err)
 
-			cap := &captureSink{}
+			captured := &captureSink{}
 			deps := run.Deps{
 				Researcher: w,
 				Formatter:  formatter.NewMarkdown(),
-				Sink:       cap,
+				Sink:       captured,
 				Transport:  transport.NewStdio(bytes.NewBuffer(nil)),
 				Tracer:     trace.Noop{},
 			}
 			result, err := run.Run(context.Background(), deps, run.Params{Query: "what is 10BASE-T1L", Agent: "worker"})
-			if err != nil {
-				t.Fatalf("run.Run: %v", err)
-			}
-			if result.Status != types.StatusCompleted {
-				t.Fatalf("status = %s, want completed", result.Status)
-			}
-			if cap.result == nil || cap.result.Report == nil {
-				t.Fatal("no report written to the sink")
-			}
+			must.NoError(err)
+			must.Equal(types.StatusCompleted, result.Status)
+			must.NotNil(captured.result)
+			must.NotNil(captured.result.Report, "no report written to the sink")
 
-			checkGolden(t, tt.reportGolden, normalise(cap.result.Report.Markdown))
+			checkGolden(t, tt.reportGolden, normalise(captured.result.Report.Markdown))
 			if tt.promptGolden != "" {
 				reqs := modelSrv.Requests()
-				if len(reqs) == 0 {
-					t.Fatal("the model received no requests")
-				}
+				must.NotEmpty(reqs, "the model received no requests")
 				checkGolden(t, tt.promptGolden, []byte(reqs[0].Messages[0].Content))
 			}
 
-			// Sanity beyond the golden: the search-derived source is cited,
-			// and the URL-less degraded result never became a citation.
-			if want := "single-pair Ethernet"; !bytes.Contains(cap.result.Report.Markdown, []byte(want)) {
-				t.Errorf("report missing expected body content %q", want)
-			}
+			// The golden already covers the body; this pins a phrase from the
+			// answer so a body regression is reported with a clear message.
+			must.Contains(string(captured.result.Report.Markdown), "single-pair Ethernet")
 		})
 	}
 }
 
 // checkGolden compares got with testdata/name, rewriting the file first when
-// -update is set.
+// -update is set. A mismatch does not stop the test, so a caller comparing
+// several goldens reports every mismatch.
 func checkGolden(t *testing.T, name string, got []byte) {
 	t.Helper()
+	must := require.New(t)
+	check := assert.New(t)
 	path := filepath.Join("testdata", name)
 	if *update {
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatalf("update golden: %v", err)
-		}
+		must.NoError(os.WriteFile(path, got, 0o644))
 	}
 	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read golden (run with -update to create it): %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Errorf("%s mismatch.\n--- got ---\n%s\n--- want ---\n%s", name, got, want)
-	}
+	must.NoError(err, "read golden (run with -update to create it)")
+	check.Equal(string(want), string(got), "%s mismatch", name)
 }
 
 var _ sink.ReportSink = (*captureSink)(nil)

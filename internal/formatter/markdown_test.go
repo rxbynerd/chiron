@@ -1,15 +1,16 @@
 package formatter
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/types"
 	"github.com/rxbynerd/chiron/internal/version"
@@ -184,9 +185,8 @@ func TestMarkdownFormat(t *testing.T) {
 			},
 		},
 		{
-			// C1-CODE-3 (a): a citation title containing `]` must have
-			// the bracket escaped so it cannot break out of the link
-			// text.
+			// A citation title containing `]` has the bracket escaped so
+			// it cannot break out of the link text.
 			name: "citation-bracket-title",
 			in: &types.Interaction{
 				ID:      "v1_brkt",
@@ -202,9 +202,8 @@ func TestMarkdownFormat(t *testing.T) {
 			},
 		},
 		{
-			// C1-CODE-3 (b): a citation URI containing `)` must have the
-			// paren percent-encoded so it cannot terminate the link
-			// target early.
+			// A citation URI containing `)` has the paren percent-encoded
+			// so it cannot terminate the link target early.
 			name: "citation-paren-uri",
 			in: &types.Interaction{
 				ID:      "v1_paren",
@@ -220,9 +219,9 @@ func TestMarkdownFormat(t *testing.T) {
 			},
 		},
 		{
-			// C1-CODE-3 (c): a javascript: URI is not a web-verifiable
-			// source — no Markdown link (and no front-matter source) is
-			// emitted for it; only the https citation survives.
+			// A javascript: URI is not a web-verifiable source, so no
+			// Markdown link (and no front-matter source) is emitted for
+			// it; only the https citation survives.
 			name: "citation-javascript-uri",
 			in: &types.Interaction{
 				ID:      "v1_js",
@@ -375,39 +374,34 @@ func TestMarkdownFormat(t *testing.T) {
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := NewMarkdown().Format(context.Background(), tc.in)
-			if err != nil {
-				t.Fatalf("Format: %v", err)
-			}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 
-			golden := filepath.Join("testdata", tc.name+".md")
+			got, err := NewMarkdown().Format(context.Background(), tt.in)
+			must.NoError(err)
+
+			golden := filepath.Join("testdata", tt.name+".md")
 			if *update {
-				if err := os.WriteFile(golden, got.Markdown, 0o644); err != nil {
-					t.Fatalf("updating golden: %v", err)
-				}
+				must.NoError(os.WriteFile(golden, got.Markdown, 0o644), "updating golden")
 			}
 			want, err := os.ReadFile(golden)
-			if err != nil {
-				t.Fatalf("reading golden (run with -update to create): %v", err)
-			}
-			if !bytes.Equal(got.Markdown, want) {
-				t.Errorf("markdown mismatch with %s\n--- got ---\n%s\n--- want ---\n%s", golden, got.Markdown, want)
-			}
+			must.NoError(err, "reading golden (run with -update to create)")
+			must.Equal(string(want), string(got.Markdown))
 
-			if !reflect.DeepEqual(got.Assets, tc.wantAssets) {
-				t.Errorf("assets:\n got %+v\nwant %+v", got.Assets, tc.wantAssets)
-			}
+			must.Equal(tt.wantAssets, got.Assets)
 		})
 	}
 }
 
-// TestMarkdownFormatNoLiveHTMLInBody proves that a citation title
+// TestMarkdown_Format_NoLiveHTMLInBody proves that a citation title
 // carrying an <img> tag cannot reach the rendered body as live HTML.
 // The YAML front matter carries the raw title as data for
 // front-matter-aware viewers; this test does not scan it.
-func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
+func TestMarkdown_Format_NoLiveHTMLInBody(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	in := &types.Interaction{
 		ID:      "v1_livehtml",
 		Agent:   "deep-research-preview-04-2026",
@@ -422,44 +416,39 @@ func TestMarkdownFormatNoLiveHTMLInBody(t *testing.T) {
 	}
 
 	got, err := NewMarkdown().Format(context.Background(), in)
-	if err != nil {
-		t.Fatalf("Format: %v", err)
-	}
+	must.NoError(err)
 
 	const frontMatterEnd = "---\n\n"
+	must.Contains(string(got.Markdown), frontMatterEnd, "front-matter close delimiter")
 	i := strings.Index(string(got.Markdown), frontMatterEnd)
-	if i < 0 {
-		t.Fatalf("no front-matter close delimiter found in:\n%s", got.Markdown)
-	}
 	body := string(got.Markdown)[i+len(frontMatterEnd):]
 
-	if !strings.Contains(body, `\<img src=https://attacker.example/x\>`) {
-		t.Errorf("body does not contain the expected escaped tag:\n%s", body)
-	}
-	for i, r := range body {
+	check.Contains(body, `\<img src=https://attacker.example/x\>`)
+	for pos, r := range body {
 		if r != '<' {
 			continue
 		}
 		backslashes := 0
-		for j := i - 1; j >= 0 && body[j] == '\\'; j-- {
+		for j := pos - 1; j >= 0 && body[j] == '\\'; j-- {
 			backslashes++
 		}
-		if backslashes%2 == 0 {
-			t.Errorf("unescaped %q at byte %d in body (preceded by %d backslashes):\n%s", "<", i, backslashes, body)
-		}
+		escaped := backslashes%2 == 1
+		check.True(escaped, "unescaped %q at byte %d in body (preceded by %d backslashes):\n%s", "<", pos, backslashes, body)
 	}
 }
 
-func TestMarkdownFormatNilInteraction(t *testing.T) {
-	if _, err := NewMarkdown().Format(context.Background(), nil); err == nil {
-		t.Error("Format(nil) must error, not render an empty document")
-	}
+func TestMarkdown_Format_NilInteractionErrors(t *testing.T) {
+	must := require.New(t)
+
+	_, err := NewMarkdown().Format(context.Background(), nil)
+	must.Error(err, "Format(nil) must error, not render an empty document")
 }
 
-// TestWebLinkDestination asserts every ASCII control byte and DEL is
-// percent-encoded as uppercase %XX, and that an already percent-encoded
-// sequence is left untouched rather than having its "%" re-encoded.
-func TestWebLinkDestination(t *testing.T) {
+// TestWebLinkDestination_PercentEncoding asserts every ASCII control byte
+// and DEL is percent-encoded as uppercase %XX, and that an already
+// percent-encoded sequence is left untouched rather than having its "%"
+// re-encoded.
+func TestWebLinkDestination_PercentEncoding(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -476,18 +465,19 @@ func TestWebLinkDestination(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := webLinkDestination.Replace(tt.in); got != tt.want {
-				t.Errorf("webLinkDestination.Replace(%q) = %q, want %q", tt.in, got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, webLinkDestination.Replace(tt.in))
 		})
 	}
 }
 
-// TestMarkdownFormatVersionComment pins the provenance comment to the
+// TestMarkdown_Format_VersionComment pins the provenance comment to the
 // chiron build version, independent of the golden fixtures (which all
 // build at the default "dev" version): a refresh script needs it as
 // the document's first line, matching what --version reports.
-func TestMarkdownFormatVersionComment(t *testing.T) {
+func TestMarkdown_Format_VersionComment(t *testing.T) {
+	must := require.New(t)
+
 	old := version.Version
 	version.Version = "v9.9.9-test"
 	defer func() { version.Version = old }()
@@ -498,37 +488,36 @@ func TestMarkdownFormatVersionComment(t *testing.T) {
 		Outputs: []types.Output{{Type: types.OutputText, Text: "Body."}},
 	}
 	got, err := NewMarkdown().Format(context.Background(), in)
-	if err != nil {
-		t.Fatalf("Format: %v", err)
-	}
+	must.NoError(err)
 
 	want := "<!-- chiron-version: v9.9.9-test -->\n"
-	if !strings.HasPrefix(string(got.Markdown), want) {
-		t.Errorf("markdown does not start with provenance comment %q:\n%s", want, got.Markdown)
-	}
+	must.True(strings.HasPrefix(string(got.Markdown), want),
+		"markdown does not start with provenance comment %q:\n%s", want, got.Markdown)
 }
 
-// TestExtensionFor pins C2-TEST-8: a wrong extension breaks the
-// report's relative image link, so every MIME type the table knows —
-// and the neutral fallback — is asserted.
+// TestExtensionFor pins the file extension used for each known image MIME
+// type. A wrong extension breaks the report's relative image link, so every
+// MIME type the table knows, and the neutral fallback, is asserted.
 func TestExtensionFor(t *testing.T) {
 	cases := []struct {
+		name string
 		mime string
 		want string
 	}{
-		{"image/png", ".png"},
-		{"image/jpeg", ".jpg"},
-		{"image/jpg", ".jpg"},
-		{"image/gif", ".gif"},
-		{"image/svg+xml", ".svg"},
-		{"image/webp", ".webp"},
-		{"  Image/PNG  ", ".png"}, // trimmed and case-insensitive
-		{"image/tiff", ".img"},    // unknown: neutral, never empty
-		{"", ".img"},
+		{"png", "image/png", ".png"},
+		{"jpeg", "image/jpeg", ".jpg"},
+		{"jpg", "image/jpg", ".jpg"},
+		{"gif", "image/gif", ".gif"},
+		{"svg", "image/svg+xml", ".svg"},
+		{"webp", "image/webp", ".webp"},
+		{"trimmed-and-case-insensitive", "  Image/PNG  ", ".png"},
+		{"unknown-falls-back-to-img", "image/tiff", ".img"},
+		{"empty-falls-back-to-img", "", ".img"},
 	}
 	for _, tt := range cases {
-		if got := extensionFor(tt.mime); got != tt.want {
-			t.Errorf("extensionFor(%q) = %q, want %q", tt.mime, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.want, extensionFor(tt.mime))
+		})
 	}
 }

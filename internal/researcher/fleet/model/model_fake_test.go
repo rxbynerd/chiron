@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 )
@@ -18,18 +21,20 @@ const testKey = "sk-test-0123456789abcdefABCDEF"
 // construction error.
 func newClient(t *testing.T, endpoint string, mutate ...func(*model.Options)) *model.Client {
 	t.Helper()
+	must := require.New(t)
 	opts := model.Options{Endpoint: endpoint, Model: "gpt-test", APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := model.New(opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err, "model.New")
 	return c
 }
 
-func TestGenerateText(t *testing.T) {
+func TestGenerate_PlainText_MapsReplyAndWireRequest(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{
 		Content:      "The sky is blue because of Rayleigh scattering.",
 		FinishReason: "stop",
@@ -45,46 +50,32 @@ func TestGenerateText(t *testing.T) {
 		},
 		MaxTokens: 256,
 	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	must.NoError(err)
 
-	if resp.Content != "The sky is blue because of Rayleigh scattering." {
-		t.Errorf("Content = %q, want the scripted reply", resp.Content)
-	}
-	if resp.FinishReason != "stop" {
-		t.Errorf("FinishReason = %q, want stop", resp.FinishReason)
-	}
-	if resp.Usage != (model.Usage{InputTokens: 12, OutputTokens: 9, TotalTokens: 21}) {
-		t.Errorf("Usage = %+v, want prompt→input=12 completion→output=9 total=21", resp.Usage)
-	}
+	check.Equal("The sky is blue because of Rayleigh scattering.", resp.Content)
+	check.Equal("stop", resp.FinishReason)
+	check.Equal(model.Usage{InputTokens: 12, OutputTokens: 9, TotalTokens: 21}, resp.Usage)
 
 	// The request the fake saw carries the transcript, model, completion cap
 	// and no response_format (plain text), and the key rides only the
 	// Authorization header.
 	reqs := fake.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("call count = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1)
 	got := reqs[0]
-	if got.Model != "gpt-test" {
-		t.Errorf("model = %q, want gpt-test", got.Model)
+	check.Equal("gpt-test", got.Model)
+	check.Equal(256, got.MaxTokens)
+	check.Empty(got.ResponseFormatType, "response_format must be absent on a text call")
+	if check.Len(got.Messages, 2) {
+		check.Equal(model.RoleSystem, got.Messages[0].Role)
+		check.Equal("Why is the sky blue?", got.Messages[1].Content)
 	}
-	if got.MaxTokens != 256 {
-		t.Errorf("max_completion_tokens = %d, want 256", got.MaxTokens)
-	}
-	if got.ResponseFormatType != "" {
-		t.Errorf("response_format present on a text call: %q", got.ResponseFormatType)
-	}
-	if len(got.Messages) != 2 || got.Messages[0].Role != model.RoleSystem || got.Messages[1].Content != "Why is the sky blue?" {
-		t.Errorf("messages = %+v, want the two-message transcript", got.Messages)
-	}
-	if got.Authorization != "Bearer "+testKey {
-		t.Errorf("Authorization = %q, want the bearer key header", got.Authorization)
-	}
+	check.Equal("Bearer "+testKey, got.Authorization)
 }
 
-func TestGenerateStructured(t *testing.T) {
+func TestGenerate_Structured_ReturnsRawJSONAndSendsStrictSchema(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	// The model returns a JSON string as the content for a structured call;
 	// the client returns it verbatim for the caller to parse.
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{
@@ -100,39 +91,28 @@ func TestGenerateStructured(t *testing.T) {
 		JSONSchema: schema,
 		SchemaName: "decomposition",
 	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	must.NoError(err)
 
 	// Content is the raw JSON string; it must parse.
 	var parsed struct {
 		Subtasks []string `json:"subtasks"`
 	}
-	if err := json.Unmarshal([]byte(resp.Content), &parsed); err != nil {
-		t.Fatalf("structured content did not parse: %v (content %q)", err, resp.Content)
-	}
-	if len(parsed.Subtasks) != 3 {
-		t.Errorf("subtasks = %v, want three", parsed.Subtasks)
-	}
+	must.NoError(json.Unmarshal([]byte(resp.Content), &parsed), "content %q must parse", resp.Content)
+	check.Len(parsed.Subtasks, 3)
 
 	// The fake saw a provider-native response_format, strict, with the
 	// schema echoed — not prompt-only coaxing.
 	got := fake.Requests()[0]
-	if got.ResponseFormatType != "json_schema" {
-		t.Errorf("response_format.type = %q, want json_schema", got.ResponseFormatType)
-	}
-	if got.SchemaName != "decomposition" {
-		t.Errorf("schema name = %q, want decomposition", got.SchemaName)
-	}
-	if !got.Strict {
-		t.Errorf("strict = false, want true")
-	}
-	if string(got.Schema) != string(schema) {
-		t.Errorf("schema = %s, want the request schema echoed", got.Schema)
-	}
+	check.Equal("json_schema", got.ResponseFormatType)
+	check.Equal("decomposition", got.SchemaName)
+	check.True(got.Strict, "response_format.json_schema.strict must be set")
+	check.Equal(string(schema), string(got.Schema))
 }
 
-func TestFakeRejectsNonStrictSchema(t *testing.T) {
+func TestGenerate_NonStrictSchema_RejectedWithoutConsumingReply(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	// A strict request whose schema the provider would refuse fails with the
 	// provider's 400 shape, and the scripted reply stays queued for the next
 	// compliant call.
@@ -145,32 +125,24 @@ func TestFakeRejectsNonStrictSchema(t *testing.T) {
 		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"note":{"type":"string"}},"required":["answer"]}`),
 		SchemaName: "reply",
 	})
-	if err == nil {
-		t.Fatal("Generate with a non-strict schema should fail against the fake")
-	}
+	must.Error(err)
 	for _, want := range []string{"HTTP 400", "invalid_request_error", "Invalid schema for response_format 'reply'", `property \"note\" must be listed in required`} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v, want it to contain %q", err, want)
-		}
+		must.ErrorContains(err, want)
 	}
-	if fake.CallCount() != 1 {
-		t.Errorf("call count = %d, want 1", fake.CallCount())
-	}
+	check.Equal(1, fake.CallCount())
 
 	resp, err := c.Generate(context.Background(), model.Request{
 		Messages:   []model.Message{{Role: model.RoleUser, Content: "hi"}},
 		JSONSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"}},"required":["answer"]}`),
 		SchemaName: "reply",
 	})
-	if err != nil {
-		t.Fatalf("Generate with a strict schema: %v", err)
-	}
-	if resp.Content != `{"answer":"42"}` {
-		t.Errorf("Content = %q, want the scripted reply the rejected call did not consume", resp.Content)
-	}
+	must.NoError(err)
+	must.JSONEq(`{"answer":"42"}`, resp.Content, "the rejected call must not consume the scripted reply")
 }
 
-func TestStructuredRequiresSchemaName(t *testing.T) {
+func TestGenerate_SchemaWithoutName_RejectedBeforePost(t *testing.T) {
+	must := require.New(t)
+
 	fake := modeltest.NewFakeServer()
 	defer fake.Close()
 
@@ -179,16 +151,14 @@ func TestStructuredRequiresSchemaName(t *testing.T) {
 		Messages:   []model.Message{{Role: model.RoleUser, Content: "hi"}},
 		JSONSchema: json.RawMessage(`{"type":"object"}`),
 	})
-	if err == nil {
-		t.Fatal("Generate with a schema but no name should fail")
-	}
+	must.Error(err)
 	// It must fail before touching the wire — no paid call.
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0 — validation must precede the POST", fake.CallCount())
-	}
+	must.Equal(0, fake.CallCount(), "validation must precede the POST")
 }
 
 func TestNoRetryOn5xx(t *testing.T) {
+	must := require.New(t)
+
 	// A 5xx may already have billed a turn; the paid POST is single-attempt.
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":"boom"}`})
 	defer fake.Close()
@@ -197,15 +167,13 @@ func TestNoRetryOn5xx(t *testing.T) {
 	_, err := c.Generate(context.Background(), model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should fail on a 5xx")
-	}
-	if fake.CallCount() != 1 {
-		t.Errorf("call count = %d, want exactly 1 — the paid POST must not be retried", fake.CallCount())
-	}
+	must.Error(err)
+	must.Equal(1, fake.CallCount(), "the paid POST must not be retried")
 }
 
-func TestOversizedBodyRejected(t *testing.T) {
+func TestGenerate_OversizedBody_IsRejected(t *testing.T) {
+	must := require.New(t)
+
 	// A body over the bound is an error, not a truncation-to-success.
 	big := strings.Repeat("x", 2048)
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{RawBody: fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, big)})
@@ -215,18 +183,14 @@ func TestOversizedBodyRejected(t *testing.T) {
 	_, err := c.Generate(context.Background(), model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should fail when the body exceeds MaxBodyBytes")
-	}
-	if !strings.Contains(err.Error(), "exceeds") {
-		t.Errorf("error = %v, want a body-bound error", err)
-	}
+	must.ErrorContains(err, "exceeds")
 }
 
-// TestGenerateClampsNegativeUsage: a negative token count in the provider's
-// usage is reported as zero, so it cannot offset spend elsewhere, while a
-// non-negative count beside it is kept.
-func TestGenerateClampsNegativeUsage(t *testing.T) {
+// A negative token count in the provider's usage is reported as zero, so it
+// cannot offset spend elsewhere, while a non-negative count beside it is kept.
+func TestGenerate_NegativeUsage_ClampedToZero(t *testing.T) {
+	must := require.New(t)
+
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{
 		Content:      "ok",
 		FinishReason: "stop",
@@ -238,12 +202,8 @@ func TestGenerateClampsNegativeUsage(t *testing.T) {
 	resp, err := c.Generate(context.Background(), model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
 	})
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if want := (model.Usage{InputTokens: 0, OutputTokens: 7, TotalTokens: 0}); resp.Usage != want {
-		t.Errorf("Usage = %+v, want %+v", resp.Usage, want)
-	}
+	must.NoError(err)
+	must.Equal(model.Usage{InputTokens: 0, OutputTokens: 7, TotalTokens: 0}, resp.Usage)
 }
 
 // TestGenerateMalformedBodyIsError: a 200 whose body is not a Chat Completions
@@ -257,6 +217,8 @@ func TestGenerateMalformedBodyIsError(t *testing.T) {
 		{"wrong shape", `{"choices":"nope"}`, "decoding response"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			fake := modeltest.NewFakeServer(modeltest.FakeReply{RawBody: tt.body})
 			defer fake.Close()
 
@@ -264,14 +226,14 @@ func TestGenerateMalformedBodyIsError(t *testing.T) {
 			_, err := c.Generate(context.Background(), model.Request{
 				Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
 			})
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Generate = %v, want an error containing %q", err, tt.want)
-			}
+			must.ErrorContains(err, tt.want)
 		})
 	}
 }
 
 func TestErrorNeverLeaksKey(t *testing.T) {
+	must := require.New(t)
+
 	// A failing request must not surface the API key anywhere in the error,
 	// even when the provider echoes request context in its error body.
 	fake := modeltest.NewFakeServer(modeltest.FakeReply{
@@ -284,23 +246,18 @@ func TestErrorNeverLeaksKey(t *testing.T) {
 	_, err := c.Generate(context.Background(), model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should fail on a 401")
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Fatalf("error leaked the API key: %v", err)
-	}
+	must.Error(err)
+	must.NotContains(err.Error(), testKey, "error leaked the API key")
 }
 
-func TestEmptyMessagesRejected(t *testing.T) {
+func TestGenerate_EmptyMessages_RejectedBeforePost(t *testing.T) {
+	must := require.New(t)
+
 	fake := modeltest.NewFakeServer()
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := c.Generate(context.Background(), model.Request{}); err == nil {
-		t.Fatal("Generate with no messages should fail")
-	}
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0 — validation must precede the POST", fake.CallCount())
-	}
+	_, err := c.Generate(context.Background(), model.Request{})
+	must.Error(err)
+	must.Equal(0, fake.CallCount(), "validation must precede the POST")
 }
