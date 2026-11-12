@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 )
 
 func TestHTMLToText_ExtractsVisibleText(t *testing.T) {
@@ -109,7 +110,7 @@ func rootNames(d *pageDoc) string {
 
 // TestPageText_MatchesGoldenTranscripts reduces each representative page in
 // testdata/pages to its transcript text and compares it with the page's golden
-// file (rewrite with -update). Each page also names the content root selection
+// file. Each page also names the content root selection
 // must pick, text extraction must keep, and boilerplate it must drop.
 func TestPageText_MatchesGoldenTranscripts(t *testing.T) {
 	for _, tt := range []struct {
@@ -170,13 +171,7 @@ func TestPageText_MatchesGoldenTranscripts(t *testing.T) {
 			must.True(ok, "page refused")
 			must.False(page.truncated, "rendering is truncated")
 			got := page.text + "\n"
-			golden := filepath.Join("testdata", "pages", tt.name+".golden.txt")
-			if *update {
-				must.NoError(os.WriteFile(golden, []byte(got), 0o644))
-			}
-			want, err := os.ReadFile(golden)
-			must.NoError(err, "read golden (run with -update to create it)")
-			check.Equal(string(want), got, "text differs from %s", golden)
+			golden.Assert(t, "pages/"+tt.name+".golden.txt", []byte(got))
 			for _, w := range tt.want {
 				check.Contains(page.text, w)
 			}

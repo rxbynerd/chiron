@@ -19,6 +19,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -54,7 +55,7 @@ func synthesisPrompt(t *testing.T, modelSrv *modeltest.FakeServer) string {
 // TestSynthesise_SystemPrompt_MatchesSnapshot: the synthesis system prompt
 // with the built-in output format matches its snapshot byte for byte.
 func TestSynthesise_SystemPrompt_MatchesSnapshot(t *testing.T) {
-	checkGolden(t, "lead-synthesise-system-prompt.txt", []byte(synthesisSystemPrompt(defaultReportFormat)))
+	golden.Assert(t, "lead-synthesise-system-prompt.txt", []byte(synthesisSystemPrompt(defaultReportFormat)))
 }
 
 // TestSynthesise_ReadsFindingsByReference: the synthesis prompt carries what

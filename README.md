@@ -425,7 +425,9 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 - `-o text` (default) writes the Markdown document to stdout — unless
   `--out` owns it, in which case stdout stays quiet.
 - `-o json` writes the machine-readable `RunResult` envelope (status,
-  usage, report, estimated cost) to stdout; useful beside `--out`.
+  usage, report, estimated cost) to stdout; useful beside `--out`. The
+  report is a base64 string and the duration an integer count of
+  nanoseconds; `docs/OUTPUT-JSON.md` lists every key.
 - `-o none` discards the report; the events and exit code still carry
   the outcome.
 - `--out <path>` writes the report to a file (owner-only, `0600`), with

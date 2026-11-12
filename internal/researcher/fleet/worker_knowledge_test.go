@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +21,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -69,20 +68,17 @@ func recallReply(query string) modeltest.FakeReply {
 	return modeltest.FakeReply{Content: `{"action":"recall","query":` + jsonString(query) + `}`, FinishReason: "stop"}
 }
 
-// The recall-disabled loop sends the testdata snapshot schema and system
-// prompt, byte for byte, both as built and as sent on the wire.
+// The recall-disabled loop builds the testdata snapshot schema and system
+// prompt, byte for byte, and sends exactly those values on the wire.
 func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	must := require.New(t)
 	check := assert.New(t)
 
-	wantSchema, err := os.ReadFile(filepath.Join("testdata", "worker-action-schema.json"))
-	must.NoError(err, "read schema snapshot")
-	wantPrompt, err := os.ReadFile(filepath.Join("testdata", "worker-system-prompt.txt"))
-	must.NoError(err, "read prompt snapshot")
-
-	check.Equal(string(wantSchema), string(actionSchemaFor(false)), "recall-disabled schema drifted")
 	brief := Brief{Objective: "why is the sky blue"}
-	check.Equal(string(wantPrompt), buildSystemPrompt(brief, false), "recall-disabled prompt drifted")
+	builtSchema := actionSchemaFor(false)
+	builtPrompt := buildSystemPrompt(brief, false)
+	golden.Assert(t, "worker-action-schema.json", builtSchema)
+	golden.Assert(t, "worker-system-prompt.txt", []byte(builtPrompt))
 
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -99,9 +95,9 @@ func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	must.Len(reqs, 1, "model requests")
 	req := reqs[0]
 	var compact bytes.Buffer
-	must.NoError(json.Compact(&compact, wantSchema), "compact schema snapshot")
-	check.Equal(compact.String(), string(req.Schema), "wire schema differs from the snapshot")
-	check.Equal(string(wantPrompt), req.Messages[0].Content, "wire system prompt differs from the snapshot")
+	must.NoError(json.Compact(&compact, builtSchema), "compact built schema")
+	check.Equal(compact.String(), string(req.Schema), "wire schema differs from the built schema")
+	check.Equal(builtPrompt, req.Messages[0].Content, "wire system prompt differs from the built prompt")
 }
 
 // Every recall edit matches the template exactly once, so a template change

@@ -23,6 +23,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -169,7 +170,7 @@ func TestDecompose_Schema_IsStrictAndPinned(t *testing.T) {
 	check := assert.New(t)
 
 	must.NoError(model.ValidateStrictSchema(decomposeSchema), "decomposeSchema must satisfy strict mode")
-	checkGolden(t, "lead-decompose-schema.json", decomposeSchema)
+	golden.Assert(t, "lead-decompose-schema.json", decomposeSchema)
 
 	var schema struct {
 		Properties struct {
@@ -198,7 +199,7 @@ func TestDecompose_Schema_IsStrictAndPinned(t *testing.T) {
 // TestLead_SystemPrompt_IsPinned: the lead's system prompt matches its
 // snapshot and names every live target.
 func TestLead_SystemPrompt_IsPinned(t *testing.T) {
-	checkGolden(t, "lead-system-prompt.txt", []byte(leadSystemPrompt))
+	golden.Assert(t, "lead-system-prompt.txt", []byte(leadSystemPrompt))
 	for _, target := range liveRoutes().targets() {
 		t.Run(string(target), func(t *testing.T) {
 			must := require.New(t)

@@ -75,8 +75,9 @@ const (
 	OutputImage OutputType = "image"
 	// OutputThoughtSummary carries the agent's reasoning summaries,
 	// mapped from wire thought content parts by the gemini adapter.
-	// The formatter excludes them from the report body; they surface
-	// through --output json and the streaming display.
+	// The formatter excludes them from the report body and RunResult
+	// carries no outputs, so they reach a consumer only as delta events
+	// on the transport.
 	OutputThoughtSummary OutputType = "thought_summary"
 )
 

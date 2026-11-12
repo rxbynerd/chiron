@@ -79,6 +79,7 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/memory/billet/billettest` | `billet.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `billet` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/memory/alexandria` | Alexandria adapter over REST `GET /v1/search` (the path its own plugin uses): bearer token, optional Cloudflare Access headers, space slug validated, redirects never followed, body bounded, `degraded` surfaced as a label. `Recaller` only. |
 | `internal/memory/alexandria/alexandriatest` | `alexandria.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `alexandria` so `net/http/httptest` does not link into the `chiron` binary. |
+| `internal/testutil/golden` | Test-only helper: `golden.Assert` compares a value with `testdata/<name>` in the package under test and rewrites the file when `CHIRON_UPDATE_GOLDEN=1` (see "Writing tests"). It is the one environment read in non-test code outside `internal/cli` and `internal/secret`, and only test files may import it. |
 | `proto/chiron/v1` | The v2 control-plane contract as a Buf module. Generated Go is deliberately not committed in v1 (see DECISIONS.md). |
 
 ## Ground rules
@@ -261,6 +262,19 @@ repositories (see DECISIONS.md, 2026-11-12 entry).
   only wraps an assertion hides what the test checks. Keep helpers for
   setup and teardown, mark them with `t.Helper()`, and use `t.TempDir`,
   `t.Setenv` and `t.Cleanup` instead of manual equivalents.
+- **Goldens go through `golden.Assert`.** A test that compares output with
+  a file under `testdata` calls `golden.Assert(t, name, got)` from
+  `internal/testutil/golden`, which compares `testdata/<name>` byte for byte
+  and never declares a flag of its own. To regenerate every golden after an
+  intended change, run `just update-golden`, which is
+  `CHIRON_UPDATE_GOLDEN=1 go test ./...`; the helper then writes exactly the
+  bytes it was given instead of comparing. Review the diff of every
+  regenerated file before committing: a golden is the record of intended
+  output, and an unreviewed rewrite turns the test into a tautology. Any
+  value other than `1` fails the test, and CI never sets the variable. A
+  missing golden stops the test; create it by running the update once.
+  Recorded inputs, such as the Exa wire fixtures, are not goldens and are
+  never regenerated.
 - **Comments describe the behaviour protected**, not the incident, pull
   request or session that motivated the test.
 
