@@ -1182,6 +1182,7 @@ environment variables in AGENTS.md.
 **Fleet remains a typed not-implemented error.** `--agent fleet` returns
 `fleet.ErrNotImplemented` from the composition root; the earlier plain
 error is gone so callers can test for it with `errors.Is`.
+Superseded by the 2026-09-25 entry "Wave 4 fleet orchestration": the composition root binds `--agent fleet` to `fleet.Fleet`, and `fleet.ErrNotImplemented` is gone.
 
 **Wave order.** Wave 3 (the in-process worker) landed before Wave 1
 (ConnectRPC control plane) and Wave 2 (Langfuse/OTLP flags). The
@@ -2742,6 +2743,7 @@ agent, `deep-research`, `get` and `follow-up` included. A config-named
 https endpoint may also be an internal address, and up to 1 KiB of its
 scrubbed error body reaches stderr. This is accepted until #28 is
 resolved.
+Tracked as #47. Issue #28 is closed for the fleet endpoints (see the 2026-09-25 entry "Fleet endpoints come only from flags or the environment"); extending its rule to the telemetry endpoints is the open work.
 
 **Spend visibility is the interim spend control.** Per amends 2 and 7 and
 V2-PLAN D6/D7, v2 defers budget enforcement rather than fixing it;
@@ -2764,6 +2766,7 @@ already used. Cached, tool-use and thought tokens are not yet attributed
   ConnectRPC transport to exist.
 - Base-config provenance for `telemetry.*` belongs to #28's decision; the
   exposure is recorded above.
+  Tracked as #47.
 - Rerouting the SDK's logr logger through Scrub needs `go-logr/logr` as a
   direct dependency; the malformed-header and malformed-endpoint refusals
   close its credential-bearing messages meanwhile.
