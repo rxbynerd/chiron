@@ -5,10 +5,11 @@ long-running research agent end-to-end (start → await → retrieve → format
 → emit) and produces a cited Markdown report. It is **research-only**: it
 never mutates a workspace, runs no shell, applies no edits.
 
-Read `docs/PROPOSAL.md` before changing anything structural; record
-notable decisions in `docs/DECISIONS.md`. For anything touching the
-Gemini API, `docs/INTERACTIONS-API.md` is normative and wins over the
-proposal. Documentation uses en-GB spelling and no emojis.
+Read `docs/PROPOSAL.md` (the v1 design record) before changing anything
+structural, and `docs/V2-PLAN.md` and `docs/V2-RESEARCH-AGENT.md` for v2
+work; record notable decisions in `docs/DECISIONS.md`. For anything
+touching the Gemini API, `docs/INTERACTIONS-API.md` is normative and wins
+over the proposal. Documentation uses en-GB spelling and no emojis.
 
 ## Build and verify
 
@@ -56,7 +57,7 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/researcher` | `Researcher` seam (Start/Await/Result) — the only model-bearing component. |
 | `internal/researcher/gemini` | The Deep Research adapter: tier mapping and cost table, input grounding, prompt template, streaming await with reconnect and poll fallback, planner binding, follow-up mode. Creates are never auto-retried (money). |
 | `internal/researcher/fleet` | v2 in-process research agents. `RunWorker` is the bounded search→fetch→final loop on one standard model, reaching the web only through `WorkerDeps.Search`/`Fetch`, the `web` seam's interfaces, and bounding every provider's titles, URLs, snippets and notes in the transcript (turn, token, GBP-ceiling and wall-clock caps; tool failures fed back to the model with a three-strike bound; citations restricted to URLs it saw and, with a knowledge store, locators it recalled), plus a `recall` action when `WorkerDeps.Knowledge` is set; `Worker` wraps it as a `Researcher` with opaque `wkr_` ids that `get`/`follow-up` refuse, and saves a completed finding back when `WorkerDeps.Remember` is set (docs/KNOWLEDGE.md). The remaining files implement `--agent fleet`, a lead over several workers. `fleet.go`: `Fleet`, the `Researcher` with opaque `flt_` ids that `get`/`follow-up` refuse; one `ContextStore` session per run; the lead runs detached from the caller's context, and `Await` cancels and waits out a bounded unwind. `lead.go`: one strict structured-output decompose call, never retried, into 3–5 briefs, persisted as the run's plan. `router.go`: the brief-target table, external web only, shared by the lead's validation and the pool. `pool.go`: runs at most `MaxWorkers` briefs, `Concurrency` at once, each a `RunWorker` under the shared `Caps`, and stores each finding by reference as it finishes. `synthesise.go`: reads the findings back by reference and writes the report in one plain-text call, stitching the findings on failure. `cite.go`: one structured call attributing the report's claims to worker-cited URLs. `conclude.go`: status rules and the run's single `Usage` rollup, with the lead priced from the workers' `Caps`. Fleet workers never save back and never receive the report template. |
-| `internal/researcher/fleet/search` | The web-search tool's result-shape layer over `internal/mcpclient`: calls a configurable tool (`fleet.search_tool`/`Options.ToolName`, default `search`) with the query under a configurable argument key (`fleet.search_query_arg`/`Options.QueryArgKey`, default `query`) and maps `{results:[{title,url,snippet}]}`, degrading to a prose snippet rather than erroring; `Close` ends its MCP session. `Options.Endpoint`/key ref are security-sensitive for the same reason as the model client. |
+| `internal/researcher/fleet/search` | The web-search tool's result-shape layer over `internal/mcpclient`: calls a configurable tool (`fleet.search_tool`/`Options.ToolName`, default `search`) with the query under a configurable argument key (`fleet.search_query_arg`/`Options.QueryArgKey`, default `query`) and maps `{results:[{title,url,snippet}]}`, degrading to a prose snippet rather than erroring; `Close` ends its MCP session. `Options.Endpoint` and `Options.APIKey` are security-sensitive for the same reason as the model client. |
 | `internal/researcher/fleet/search/searchtest` | `search.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `search` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/researcher/fleet/web` | The web seam, stdlib only: `Searcher` (`Search(ctx, Query) (SearchResponse, error)`) and `Fetcher` (`Fetch(ctx, rawURL) (Page, error)`), with `Spend` returned on every call and valid beside an error (zero means nothing billed, `Unknown` means billed by an unreported amount), provider `Notes` for the model, and the `ErrRefusedDestination` and `ErrAccountUnusable` sentinels. `search.Client`, `fetch.Client` and `exa.Client` implement it; the composition root binds one per role. A new provider is a leaf package under `web`, one `fleet.search_provider`/`fleet.fetch_provider` enum value per role it serves, and, when it carries a credential, a provider-scoped endpoint and key pair plus one `config.FleetEndpoints` row. |
 | `internal/researcher/fleet/web/exa` | Exa provider for both roles over REST (`POST /search`, `POST /contents`): no default endpoint, key in `x-api-key` only, all redirects refused, bounded reads, errors scrubbed of the key by exact match then `secret.Scrub`. One URL per fetch with exactly one status expected; URLs with userinfo, or naming internal, local, special-use or non-ASCII hosts, refused before sending, fragments dropped; the query and objective redacted from Exa's error messages. Spend from `costDollars.total`; 401/402-credit/403-`TEAM_BLOCKED` match `ErrAccountUnusable`. Never retried except one re-send of an enveloped 503 `SERVICE_OVERLOADED`. Smoke-run bodies are its `testdata` fixtures. |
@@ -64,14 +65,14 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/mcpclient` | Hand-rolled Streamable-HTTP MCP transport shared by search and Billet: one session per `Client`, established by a single-flight `initialize` on first use and ended by `Close` with a best-effort DELETE; the negotiated version must be `2025-06-18` or `2025-03-26` (`ErrUnsupportedProtocolVersion`); `tools/call` with bounded JSON or SSE responses; a `tools/call` refused with a session 404 is re-initialised and re-sent once, nothing else retried; cross-host and https-to-http redirects refused; key and session id header-only and scrubbed. |
 | `internal/mcpclient/mcpclienttest` | `mcpclient.Client`'s generic scripted `FakeServer`, exported for downstream tests. Separate from `mcpclient` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/researcher/fleet/fetch` | The direct `web_fetch` client: SSRF-guarded (private, loopback, link-local, CGNAT, NAT64/6to4, metadata ranges per `httpx.InternalAddr` refused at dial time with pinned IPs; no proxy; redirects re-validated), bounded reads with truncation reported, `AllowLoopback` for tests only (see `CHIRON_FETCH_ALLOW_LOOPBACK`). |
-| `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. `Options.ModelEndpoint`/`ModelKeyRef` (via flag, environment or config) are security-sensitive — credentials travel to the configured endpoint. |
+| `internal/researcher/fleet/model` | v2 standard-model adapter: hand-rolled `net/http` client for one OpenAI-compatible Chat Completions model (text + provider-native structured output), shared by the lead and workers. The paid POST is never auto-retried (money); the key is header-only and scrubbed from diagnostics. `Options.Endpoint` and `Options.APIKey` (an already-resolved key; the adapter never resolves `secret://` references) are security-sensitive — the credential travels to the configured endpoint. |
 | `internal/researcher/fleet/model/modeltest` | `model.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `model` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report` (provenance comment, front matter, body, charts as assets, numbered sources). Pure — no IO; golden-file tested. |
 | `internal/version` | `String()` names the build: the `Version` var stamped at build time via `-X` ldflags (see Justfile) when set, otherwise the commit from the embedded build information (`-dirty` for a modified tree), otherwise the main module version, otherwise `"dev"`. Read by `--version` and the report's provenance comment, so both report the same build identically; read it through `String()`, never `Version` directly. |
 | `internal/sink` | `ReportSink` seam: stdout-markdown, file (0600, writes assets), stdout-json, multi. |
 | `internal/transport` | `Transport` seam: run events out of the core. `Stdio` NDJSON on stderr (v1); `grpc` stub for v2. Event kinds mirror `proto/chiron/v1` one-to-one. |
-| `internal/trace` | `Tracer` seam with three bindings: OTel (OTLP/HTTP), JSONL (local debug), Noop. `names.go` fixes the span/metric vocabulary, including the reserved fleet span names (`decompose`, `delegate`, `synthesise`, `cite`, `control_plane`) and attribute keys (`worker_id`, `brief_id` on a delegate span; `brief_count` on decompose), pinned by a vocabulary test; all payloads scrubbed. |
+| `internal/trace` | `Tracer` seam. The CLI binds OTel (OTLP/HTTP) when an endpoint is configured and Noop otherwise; the JSONL tracer (`NewJSONL`, `NewJSONLFile`) is used by tests and the CLI cannot enable it. `names.go` fixes the span/metric vocabulary, including the reserved fleet span names (`decompose`, `delegate`, `synthesise`, `cite`, `control_plane`) and attribute keys (`worker_id`, `brief_id` on a delegate span; `brief_count` on decompose), pinned by a vocabulary test; all payloads scrubbed. |
 | `internal/secret` | `secret://` resolver (env, file backends), the credential-pattern `Scrub` primitive, and the scrubbing slog handler. Literal keys never appear in config, logs, traces, or stderr. |
 | `internal/memory` | The agentic-memory seam, declared locally (never imported from any store's module; see DECISIONS.md). `Recaller`/`Rememberer` are long-term memory, bound to external knowledge stores by the subpackages below and consumed by the worker's recall action and save-back. `ContextStore` embeds both plus the session and artifact plane, bound to `Noop` or `InMemory`. `InMemory` is the in-process store the fleet passes its plan and findings through by reference (`fleet.memory: inmemory`, required for `--agent fleet`; the composition root binds one per fleet run and none for any other agent): SHA-256 content-addressed, immutable artifacts in session-scoped namespaces with an absolute TTL, a per-artifact size bound, and copies in and out. Its `Remember`/`Recall` return `ErrNotImplemented`. `Recaller`/`Rememberer` never gain a lifecycle method: an adapter that holds a connection exposes its own `Close() error`, which the composition root returns beside the two halves (as `buildKnowledge` does). That `Close` takes no context because its best-effort network cleanup runs on its own bounded background context, independent of run cancellation; the session plane's `Session.Close(ctx)` takes the caller's context because a session is short-lived and TTL'd. |
 | `internal/memory/billet` | Billet adapter over `internal/mcpclient`: `Recall` calls `search_memory` (no degrade-to-prose: a reply without `records` is an error; each record bounded on read), `Remember` calls `save_memory` (content over 256 KiB refused before any request). Locators are `billet://memory/<id>`; `Close` ends its MCP session. Ships the `CHIRON_BILLET_BIN` interop test. |
@@ -86,7 +87,8 @@ Three commands write to the working tree: `golangci-lint fmt` without
   are injected from `ResearchConfig` at the CLI composition root.
 - Dependency surface is minimal and auditable: stdlib, cobra (+pflag),
   yaml.v3, and the OpenTelemetry SDK (the one justified exception —
-  see DECISIONS.md). **No vendor AI SDKs** — adapters are hand-rolled
+  see DECISIONS.md), plus testify, which only tests import.
+  **No vendor AI SDKs** — adapters are hand-rolled
   `net/http`. Justify any new dependency in `docs/DECISIONS.md` before
   adding it.
 - Secrets are `secret://` references end to end; every output path
@@ -107,9 +109,11 @@ Three commands write to the working tree: `golangci-lint fmt` without
   in the same change.
 - Keep commits in logical units; explain rationale in the message body.
 
-## Money safety
+## Money safety for the Gemini path
 
-Research tasks cost £1–7 each, so spend paths have hard rules:
+This section covers `deep-research` and `deep-research-max`, and the
+`get`, `follow-up` and `--plan` paths that share them. Research tasks
+cost £1–7 each, so spend paths have hard rules:
 
 - Nothing creates an interaction before the `--budget` gate has run;
   the gate precedes the plan phase too, because plan rounds also spend.
@@ -124,6 +128,53 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
 - A broken event stream must not abort a paid run: transport emission
   is best effort, and a failed SSE await falls back to polling rather
   than abandoning a running task.
+
+## Money safety for the in-process agents
+
+`--agent worker` and `--agent fleet` create no Gemini interaction, so the
+`--budget` gate and the plan phase do not apply to them: `budget` and the
+other deep-research levers are rejected at validation
+(`TestConfig_Validate_RejectsDeepResearchLeversForInProcessAgents`). A
+`wkr_` or `flt_` id is a local label, not a resume handle: `get` and
+`follow-up` refuse it (`TestGetAndFollowUp_RefuseWorkerIDs`,
+`TestFleetID_GetAndFollowUp_Refused`). The rules that do apply, as
+implemented today:
+
+- No paid model call is retried. A worker turn is a single attempt
+  (`TestRunWorkerNoRetryOnPaidTurn`, `TestNoRetryOn5xx` in the model
+  client); so are the lead's decomposition (`TestDecompose_ModelErrorIsNotRetried`),
+  synthesis (`TestSynthesise_FailureFallsBackToFindings`) and citation
+  call (`TestCite_FallsBackToEveryWorkerCitation`), the last two falling
+  back to the stitched findings and every worker citation.
+- Each worker runs under a turn cap (`fleet.max_turns`, default 8) and a
+  wall-clock timeout (`fleet.worker_timeout`, default five minutes), both
+  always on. The token cap (`fleet.max_tokens`, default 400,000) is off
+  when set to 0. The GBP ceiling (`fleet.ceiling_gbp`) is off by default,
+  counts model tokens only, and needs a price: validation rejects a
+  ceiling when both prices are 0. The turn, token and GBP caps are
+  checked before each turn, so a run can pass the token or GBP cap by up
+  to one turn; the timeout also cancels a call in flight. Reaching any
+  cap ends the worker `incomplete`
+  (`TestRunWorkerCapsStopDeterministically`, `TestRunWorkerTokenCapStops`,
+  `TestRunWorker_CostCeilingStops`,
+  `TestRunWorker_TimeoutMidTurnIsIncomplete`). The fleet's pool gives
+  every worker the same caps (`TestPool_Run_AppliesPerWorkerCaps`).
+- Fan-out is bounded by `fleet.max_workers` and `fleet.concurrency`
+  (`TestPool_Run_BoundsConcurrencyAndWorkerCount`).
+- Web-provider spend is reported in USD, with a count of calls of unknown
+  cost (`TestWorker_Run_AccumulatesWebSpend`, `TestFleet_RollsUpWebSpend`,
+  `TestRun_RecordsWebCost`). It is never added to the GBP figures.
+- A provider account that refuses every call ends the worker at once and
+  starts none of a fleet's queued workers
+  (`TestWorker_Run_EndsAtOnceWhenAccountUnusable`,
+  `TestPool_Run_StopsStartingWorkersOnUnusableAccount`).
+- Findings pass between workers and the lead by reference through the
+  in-process store, not by copy (`TestPool_Run_ReturnsStoredFindingReferences`).
+- There is no run-level GBP ceiling across a fleet: the worst case is
+  `fleet.max_workers` times one worker's caps, plus the lead's
+  decompose, synthesise and cite calls, which no ceiling counts and
+  which are bounded only by a 16,384-token completion cap each
+  (`docs/V2-PLAN.md`, decision D6).
 
 ## Test infrastructure conventions
 
@@ -221,9 +272,7 @@ repositories (see DECISIONS.md, 2026-11-12 entry).
   default; it exists for the httptest smoke tests and must never be set
   in production. Values are validated at startup: absolute `https://`
   required, `http://` admitted for loopback hosts only, and userinfo, a
-  query or a fragment refused (`internal/httpx`). For v2 GKE
-  deployments, consider disabling it entirely in release builds via a
-  build tag.
+  query or a fragment refused (`internal/httpx`).
 - `CHIRON_FETCH_ALLOW_LOOPBACK` — set to exactly `1`, lets the worker's
   direct `web_fetch` reach loopback hosts so the CLI tests can serve pages
   from httptest. It is read only when `fleet.fetch_provider` is `direct`.
@@ -253,10 +302,9 @@ repositories (see DECISIONS.md, 2026-11-12 entry).
   scrubber guarantees the API key never transits a span, but the queries
   themselves are visible to whatever endpoint is configured: treat the
   collector address as deployment configuration, not a user-settable
-  knob. In GKE v2, restrict both to operator-supplied Secrets. An
-  explicit `--otlp-endpoint` flag or the Langfuse key pair (below) takes
-  precedence over these variables. A malformed value is refused on every
-  path before the OTel SDK parses it (see below).
+  knob. An explicit `--otlp-endpoint` flag or the Langfuse key pair
+  (below) takes precedence over these variables. A malformed value is
+  refused on every path before the OTel SDK parses it (see below).
 - `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` —
   request headers, usually a credential, for the collector the variables
   above name, and they go only to that collector: a run with
@@ -368,10 +416,11 @@ separate from `fleet` and validated for every agent, not only
   with the same rule as `CHIRON_GEMINI_BASE_URL`. The collector or
   Langfuse endpoint receives every span, including research queries and
   the run's spend. These fields are settable per run from flags and from
-  a base config (`--config` or piped stdin); base configs are trusted
-  input until issue #28 (a config file can choose both a credential and
-  its destination) lands, and #28 applies to `telemetry.*` for every
-  agent, not only `worker`/`fleet`. `telemetry.langfuse_endpoint` needs
+  a base config (`--config` or piped stdin). The rule that keeps a config
+  file from choosing both a credential and its destination, which holds
+  for the fleet endpoints, is not yet extended to these fields (tracked
+  as #47), so base configs are trusted input for `telemetry.*`, for every
+  agent and not only `worker`/`fleet`. `telemetry.langfuse_endpoint` needs
   both key refs below; with neither endpoint set, the standard
   `OTEL_EXPORTER_OTLP_*` variables still apply, but an explicit endpoint
   here wins over their endpoint. `telemetry.otlp_endpoint` is for

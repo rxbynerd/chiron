@@ -8,9 +8,10 @@
 #     --query "Competitive landscape of 10BASE-T1L PHY vendors"
 #
 # Keys mirror internal/config.ResearchConfig. The Gemini-only levers
-# (budget, plan, model, visualise, tools, mcp, file_search, inputs,
-# template) are rejected for this agent; spend is bounded by the fleet
-# block instead.
+# (budget, plan, accept_plan, model, visualise, tools, mcp, file_search,
+# inputs) are rejected for this agent; spend is bounded by the fleet
+# block instead. template is honoured: it replaces the worker's output
+# format block.
 #
 # The endpoints the keys are sent to never come from a config file: a
 # base config naming model_endpoint, search_endpoint, knowledge_endpoint or
@@ -45,8 +46,8 @@ fleet:
   max_tokens: 400000
   worker_timeout: 5m
   max_page_bytes: 65536
-  # ceiling_gbp is honoured only with both prices set (GBP per million
-  # prompt / completion tokens); a ceiling without prices is rejected.
+  # ceiling_gbp is honoured only with a price set (GBP per million prompt /
+  # completion tokens); a ceiling with both prices at 0 is rejected.
   price_input_gbp_per_mtok: 1.5
   price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5
