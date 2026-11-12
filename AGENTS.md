@@ -76,6 +76,18 @@ with actions pinned to full commit SHAs.
   (logs, traces, stderr, thought deltas) routes through `secret.Scrub`.
 - stdout belongs to the report; events, prompts, and diagnostics go to
   stderr.
+- `just lint` enforces the layering through `depguard` and `forbidigo` in
+  `.golangci.yml`: no vendor AI SDKs, no process execution, no `httptest` or
+  `<pkg>test` import in production code, the run core importing only seam
+  packages, `internal/interactions` confined to the Gemini adapter and the
+  CLI, stdlib-only leaves (`internal/httpx`, `internal/types`,
+  `internal/researcher/fleet/web`, `internal/memory`), environment reads only
+  in `internal/cli` and `internal/secret`, and no package-level `slog`
+  calls. The same file caps cyclomatic complexity at 20, cognitive
+  complexity at 25 and function length at 100 lines; the four functions
+  exempted there may only shrink, never grow, and nothing is added to the
+  list. The rules name package paths, so a package move updates them in the
+  same change.
 - Keep commits in logical units; explain rationale in the message body.
 
 ## Money safety
