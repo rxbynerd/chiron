@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -16,11 +17,14 @@ func newResearchCommand(resolver secret.Resolver) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research [query]",
 		Short: "Start a research task, await it, and emit the report",
-		Long: `Start a research task, await the long-running agent, retrieve the
+		Long: fmt.Sprintf(`Start a research task, await the long-running agent, retrieve the
 result, and emit a cited Markdown report. The main path.
 
 The interaction id is emitted on stderr (NDJSON run events) as soon as
-it is known: it is the resume handle for a crashed or timed-out run.
+it is known. For the deep-research tiers it is the resume handle for a
+crashed or timed-out run (chiron get <id>). A worker or fleet run emits a
+local wkr_ or flt_ id instead; it holds no server-side state, so get and
+follow-up refuse it.
 
 With --plan, the agent first proposes a research plan for interactive
 review (accept, refine, or quit) before any research money is spent;
@@ -34,24 +38,28 @@ cost exceeds the cap — before any interaction is created.
 --agent selects the researcher. deep-research and deep-research-max are
 the managed Gemini Deep Research tiers; --plan, --budget and the tool
 flags apply to them. worker is Chiron's own in-process research loop
-over one standard model (fleet.model_endpoint) plus a web-search MCP
-server (fleet.search_endpoint) and web_fetch; its spend is bounded by
-the fleet caps (--fleet-max-turns, --fleet-max-tokens, --fleet-ceiling
-with the fleet-price flags, --fleet-worker-timeout), and the
-deep-research levers are rejected rather than ignored. fleet is the
-opt-in multi-worker orchestrator: a lead splits the question into briefs,
-at most --fleet-max-workers workers research them (--fleet-concurrency at
+over one standard model (fleet.model_endpoint) plus web search and
+web_fetch. Search comes from an MCP server (--fleet-search-provider mcp,
+the default, at fleet.search_endpoint) or from Exa (exa); fetch is
+Chiron's own SSRF-guarded client (--fleet-fetch-provider direct, the
+default) or Exa (exa). A knowledge store (--fleet-knowledge-provider
+billet or alexandria) is optional. The worker's spend is bounded by the
+fleet caps (--fleet-max-turns, --fleet-max-tokens, --fleet-ceiling with
+the fleet-price flags, --fleet-worker-timeout), and the deep-research
+levers are rejected rather than ignored. fleet is the opt-in
+multi-worker orchestrator: a lead splits the question into briefs, at
+most --fleet-max-workers workers research them (--fleet-concurrency at
 once, each under the same per-worker caps), and the lead synthesises one
 cited report. It requires --fleet-memory inmemory and costs more than a
 single worker.
 
-The worker's endpoints come only from --fleet-model-endpoint,
---fleet-search-endpoint and --fleet-knowledge-endpoint, or from
-CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
-CHIRON_FLEET_KNOWLEDGE_ENDPOINT when the flag is unset. A base config
-naming one is refused, because a shared config must not choose where
-credentials are sent. The endpoint hosts are emitted on stderr as one
-delta event before the first model call.
+The worker's endpoints come only from these flags, or from the matching
+variable when the flag is unset:
+
+%s
+A base config naming one is refused, because a shared config must not
+choose where credentials are sent. The endpoint hosts are emitted on
+stderr as one delta event before the first model call.
 
 Exit codes:
 
@@ -62,7 +70,7 @@ Exit codes:
      action (a state deep research cannot legitimately produce)
   3  the research task was cancelled or exceeded the server-side budget
   4  the run was blocked before any spend: the estimate exceeded
-     --budget, or the plan review was aborted`,
+     --budget, or the plan review was aborted`, fleetEndpointTable()),
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd, args)
@@ -80,7 +88,7 @@ func newResearchConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "research-config",
 		Short: "Emit the resolved ResearchConfig JSON without running",
-		Long: `Resolve the base config (stdin or --config) plus any flags and emit the
+		Long: fmt.Sprintf(`Resolve the base config (stdin or --config) plus any flags and emit the
 result as JSON. Composable in a pipeline:
 
   chiron research-config --agent deep-research-max \
@@ -88,11 +96,16 @@ result as JSON. Composable in a pipeline:
     | chiron research --query "..." --out report.md
 
 The fleet endpoints never travel through a pipeline: the next stage
-refuses a base config that names one, so --fleet-model-endpoint,
---fleet-search-endpoint and --fleet-knowledge-endpoint are refused here.
-Give them to the final chiron research stage as flags, or set
-CHIRON_FLEET_MODEL_ENDPOINT, CHIRON_FLEET_SEARCH_ENDPOINT and
-CHIRON_FLEET_KNOWLEDGE_ENDPOINT for it.`,
+refuses a base config that names one, so these flags are refused here:
+
+%s
+Give them to the final chiron research stage as flags, or set the
+matching variable for it.
+
+--%s is refused here for the same reason: the
+next stage refuses a base config that turns it on, because a shared
+config must not choose to send the research question to a search
+provider. Pass it to the final chiron research stage.`, fleetEndpointTable(), config.FlagSearchSendObjective),
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := refuseEndpointFlags(cmd.Flags()); err != nil {
@@ -153,6 +166,22 @@ minted by the in-process worker or fleet (wkr_... or flt_...) are refused.`,
 	}
 	addResearchFlags(cmd)
 	return cmd
+}
+
+// fleetEndpointTable lists each credential-bearing fleet endpoint's flag
+// beside its environment variable, built from config.FleetEndpoints so the
+// help text names exactly the endpoints the code refuses in a base config.
+func fleetEndpointTable() string {
+	endpoints := config.FleetEndpoints(&config.FleetConfig{})
+	width := 0
+	for _, e := range endpoints {
+		width = max(width, len("--"+e.Flag))
+	}
+	var b strings.Builder
+	for _, e := range endpoints {
+		fmt.Fprintf(&b, "  %-*s  %s\n", width, "--"+e.Flag, e.Env)
+	}
+	return b.String()
 }
 
 // addResearchFlags binds the shared research flag surface (PROPOSAL §4.3)
