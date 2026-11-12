@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -70,15 +68,17 @@ func recallReply(query string) modeltest.FakeReply {
 	return modeltest.FakeReply{Content: `{"action":"recall","query":` + jsonString(query) + `}`, FinishReason: "stop"}
 }
 
-// The recall-disabled loop sends the testdata snapshot schema and system
-// prompt, byte for byte, both as built and as sent on the wire.
+// The recall-disabled loop builds the testdata snapshot schema and system
+// prompt, byte for byte, and sends exactly those values on the wire.
 func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	must := require.New(t)
 	check := assert.New(t)
 
 	brief := Brief{Objective: "why is the sky blue"}
-	golden.Assert(t, "worker-action-schema.json", actionSchemaFor(false))
-	golden.Assert(t, "worker-system-prompt.txt", []byte(buildSystemPrompt(brief, false)))
+	builtSchema := actionSchemaFor(false)
+	builtPrompt := buildSystemPrompt(brief, false)
+	golden.Assert(t, "worker-action-schema.json", builtSchema)
+	golden.Assert(t, "worker-system-prompt.txt", []byte(builtPrompt))
 
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -94,14 +94,10 @@ func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	reqs := modelSrv.Requests()
 	must.Len(reqs, 1, "model requests")
 	req := reqs[0]
-	// The wire schema is the snapshot compacted, so it is compared with the
-	// snapshot as read rather than through golden.Assert.
-	wantSchema, err := os.ReadFile(filepath.Join("testdata", "worker-action-schema.json"))
-	must.NoError(err, "read schema snapshot")
 	var compact bytes.Buffer
-	must.NoError(json.Compact(&compact, wantSchema), "compact schema snapshot")
-	check.Equal(compact.String(), string(req.Schema), "wire schema differs from the snapshot")
-	golden.Assert(t, "worker-system-prompt.txt", []byte(req.Messages[0].Content))
+	must.NoError(json.Compact(&compact, builtSchema), "compact built schema")
+	check.Equal(compact.String(), string(req.Schema), "wire schema differs from the built schema")
+	check.Equal(builtPrompt, req.Messages[0].Content, "wire system prompt differs from the built prompt")
 }
 
 // Every recall edit matches the template exactly once, so a template change
