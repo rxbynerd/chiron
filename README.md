@@ -13,7 +13,7 @@ code under a harness, Chiron *investigates*.
 
 ```sh
 just build        # go build -o bin/chiron ./cmd/chiron
-just test         # go test ./...
+just test         # go test -race ./...
 just vet          # go vet ./...
 just lint         # golangci-lint if installed, else go vet
 just ci           # everything CI runs
@@ -154,7 +154,7 @@ and attribution belong to Stint.
 managed Deep Research task: one OpenAI-compatible Chat Completions model
 decides, turn by turn, whether to call a web-search MCP tool, fetch a page
 through an SSRF-guarded `web_fetch`, or write the final answer. The report
-cites only URLs the loop actually fetched. It is the v2 product path; the
+cites only URLs the loop saw in a search result or fetched. It is the v2 product path; the
 Gemini tiers remain the stopgap and eval baseline.
 
 ```sh
@@ -174,7 +174,7 @@ chiron research --agent worker \
 | `--fleet-model-endpoint` | — | Standard-model base URL; absolute `https://`, `http://` for loopback only. Required, from this flag or `CHIRON_FLEET_MODEL_ENDPOINT`, never a base config. |
 | `--fleet-model-name` | — | Model identifier sent on every call. Required. |
 | `--fleet-model-key-ref` | — | `secret://` reference to the model key. Required. |
-| `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required, from this flag or `CHIRON_FLEET_SEARCH_ENDPOINT`, never a base config. |
+| `--fleet-search-endpoint` | — | Web-search MCP (Streamable HTTP) URL; same scheme rule. Required with the `mcp` search provider (the default), from this flag or `CHIRON_FLEET_SEARCH_ENDPOINT`, never a base config. |
 | `--fleet-search-key-ref` | — | `secret://` reference to the search key; omit for a keyless server. |
 | `--fleet-search-tool` | `search` | MCP tool the search client invokes; change it for a search server that names its tool differently. |
 | `--fleet-search-query-arg` | `query` | Argument key the search query is passed under; change it to match the configured tool. |
@@ -432,8 +432,15 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 - **stderr** carries NDJSON run events (`run_started`,
   `interaction_created`, `status_changed`, `delta`, `run_completed`,
   `cost_summary`) — streamed thought summaries, and a worker run's
-  endpoint hosts, arrive as `delta` events. Separate them with
-  `2>events.ndjson`.
+  endpoint hosts, arrive as `delta` events. Text log lines share the stream,
+  such as the fleet's spend warning after a timeout, so `2>events.ndjson`
+  captures them too and the file is not valid NDJSON. To keep only the
+  events, capture stderr and drop the lines that are not JSON:
+
+  ```sh
+  chiron research --query "..." --out report.md 2>stderr.log
+  jq -cR 'fromjson? | select(. != null)' stderr.log >events.ndjson
+  ```
 
 ### Environment variables
 
