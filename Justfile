@@ -80,3 +80,7 @@ proto-lint:
 # Output is not committed in v1 — see docs/DECISIONS.md.
 proto:
     cd proto && buf generate
+
+# Rewrite the golden files under testdata from the current output; review the diff.
+update-golden:
+    CHIRON_UPDATE_GOLDEN=1 go test ./...
