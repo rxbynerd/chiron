@@ -46,8 +46,8 @@ fleet:
   max_tokens: 400000
   worker_timeout: 5m
   max_page_bytes: 65536
-  # ceiling_gbp is honoured only with both prices set (GBP per million
-  # prompt / completion tokens); a ceiling without prices is rejected.
+  # ceiling_gbp is honoured only with a price set (GBP per million prompt /
+  # completion tokens); a ceiling with both prices at 0 is rejected.
   price_input_gbp_per_mtok: 1.5
   price_output_gbp_per_mtok: 12
   ceiling_gbp: 2.5

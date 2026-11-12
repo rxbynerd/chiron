@@ -152,10 +152,12 @@ and attribution belong to Stint.
 
 `--agent worker` runs Chiron's own bounded research loop instead of a
 managed Deep Research task: one OpenAI-compatible Chat Completions model
-decides, turn by turn, whether to call a web-search MCP tool, fetch a page
-through an SSRF-guarded `web_fetch`, or write the final answer. The report
-cites only URLs the loop saw in a search result or fetched. It is the v2 product path; the
-Gemini tiers remain the stopgap and eval baseline.
+decides, turn by turn, whether to search the web (through an MCP tool or
+Exa), fetch a page (through an SSRF-guarded `web_fetch` or Exa), or write
+the final answer. The report cites only URLs the loop saw in a search
+result or fetched and, with a knowledge store configured, the locators of
+hits it recalled. It is the v2 product path; the Gemini tiers remain the
+stopgap and eval baseline.
 
 ```sh
 export MODEL_KEY=...      # the standard-model key
@@ -186,7 +188,7 @@ chiron research --agent worker \
 | `--fleet-max-turns` | `8` | Cap on model turns (search, fetch or final). |
 | `--fleet-max-tokens` | `400000` | Cap on prompt+completion tokens across the run; `0` uncapped. |
 | `--fleet-worker-timeout` | `5m` | Wall-clock cap for the whole run and each call. |
-| `--fleet-ceiling` | `0` | Model-token cost cap in GBP; needs both price flags. Web-provider spend is not counted. |
+| `--fleet-ceiling` | `0` | Model-token cost cap in GBP; needs at least one price flag (`--fleet-price-input` or `--fleet-price-output`). Web-provider spend is not counted. |
 | `--fleet-price-input` / `--fleet-price-output` | `0` | Model prices in GBP per million prompt / completion tokens. |
 | `--fleet-max-page-bytes` | `65536` | Bound on one fetched page's text after HTML-to-text reduction; with Exa fetch, also the page's character bound (at most 1,000,000). |
 | `--fleet-knowledge-provider` | unset | Knowledge store to recall from: `billet` or `alexandria`. Unset disables recall. |
@@ -203,8 +205,8 @@ with the citations gathered so far. Tool failures (a 404, a refused
 destination, a binary page) are fed back to the model so it can choose
 another source; three consecutive failures end the run `failed`. The
 `wkr_` handle is not a resume token: `chiron get` and `chiron follow-up`
-refuse it. The Gemini-only levers (`--budget`, `--plan`, `--model`,
-`--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`) are
+refuse it. The Gemini-only levers (`--budget`, `--plan`, `--accept-plan`,
+`--model`, `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`) are
 rejected for the worker rather than silently ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
 
@@ -227,13 +229,13 @@ a scrubbed target and tokens so far) on stderr between `interaction_created`
 and `run_completed`, unless `--quiet`.
 
 The endpoints come only from their flags or from
-`CHIRON_FLEET_MODEL_ENDPOINT`, `CHIRON_FLEET_SEARCH_ENDPOINT` and
-`CHIRON_FLEET_KNOWLEDGE_ENDPOINT`, and a set flag wins over its
-variable. A `--config` file or piped config that names an endpoint is
-refused before any key is resolved, because a shared config must not
-choose both a key reference and the host that key is sent to. Before the
-first model call the run names its destinations on stderr, by scheme and
-host only, in one `delta` event:
+`CHIRON_FLEET_MODEL_ENDPOINT`, `CHIRON_FLEET_SEARCH_ENDPOINT`,
+`CHIRON_FLEET_KNOWLEDGE_ENDPOINT` and `CHIRON_FLEET_EXA_ENDPOINT`, and a
+set flag wins over its variable. A `--config` file or piped config that
+names an endpoint is refused before any key is resolved, because a shared
+config must not choose both a key reference and the host that key is sent
+to. Before the first model call the run names its destinations on stderr,
+by scheme and host only, in one `delta` event:
 `{"endpoints":{"model":"https://api.openai.com","search":"https://search.example.com"}}`,
 with a `knowledge` entry when a knowledge store is configured.
 
@@ -439,7 +441,7 @@ stdout belongs to the report; diagnostics and progress go to stderr:
 
   ```sh
   chiron research --query "..." --out report.md 2>stderr.log
-  jq -cR 'fromjson? | select(. != null)' stderr.log >events.ndjson
+  jq -cR 'fromjson?' stderr.log >events.ndjson
   ```
 
 ### Environment variables
