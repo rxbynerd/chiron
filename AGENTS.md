@@ -126,9 +126,8 @@ implemented today:
 - Fan-out is bounded by `fleet.max_workers` and `fleet.concurrency`
   (`TestPool_Run_BoundsConcurrencyAndWorkerCount`).
 - Web-provider spend is reported in USD, with a count of calls of unknown
-  cost, and is never added to the GBP figures
-  (`TestWorker_Run_AccumulatesWebSpend`, `TestFleet_RollsUpWebSpend`,
-  `TestRun_RecordsWebCost`).
+  cost (`TestWorker_Run_AccumulatesWebSpend`, `TestFleet_RollsUpWebSpend`,
+  `TestRun_RecordsWebCost`). It is never added to the GBP figures.
 - A provider account that refuses every call ends the worker at once and
   starts none of a fleet's queued workers
   (`TestWorker_Run_EndsAtOnceWhenAccountUnusable`,
