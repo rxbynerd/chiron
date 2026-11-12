@@ -144,7 +144,7 @@ func (m *Markdown) Format(_ context.Context, in *types.Interaction) (*types.Repo
 	sources := collectSources(in.Citations)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "<!-- chiron-version: %s -->\n", version.Version)
+	fmt.Fprintf(&b, "<!-- chiron-version: %s -->\n", version.String())
 	b.WriteString("---\n")
 	enc := yaml.NewEncoder(&b)
 	enc.SetIndent(2)

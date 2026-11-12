@@ -381,13 +381,18 @@ func TestMarkdownFormat(t *testing.T) {
 			got, err := NewMarkdown().Format(context.Background(), tt.in)
 			must.NoError(err)
 
+			// The build's own version varies with how the test binary was
+			// built; the fixtures always read "dev".
+			rendered := strings.Replace(string(got.Markdown),
+				"chiron-version: "+version.String()+" -->", "chiron-version: dev -->", 1)
+
 			golden := filepath.Join("testdata", tt.name+".md")
 			if *update {
-				must.NoError(os.WriteFile(golden, got.Markdown, 0o644), "updating golden")
+				must.NoError(os.WriteFile(golden, []byte(rendered), 0o644), "updating golden")
 			}
 			want, err := os.ReadFile(golden)
 			must.NoError(err, "reading golden (run with -update to create)")
-			must.Equal(string(want), string(got.Markdown))
+			must.Equal(string(want), rendered)
 
 			must.Equal(tt.wantAssets, got.Assets)
 		})
@@ -472,8 +477,8 @@ func TestWebLinkDestination_PercentEncoding(t *testing.T) {
 }
 
 // TestMarkdown_Format_VersionComment pins the provenance comment to the
-// chiron build version, independent of the golden fixtures (which all
-// build at the default "dev" version): a refresh script needs it as
+// chiron build version, independent of the golden fixtures (which are
+// normalised to the "dev" version): a refresh script needs it as
 // the document's first line, matching what --version reports.
 func TestMarkdown_Format_VersionComment(t *testing.T) {
 	must := require.New(t)
