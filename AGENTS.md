@@ -77,7 +77,7 @@ with actions pinned to full commit SHAs.
 - stdout belongs to the report; events, prompts, and diagnostics go to
   stderr.
 - `just lint` enforces the layering through `depguard` and `forbidigo` in
-  `.golangci.yml`: no vendor AI SDKs, no process execution, no `httptest`,
+  `.golangci.yml`: no vendor AI SDKs, no direct `os/exec` import, no `httptest`,
   `<pkg>test` or `internal/testutil` import in production code, the run core
   importing only seam packages, `internal/interactions` confined to the
   Gemini adapter and the CLI, stdlib-only leaves (`internal/httpx`,

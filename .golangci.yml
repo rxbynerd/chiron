@@ -79,9 +79,9 @@ linters:
     forbidigo:
       analyze-types: true
       forbid:
-        - pattern: '^os\.(Getenv|LookupEnv|Environ)$'
+        - pattern: '^(os\.(Getenv|LookupEnv|Environ|ExpandEnv)|syscall\.(Getenv|Environ))$'
           msg: "read the environment only in internal/cli, or in the env backend of internal/secret"
-        - pattern: '^slog\.(Debug|Info|Warn|Error|Log|DebugContext|InfoContext|WarnContext|ErrorContext|LogAttrs)$'
+        - pattern: '^slog\.(Debug|Info|Warn|Error|Log|DebugContext|InfoContext|WarnContext|ErrorContext|LogAttrs|Default|SetDefault)$'
           msg: "no package-level slog calls; use an injected logger"
     depguard:
       rules:
