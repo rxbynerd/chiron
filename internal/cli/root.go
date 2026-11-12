@@ -6,6 +6,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -19,10 +20,16 @@ import (
 // for distinct research outcomes, and ExitUsage for everything else
 // (see the research command's help for the contract).
 func Execute() int {
-	if err := NewRootCommand().Execute(); err != nil {
+	return runRoot(NewRootCommand(), os.Stderr)
+}
+
+// runRoot runs root, prints a failure's scrubbed message to stderr and
+// returns the process exit code Execute documents.
+func runRoot(root *cobra.Command, stderr io.Writer) int {
+	if err := root.Execute(); err != nil {
 		// Scrubbed like every other output path: API error messages
 		// must not become the one channel a credential can transit.
-		fmt.Fprintln(os.Stderr, "chiron:", secret.Scrub(err.Error()))
+		fmt.Fprintln(stderr, "chiron:", secret.Scrub(err.Error()))
 		if exitErr, ok := errors.AsType[*ExitError](err); ok {
 			return exitErr.Code
 		}
