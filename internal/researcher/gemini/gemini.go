@@ -460,8 +460,8 @@ func (r *Researcher) toDomain(in *interactions.Interaction) *types.Interaction {
 
 	// Thought summaries first (they precede the report chronologically),
 	// then chart images, then the final text. The formatter renders only
-	// the text and images; thoughts surface through --output json and
-	// the streaming display.
+	// the text and images; thoughts reach a consumer only as delta events
+	// on the transport.
 	for _, thought := range thoughtTexts(in) {
 		out.Outputs = append(out.Outputs, types.Output{Type: types.OutputThoughtSummary, Text: thought})
 	}

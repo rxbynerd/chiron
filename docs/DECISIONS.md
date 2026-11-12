@@ -2909,3 +2909,28 @@ The convention, the names `must` and `check`, and the
 repositories. Hand-rolled `if got != want { t.Fatalf(...) }` comparisons
 and `reflect.DeepEqual` are not accepted in new tests. AGENTS.md "Writing
 tests" states the rules for contributors.
+
+## 2026-11-12 — `--output json` carries no thought summaries
+
+The 2026-06-07 entry "Streaming reconnect policy and the poll fallback"
+ends by saying that wire thought content parts map to `OutputThoughtSummary`
+domain outputs, "so `--output json` carries the reasoning trail that
+streamed past". That does not hold. `--output json` encodes a
+`types.RunResult`, which has no outputs or citations field: the run core
+fills in only the interaction id, status, report, usage and duration. The
+thought summaries still map to `OutputThoughtSummary` on the `Interaction`,
+but nothing downstream of the formatter carries them. A consumer receives
+them only as `delta` events on the stderr stream, and only when the run
+streams (`--quiet` requests none). They are not in the Markdown either,
+because the formatter excludes them from the report.
+
+The earlier entry is left as written. The comments in `internal/types` and
+`internal/researcher/gemini` that repeated the claim are corrected.
+
+The actual keys of the JSON document are pinned by golden files in
+`internal/sink/testdata` and described in `docs/OUTPUT-JSON.md`. Two details
+differ from the configuration conventions: `duration_ns` is an integer count
+of nanoseconds (the "Durations serialise as strings" decision applies to
+`ResearchConfig` only), and `report.markdown` is a base64 string, because the
+field is a byte slice. Whether `report.markdown` should become a plain string
+is a separate decision; the golden files make that change a visible diff.
