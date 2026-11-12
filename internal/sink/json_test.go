@@ -13,8 +13,9 @@ import (
 )
 
 // The bytes --output json writes are an external contract: every key, its
-// type and which keys are omitted when empty. Each case pins one facet, so a
-// renamed tag or a changed omission rule shows up as a diff in testdata.
+// type and which keys are omitted when empty. Each case pins one facet, and
+// every optional key is set in one case and empty in another, so a renamed tag
+// or a changed omission rule shows up as a diff in testdata.
 func TestStdoutJSON_Write_MatchesGolden(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -71,8 +72,9 @@ func TestStdoutJSON_Write_MatchesGolden(t *testing.T) {
 		},
 		{
 			// Inside a present object, empty fields are omitted individually:
-			// the asset's MIME type and every usage key but one.
-			name:   "sparse nested objects",
+			// the asset's MIME type and every usage key except the token
+			// counters.
+			name:   "token counters only",
 			golden: "run-result-sparse.json",
 			result: &types.RunResult{
 				InteractionID: "v1_sparse",
@@ -81,7 +83,32 @@ func TestStdoutJSON_Write_MatchesGolden(t *testing.T) {
 					Markdown: []byte("# Sparse\n"),
 					Assets:   []types.Asset{{Name: "chart.bin", Data: []byte("x")}},
 				},
-				Usage: types.Usage{PollCount: 2},
+				Usage: types.Usage{
+					InputTokens:   10,
+					CachedTokens:  2,
+					OutputTokens:  30,
+					ToolUseTokens: 4,
+					ThoughtTokens: 5,
+				},
+			},
+		},
+		{
+			// The complement of the case above: a present usage object holding
+			// only the activity counters and the cost keys.
+			name:   "activity counters and costs only",
+			golden: "run-result-counters.json",
+			result: &types.RunResult{
+				InteractionID: "v1_counters",
+				Status:        types.StatusIncomplete,
+				Usage: types.Usage{
+					SearchCount:         7,
+					RecallCount:         1,
+					PollCount:           2,
+					ReconnectCount:      3,
+					EstimatedCostGBP:    0.25,
+					WebCostUSD:          0.002,
+					WebCostUnknownCalls: 1,
+				},
 			},
 		},
 	} {
