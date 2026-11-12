@@ -149,7 +149,9 @@ repositories (see DECISIONS.md, 2026-11-12 entry).
   hand-written comparison. Hand-rolled `if got != want { t.Fatalf(...) }`
   blocks and `reflect.DeepEqual` are not accepted in new tests.
   `testifylint` runs under `just lint` and rejects swapped arguments,
-  `Equal` on errors and other common misuse.
+  `Equal` on errors and other common misuse. It also rejects `Equal` on
+  floats, so an exact float comparison (spend, prices, metric values) is
+  `InDelta(want, got, 0)`; a non-zero delta is a deliberate tolerance.
 - **`require` stops the test; keep it on the test goroutine.** Inside
   `go func` bodies, `httptest` handlers and any other callback that may
   run off the test goroutine, use `check` or hand the failure back over a
