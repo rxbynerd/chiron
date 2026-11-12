@@ -87,6 +87,21 @@ func TestApplyFlags_FleetFlags_ChangeOnlyTheirOwnField(t *testing.T) {
 		{"knowledge remember", []string{"--fleet-knowledge-remember"}, func(must *require.Assertions, f FleetConfig) {
 			must.True(f.KnowledgeRemember)
 		}},
+		{"search provider", []string{"--fleet-search-provider", SearchExa}, func(must *require.Assertions, f FleetConfig) {
+			must.Equal(SearchExa, f.SearchProvider)
+		}},
+		{"fetch provider", []string{"--fleet-fetch-provider", FetchExa}, func(must *require.Assertions, f FleetConfig) {
+			must.Equal(FetchExa, f.FetchProvider)
+		}},
+		{"exa endpoint", []string{"--fleet-exa-endpoint", "https://api.exa.ai"}, func(must *require.Assertions, f FleetConfig) {
+			must.Equal("https://api.exa.ai", f.ExaEndpoint)
+		}},
+		{"exa key ref", []string{"--fleet-exa-key-ref", "secret://EXA_KEY"}, func(must *require.Assertions, f FleetConfig) {
+			must.Equal("secret://EXA_KEY", f.ExaKeyRef)
+		}},
+		{"search send objective", []string{"--" + FlagSearchSendObjective}, func(must *require.Assertions, f FleetConfig) {
+			must.True(f.SearchSendObjective)
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			must := require.New(t)
