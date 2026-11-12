@@ -462,8 +462,17 @@ func TestTierMapping(t *testing.T) {
 
 func TestStart_EmptyQuery_Rejected(t *testing.T) {
 	must := require.New(t)
-	r, err := New(Options{APIKey: testKey})
-	must.NoError(err)
-	_, err = r.Start(context.Background(), researcher.Task{})
-	must.Error(err, "an empty query must be rejected locally")
+	check := assert.New(t)
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		check.Fail("no request must be sent for an empty query")
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server)
+	_, err := r.Start(context.Background(), researcher.Task{})
+	must.ErrorContains(err, "query must not be empty")
+	must.Zero(requests.Load(), "requests that reached the server")
 }
