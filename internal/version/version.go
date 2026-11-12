@@ -24,17 +24,14 @@ const revisionLength = 12
 // "-dirty" for a modified tree), otherwise the main module version, and
 // "dev" when none of them is available.
 func String() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		info = nil
-	}
+	info, _ := debug.ReadBuildInfo()
 	return resolve(Version, info)
 }
 
 // resolve applies String's precedence to a stamped value and the build
-// information, which may be nil.
+// information, which may be nil. An empty stamped value counts as unset.
 func resolve(stamped string, info *debug.BuildInfo) string {
-	if stamped != unstamped {
+	if stamped != unstamped && stamped != "" {
 		return stamped
 	}
 	if info == nil {

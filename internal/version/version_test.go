@@ -28,6 +28,17 @@ func TestResolve_FallbackOrder(t *testing.T) {
 			want:    "v1.2.3",
 		},
 		{
+			name:    "empty stamped version is unset",
+			stamped: "",
+			info:    buildInfo("v0.0.0-20261112011634-2eec1aa95743", fullRevision, "false"),
+			want:    "2eec1aa95743",
+		},
+		{
+			name:    "empty stamped version without build information",
+			stamped: "",
+			want:    "dev",
+		},
+		{
 			name:    "revision is shortened",
 			stamped: "dev",
 			info:    buildInfo("v0.0.0-20261112011634-2eec1aa95743", fullRevision, "false"),
