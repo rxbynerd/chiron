@@ -16,6 +16,18 @@ import (
 // The exit codes are the contract scripts parse, so these tests assert
 // the integer the process would exit with, through the real command tree.
 
+// TestExitCode_ConstantsMatchDocumentedValues pins each constant to the
+// integer the research command's help documents, so the tests that compare
+// against the constants cannot pass after a renumbering.
+func TestExitCode_ConstantsMatchDocumentedValues(t *testing.T) {
+	must := require.New(t)
+
+	must.Equal(1, ExitUsage)
+	must.Equal(2, ExitResearchFailed)
+	must.Equal(3, ExitResearchStopped)
+	must.Equal(4, ExitBlocked)
+}
+
 func TestExitCode_ResearchOutcomes(t *testing.T) {
 	tests := []struct {
 		status   string
