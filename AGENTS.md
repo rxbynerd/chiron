@@ -130,6 +130,15 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   than raw `io.WriteString` literals, so a handler that keeps the
   connection open cannot leave the scanner blocked.
 - Table-test loop variables are named `tt`.
+- The `internal/cli` tests run under a `TestMain` that unsets every
+  `OTEL_` and `CHIRON_` variable plus `GEMINI_API_KEY`, `EXA_API_KEY` and
+  the two `LANGFUSE_` keys, so a developer's shell cannot change a result
+  or send spans to a collector. A test that needs a value sets it with
+  `t.Setenv`. `TestAmbientEnv_CoversEveryProductionRead` fails when
+  production code in `internal/cli` or `internal/config` starts using a
+  variable the clearing does not cover. A child process a test starts gets
+  the environment its parent builds, and its role variable is listed in
+  `childRoleVars` so `TestMain` leaves that process alone.
 
 ## Writing tests
 
