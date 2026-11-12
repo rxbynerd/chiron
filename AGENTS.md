@@ -79,7 +79,7 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/memory/billet/billettest` | `billet.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `billet` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/memory/alexandria` | Alexandria adapter over REST `GET /v1/search` (the path its own plugin uses): bearer token, optional Cloudflare Access headers, space slug validated, redirects never followed, body bounded, `degraded` surfaced as a label. `Recaller` only. |
 | `internal/memory/alexandria/alexandriatest` | `alexandria.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `alexandria` so `net/http/httptest` does not link into the `chiron` binary. |
-| `internal/testutil/golden` | Test-only helper: `golden.Assert` compares a value with `testdata/<name>` in the package under test and rewrites the file when `CHIRON_UPDATE_GOLDEN=1` (see "Writing tests"). It is the one environment read outside `internal/cli` and `internal/secret`, and only test files may import it. |
+| `internal/testutil/golden` | Test-only helper: `golden.Assert` compares a value with `testdata/<name>` in the package under test and rewrites the file when `CHIRON_UPDATE_GOLDEN=1` (see "Writing tests"). It is the one environment read in non-test code outside `internal/cli` and `internal/secret`, and only test files may import it. |
 | `proto/chiron/v1` | The v2 control-plane contract as a Buf module. Generated Go is deliberately not committed in v1 (see DECISIONS.md). |
 
 ## Ground rules
