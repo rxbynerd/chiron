@@ -2,9 +2,6 @@ package formatter
 
 import (
 	"context"
-	"flag"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,11 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/types"
 	"github.com/rxbynerd/chiron/internal/version"
 )
-
-var update = flag.Bool("update", false, "rewrite golden files in testdata/")
 
 var (
 	started  = time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
@@ -385,14 +381,7 @@ func TestMarkdownFormat(t *testing.T) {
 			// built; the fixtures always read "dev".
 			rendered := strings.Replace(string(got.Markdown),
 				"chiron-version: "+version.String()+" -->", "chiron-version: dev -->", 1)
-
-			golden := filepath.Join("testdata", tt.name+".md")
-			if *update {
-				must.NoError(os.WriteFile(golden, []byte(rendered), 0o644), "updating golden")
-			}
-			want, err := os.ReadFile(golden)
-			must.NoError(err, "reading golden (run with -update to create)")
-			must.Equal(string(want), rendered)
+			golden.Assert(t, tt.name+".md", []byte(rendered))
 
 			must.Equal(tt.wantAssets, got.Assets)
 		})

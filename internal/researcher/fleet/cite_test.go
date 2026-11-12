@@ -14,6 +14,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -66,7 +67,7 @@ func TestCiteSchema_IsStrictAndMatchesSnapshot(t *testing.T) {
 	must := require.New(t)
 
 	must.NoError(model.ValidateStrictSchema(citeSchema), "citeSchema violates strict mode")
-	checkGolden(t, "lead-cite-schema.json", citeSchema)
+	golden.Assert(t, "lead-cite-schema.json", citeSchema)
 
 	var schema struct {
 		Properties struct {
@@ -88,7 +89,7 @@ func TestCiteSchema_IsStrictAndMatchesSnapshot(t *testing.T) {
 // TestCiteSystemPrompt_MatchesSnapshot: the citation system prompt matches its
 // snapshot byte for byte.
 func TestCiteSystemPrompt_MatchesSnapshot(t *testing.T) {
-	checkGolden(t, "lead-cite-system-prompt.txt", []byte(citeSystemPrompt))
+	golden.Assert(t, "lead-cite-system-prompt.txt", []byte(citeSystemPrompt))
 }
 
 // TestCite_KeepsSubsetOfWorkerCitations: the emitted citations are the

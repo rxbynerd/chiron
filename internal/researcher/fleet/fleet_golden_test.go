@@ -10,6 +10,7 @@ import (
 
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -34,11 +35,11 @@ func TestFleet_Report_GoldenEndToEnd(t *testing.T) {
 	run.outcome.applyTo(in)
 	report, err := formatter.NewMarkdown().Format(context.Background(), in)
 	must.NoError(err, "format report")
-	checkGolden(t, "fleet-report.md", report.Markdown)
+	golden.Assert(t, "fleet-report.md", report.Markdown)
 
 	synthesis := fm.requestsOf(kindSynthesise)
 	must.Len(synthesis, 1, "one synthesis request")
-	checkGolden(t, "fleet-synthesis-prompt.txt", []byte(synthesis[0][1].Content))
+	golden.Assert(t, "fleet-synthesis-prompt.txt", []byte(synthesis[0][1].Content))
 
 	want := []types.Citation{
 		{URI: heatPumpURL, Title: "Heat pump running costs"},

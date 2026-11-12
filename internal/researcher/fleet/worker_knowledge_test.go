@@ -23,6 +23,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/types"
 )
@@ -75,14 +76,9 @@ func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	must := require.New(t)
 	check := assert.New(t)
 
-	wantSchema, err := os.ReadFile(filepath.Join("testdata", "worker-action-schema.json"))
-	must.NoError(err, "read schema snapshot")
-	wantPrompt, err := os.ReadFile(filepath.Join("testdata", "worker-system-prompt.txt"))
-	must.NoError(err, "read prompt snapshot")
-
-	check.Equal(string(wantSchema), string(actionSchemaFor(false)), "recall-disabled schema drifted")
 	brief := Brief{Objective: "why is the sky blue"}
-	check.Equal(string(wantPrompt), buildSystemPrompt(brief, false), "recall-disabled prompt drifted")
+	golden.Assert(t, "worker-action-schema.json", actionSchemaFor(false))
+	golden.Assert(t, "worker-system-prompt.txt", []byte(buildSystemPrompt(brief, false)))
 
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -98,10 +94,14 @@ func TestWorker_Recall_DisabledKeepsSchemaAndPrompt(t *testing.T) {
 	reqs := modelSrv.Requests()
 	must.Len(reqs, 1, "model requests")
 	req := reqs[0]
+	// The wire schema is the snapshot compacted, so it is compared with the
+	// snapshot as read rather than through golden.Assert.
+	wantSchema, err := os.ReadFile(filepath.Join("testdata", "worker-action-schema.json"))
+	must.NoError(err, "read schema snapshot")
 	var compact bytes.Buffer
 	must.NoError(json.Compact(&compact, wantSchema), "compact schema snapshot")
 	check.Equal(compact.String(), string(req.Schema), "wire schema differs from the snapshot")
-	check.Equal(string(wantPrompt), req.Messages[0].Content, "wire system prompt differs from the snapshot")
+	golden.Assert(t, "worker-system-prompt.txt", []byte(req.Messages[0].Content))
 }
 
 // Every recall edit matches the template exactly once, so a template change

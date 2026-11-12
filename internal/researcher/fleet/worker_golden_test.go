@@ -3,14 +3,11 @@ package fleet
 import (
 	"bytes"
 	"context"
-	"flag"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"regexp"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/formatter"
@@ -20,12 +17,11 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/run"
 	"github.com/rxbynerd/chiron/internal/sink"
+	"github.com/rxbynerd/chiron/internal/testutil/golden"
 	"github.com/rxbynerd/chiron/internal/trace"
 	"github.com/rxbynerd/chiron/internal/transport"
 	"github.com/rxbynerd/chiron/internal/types"
 )
-
-var update = flag.Bool("update", false, "rewrite golden files in testdata/")
 
 // The golden normalisers replace the fields an in-process run over loopback
 // fakes cannot make deterministic — the random local interaction id, the
@@ -149,11 +145,11 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 			must.NotNil(captured.result)
 			must.NotNil(captured.result.Report, "no report written to the sink")
 
-			checkGolden(t, tt.reportGolden, normalise(captured.result.Report.Markdown))
+			golden.Assert(t, tt.reportGolden, normalise(captured.result.Report.Markdown))
 			if tt.promptGolden != "" {
 				reqs := modelSrv.Requests()
 				must.NotEmpty(reqs, "the model received no requests")
-				checkGolden(t, tt.promptGolden, []byte(reqs[0].Messages[0].Content))
+				golden.Assert(t, tt.promptGolden, []byte(reqs[0].Messages[0].Content))
 			}
 
 			// The golden already covers the body; this pins a phrase from the
@@ -161,22 +157,6 @@ func TestWorkerGoldenReportThroughRunCore(t *testing.T) {
 			must.Contains(string(captured.result.Report.Markdown), "single-pair Ethernet")
 		})
 	}
-}
-
-// checkGolden compares got with testdata/name, rewriting the file first when
-// -update is set. A mismatch does not stop the test, so a caller comparing
-// several goldens reports every mismatch.
-func checkGolden(t *testing.T, name string, got []byte) {
-	t.Helper()
-	must := require.New(t)
-	check := assert.New(t)
-	path := filepath.Join("testdata", name)
-	if *update {
-		must.NoError(os.WriteFile(path, got, 0o644))
-	}
-	want, err := os.ReadFile(path)
-	must.NoError(err, "read golden (run with -update to create it)")
-	check.Equal(string(want), string(got), "%s mismatch", name)
 }
 
 var _ sink.ReportSink = (*captureSink)(nil)
