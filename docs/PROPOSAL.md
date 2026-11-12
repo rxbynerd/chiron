@@ -239,7 +239,8 @@ chiron research-config --agent deep-research-max \
 ```
 
 `--output json` plus the side-effect-free core means Stirrup's eval system can drive and
-judge Chiron directly — Chiron itself ships no eval tooling.
+judge Chiron directly — Chiron itself ships no eval tooling. The document's keys, types
+and omission rules are described in `docs/OUTPUT-JSON.md` and pinned by golden files.
 
 ### 4.4 Markdown output
 
