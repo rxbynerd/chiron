@@ -34,6 +34,8 @@ jobs:
         run: go build ./...
       - name: Build stamped binary
         run: go build -ldflags "-X github.com/rxbynerd/chiron/internal/version.Version=ci" -o /dev/null ./cmd/chiron
+      - name: Check the binary links no test-only package
+        run: ./scripts/check-binary-deps.sh
       - name: Vet
         run: go vet ./...
       - name: Test

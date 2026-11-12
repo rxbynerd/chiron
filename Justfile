@@ -33,7 +33,11 @@ require-golangci-lint:
         echo "golangci-lint not found; install the version pinned in .github/workflows/ci.yml: https://golangci-lint.run/docs/welcome/install/local/" >&2
         exit 1
     fi
-    pinned=$(grep -oE 'version: v[0-9.]+' .github/workflows/ci.yml | head -n 1 | cut -d' ' -f2)
+    pinned=$(grep -oE 'version: v[0-9.]+' .github/workflows/ci.yml | head -n 1 | cut -d' ' -f2) || true
+    if [ -z "${pinned}" ]; then
+        echo "cannot find the golangci-lint pin in .github/workflows/ci.yml" >&2
+        exit 1
+    fi
     installed="v$(golangci-lint version --short)"
     echo "golangci-lint ${installed} (CI pins ${pinned})"
     if [ "${installed}" != "${pinned}" ]; then
@@ -56,8 +60,12 @@ fmt: require-golangci-lint
 tidy-check:
     go mod tidy -diff
 
+# Fail when the chiron binary links a test-only package.
+binary-deps-check:
+    ./scripts/check-binary-deps.sh
+
 # Everything CI runs, in its read-only form.
-ci: require-golangci-lint build vet test fmt-check lint tidy-check proto-lint
+ci: require-golangci-lint build binary-deps-check vet test fmt-check lint tidy-check proto-lint
 
 # Lint and compile-check the proto/chiron/v1 Buf module.
 proto-lint:
