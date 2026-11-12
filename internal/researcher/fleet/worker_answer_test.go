@@ -2,9 +2,11 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"regexp"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -12,7 +14,7 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-func TestSanitiseAnswer(t *testing.T) {
+func TestSanitiseAnswer_RewritesImagesAndRawHTML(t *testing.T) {
 	for _, tt := range []struct {
 		name, in, want string
 	}{
@@ -49,9 +51,8 @@ func TestSanitiseAnswer(t *testing.T) {
 		{"exclamation kept", "Wow! [link](https://a.example)", "Wow! [link](https://a.example)"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := sanitiseAnswer(tt.in); got != tt.want {
-				t.Errorf("sanitiseAnswer(%q) = %q, want %q", tt.in, got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, sanitiseAnswer(tt.in), "sanitiseAnswer(%q)", tt.in)
 		})
 	}
 }
@@ -73,23 +74,29 @@ var rawHTMLProbes = []string{
 // before a "<" is always the sanitiser's escape.
 var unescapedHTMLOpener = regexp.MustCompile(`(^|[^\\])<[A-Za-z/!?]`)
 
-// TestSanitiseAnswerLeavesNoRawHTMLOpener: whatever tag removal misses, no
+// TestSanitiseAnswer_LeavesNoRawHTMLOpener: whatever tag removal misses, no
 // "<" that could open raw HTML survives unescaped, alone or appended to
 // ordinary Markdown.
-func TestSanitiseAnswerLeavesNoRawHTMLOpener(t *testing.T) {
-	for _, probe := range rawHTMLProbes {
-		for _, in := range []string{probe, "# Report\n\nBody text.\n\n" + probe + "\n\nMore text."} {
-			if got := sanitiseAnswer(in); unescapedHTMLOpener.MatchString(got) {
-				t.Errorf("sanitiseAnswer(%q) = %q, which keeps an unescaped raw-HTML opener", in, got)
-			}
+func TestSanitiseAnswer_LeavesNoRawHTMLOpener(t *testing.T) {
+	for i, probe := range rawHTMLProbes {
+		for _, variant := range []struct{ name, in string }{
+			{"alone", probe},
+			{"in markdown", "# Report\n\nBody text.\n\n" + probe + "\n\nMore text."},
+		} {
+			t.Run(fmt.Sprintf("probe %d %s", i+1, variant.name), func(t *testing.T) {
+				must := require.New(t)
+				must.NotRegexp(unescapedHTMLOpener, sanitiseAnswer(variant.in), "sanitiseAnswer(%q)", variant.in)
+			})
 		}
 	}
 }
 
-// TestRunWorkerFinalAnswerIsSanitised: a final answer that embeds a remote
+// TestRunWorker_SanitisesFinalAnswer: a final answer that embeds a remote
 // image and raw HTML reaches the Finding as plain Markdown, so opening the
 // report cannot fire a beacon carrying the query.
-func TestRunWorkerFinalAnswerIsSanitised(t *testing.T) {
+func TestRunWorker_SanitisesFinalAnswer(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "A", URL: "https://a.example"}})
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer(
@@ -106,15 +113,22 @@ func TestRunWorkerFinalAnswerIsSanitised(t *testing.T) {
 	}
 	finding := RunWorker(context.Background(), deps, Brief{Objective: "q"})
 
-	if finding.Status != types.StatusCompleted {
-		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
-	}
-	if strings.Contains(finding.Text, "![") || strings.Contains(finding.Text, "<img") {
-		t.Errorf("answer still carries a remote image or raw HTML:\n%s", finding.Text)
-	}
-	for _, want := range []string{"# Report", "[tracker](https://evil.example/b?q=secret)", "<https://a.example>"} {
-		if !strings.Contains(finding.Text, want) {
-			t.Errorf("answer lost %q:\n%s", want, finding.Text)
-		}
+	must.Equal(types.StatusCompleted, finding.Status, "detail: %s", finding.Detail)
+
+	t.Run("drops remote images and raw HTML", func(t *testing.T) {
+		must := require.New(t)
+		must.NotContains(finding.Text, "![")
+		must.NotContains(finding.Text, "<img")
+	})
+
+	for _, tt := range []struct{ name, want string }{
+		{"keeps heading", "# Report"},
+		{"keeps image rewritten as link", "[tracker](https://evil.example/b?q=secret)"},
+		{"keeps autolink", "<https://a.example>"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Contains(finding.Text, tt.want)
+		})
 	}
 }

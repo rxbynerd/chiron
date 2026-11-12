@@ -3,13 +3,15 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // executeWithStdin runs the command tree with a scripted stdin — the
@@ -28,13 +30,12 @@ func executeWithStdin(t *testing.T, stdin io.Reader, args ...string) (stdout, st
 
 // pipedStdin returns a real pipe carrying content — what a shell
 // pipeline actually hands the process. Only *os.File pipes count as
-// piped config; bare readers deliberately do not (C1-CODE-4).
+// piped config; bare readers are deliberately not decoded as config.
 func pipedStdin(t *testing.T, content string) *os.File {
 	t.Helper()
+	must := require.New(t)
 	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
+	must.NoError(err)
 	t.Cleanup(func() { r.Close() })
 	go func() {
 		defer w.Close()
@@ -44,60 +45,47 @@ func pipedStdin(t *testing.T, content string) *os.File {
 }
 
 func TestResearchConfigEmitsResolvedJSON(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	stdout, _, err := execute(t, "research-config", "--agent", "deep-research-max", "--budget", "3.50")
-	if err != nil {
-		t.Fatalf("research-config: %v", err)
-	}
+	must.NoError(err)
 
 	var cfg map[string]any
-	if err := json.Unmarshal([]byte(stdout), &cfg); err != nil {
-		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
-	}
-	if cfg["agent"] != "deep-research-max" {
-		t.Errorf("agent = %v", cfg["agent"])
-	}
-	if cfg["budget_gbp"] != 3.50 {
-		t.Errorf("budget_gbp = %v", cfg["budget_gbp"])
-	}
+	must.NoError(json.Unmarshal([]byte(stdout), &cfg), "stdout is not one JSON document:\n%s", stdout)
+	check.Equal("deep-research-max", cfg["agent"])
+	check.InDelta(3.50, cfg["budget_gbp"], 0)
 	// Defaults must be resolved into the document, so a later pipeline
 	// stage sees the full effective config.
-	if cfg["timeout"] != "30m0s" {
-		t.Errorf("timeout = %v, want the resolved default", cfg["timeout"])
-	}
-	if cfg["api_key_ref"] != "secret://GEMINI_API_KEY" {
-		t.Errorf("api_key_ref = %v", cfg["api_key_ref"])
-	}
+	check.Equal("30m0s", cfg["timeout"])
+	check.Equal("secret://GEMINI_API_KEY", cfg["api_key_ref"])
 }
 
 func TestResearchConfigPipelineComposition(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	// PROPOSAL §4.3's pipeline, two stages in-process: the first
 	// stage's stdout is literally the second's stdin. The second stage
 	// only sets --visualise, so the first stage's tier must survive.
 	first, _, err := execute(t, "research-config", "--agent", "deep-research-max")
-	if err != nil {
-		t.Fatalf("first stage: %v", err)
-	}
+	must.NoError(err, "first stage")
 
 	second, _, err := executeWithStdin(t, pipedStdin(t, first), "research-config", "--visualise")
-	if err != nil {
-		t.Fatalf("second stage: %v", err)
-	}
+	must.NoError(err, "second stage")
 
 	var cfg map[string]any
-	if err := json.Unmarshal([]byte(second), &cfg); err != nil {
-		t.Fatalf("second stage stdout is not JSON: %v\n%s", err, second)
-	}
-	if cfg["agent"] != "deep-research-max" {
-		t.Errorf("agent = %v — the piped base was clobbered", cfg["agent"])
-	}
-	if cfg["visualise"] != true {
-		t.Errorf("visualise = %v — the second stage's flag was lost", cfg["visualise"])
-	}
+	must.NoError(json.Unmarshal([]byte(second), &cfg), "second stage stdout is not JSON:\n%s", second)
+	check.Equal("deep-research-max", cfg["agent"], "the piped base was clobbered")
+	check.Equal(true, cfg["visualise"], "the second stage's flag was lost")
 }
 
 func TestBudgetGateBlocksBeforeAnyCreate(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("the budget gate must block before any request, got %s %s", r.Method, r.URL.Path)
+		check.Fail("the budget gate must block before any request", "got %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
@@ -105,34 +93,32 @@ func TestBudgetGateBlocksBeforeAnyCreate(t *testing.T) {
 
 	// deep-research estimates £1.58; a £1 cap must block.
 	_, _, err := execute(t, "research", "--query", "q", "--budget", "1.00", "-o", "none")
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok {
-		t.Fatalf("error = %v, want an ExitError", err)
-	}
-	if exitErr.Code != ExitBlocked {
-		t.Errorf("exit code = %d, want %d for a budget block", exitErr.Code, ExitBlocked)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr)
+	check.Equal(ExitBlocked, exitErr.Code)
 	// The message must report estimate vs cap so the caller can act.
-	if !strings.Contains(err.Error(), "£1.58") || !strings.Contains(err.Error(), "£1.00") {
-		t.Errorf("error %q must carry estimate and cap", err)
-	}
+	must.ErrorContains(err, "£1.58")
+	must.ErrorContains(err, "£1.00")
 }
 
 func TestBudgetGateAllowsRunUnderCap(t *testing.T) {
+	must := require.New(t)
 	server := newInteractionsServer(t, "completed")
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
-	if _, _, err := execute(t, "research", "--query", "q", "--budget", "2.00", "-o", "none"); err != nil {
-		t.Errorf("a £2 cap must admit the £1.58 estimate: %v", err)
-	}
+	_, _, err := execute(t, "research", "--query", "q", "--budget", "2.00", "-o", "none")
+	must.NoError(err, "a £2 cap must admit the £1.58 estimate")
 }
 
 func TestGetResumesAndEmitsReport(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			t.Errorf("get must never create: got %s %s", r.Method, r.URL.Path)
+			check.Fail("get must never create", "got %s %s", r.Method, r.URL.Path)
 			return
 		}
 		if r.URL.Query().Get("stream") == "true" {
@@ -153,32 +139,27 @@ func TestGetResumesAndEmitsReport(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "get", "v1_resume")
-	if err != nil {
-		t.Fatalf("get: %v\nstderr: %s", err, stderr)
-	}
-	if !strings.Contains(stdout, "# Recovered report") {
-		t.Errorf("stdout missing the recovered report:\n%s", stdout)
-	}
+	must.NoError(err, "stderr: %s", stderr)
+	check.Contains(stdout, "# Recovered report")
 	// The tool set of a resumed interaction is unknowable (the API does
 	// not echo it); the front matter must not claim one.
-	if strings.Contains(stdout, "tools:") {
-		t.Errorf("front matter claims a tool set for a resumed interaction:\n%s", stdout)
-	}
+	check.NotContains(stdout, "tools:", "front matter must not claim a tool set for a resumed interaction")
 	// Likewise the query: the interaction's user_input step carries the
 	// TEMPLATED prompt, not the raw question, so the adapter records no
 	// query for resumed interactions and the front matter omits the
 	// field rather than rendering the prompt boilerplate.
-	if strings.Contains(stdout, "query:") {
-		t.Errorf("front matter claims a query for a resumed interaction:\n%s", stdout)
-	}
+	check.NotContains(stdout, "query:", "front matter must not claim a query for a resumed interaction")
 }
 
 func TestFollowUpChainsModelInteraction(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var createBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			if err := json.NewDecoder(r.Body).Decode(&createBody); err != nil {
-				t.Fatalf("decoding create body: %v", err)
+			if !check.NoError(json.NewDecoder(r.Body).Decode(&createBody), "decoding create body") {
+				return
 			}
 			w.Write([]byte(`{"id":"v1_followup","status":"in_progress"}`))
 			return
@@ -201,28 +182,20 @@ func TestFollowUpChainsModelInteraction(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "follow-up", "v1_research", "--query", "What is the answer?")
-	if err != nil {
-		t.Fatalf("follow-up: %v\nstderr: %s", err, stderr)
-	}
-	if !strings.Contains(stdout, "The answer is 42.") {
-		t.Errorf("stdout missing the follow-up answer:\n%s", stdout)
-	}
+	must.NoError(err, "stderr: %s", stderr)
+	check.Contains(stdout, "The answer is 42.")
 
-	if createBody["model"] != "gemini-3.1-pro-preview" {
-		t.Errorf("model = %v, want the documented default", createBody["model"])
-	}
-	if createBody["previous_interaction_id"] != "v1_research" {
-		t.Errorf("previous_interaction_id = %v", createBody["previous_interaction_id"])
-	}
-	if _, hasAgent := createBody["agent"]; hasAgent {
-		t.Error("a follow-up create must not carry agent")
-	}
+	check.Equal("gemini-3.1-pro-preview", createBody["model"], "model must be the documented default")
+	check.Equal("v1_research", createBody["previous_interaction_id"])
+	_, hasAgent := createBody["agent"]
+	check.False(hasAgent, "a follow-up create must not carry agent")
 }
 
 func TestFollowUpRequiresQuery(t *testing.T) {
-	if _, _, err := execute(t, "follow-up", "v1_research"); err == nil {
-		t.Error("follow-up without a query must fail before any seam is constructed")
-	}
+	must := require.New(t)
+
+	_, _, err := execute(t, "follow-up", "v1_research")
+	must.Error(err, "follow-up without a query must fail before any seam is constructed")
 }
 
 // newPlanFlowServer fakes the full --plan sequence: the first create is
@@ -231,11 +204,12 @@ func TestFollowUpRequiresQuery(t *testing.T) {
 // are captured in order.
 func newPlanFlowServer(t *testing.T, bodies *[]map[string]any) *httptest.Server {
 	t.Helper()
+	check := assert.New(t)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decoding create body: %v", err)
+			if !check.NoError(json.NewDecoder(r.Body).Decode(&body), "decoding create body") {
+				return
 			}
 			*bodies = append(*bodies, body)
 			if len(*bodies) == 1 {
@@ -272,6 +246,9 @@ func newPlanFlowServer(t *testing.T, bodies *[]map[string]any) *httptest.Server 
 }
 
 func TestResearchPlanAcceptPlanFlow(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var bodies []map[string]any
 	server := newPlanFlowServer(t, &bodies)
 	defer server.Close()
@@ -279,40 +256,27 @@ func TestResearchPlanAcceptPlanFlow(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	stdout, stderr, err := execute(t, "research", "--query", "smoke question", "--plan", "--accept-plan")
-	if err != nil {
-		t.Fatalf("research --plan: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "stderr: %s", stderr)
 
 	// The report on stdout, the plan on stderr — a piped report stays clean.
-	if !strings.Contains(stdout, "# Planned report") {
-		t.Errorf("stdout missing the report:\n%s", stdout)
-	}
-	if strings.Contains(stdout, "Survey the vendors") {
-		t.Errorf("the plan leaked onto stdout:\n%s", stdout)
-	}
-	if !strings.Contains(stderr, "Survey the vendors") {
-		t.Errorf("stderr missing the rendered plan:\n%s", stderr)
-	}
+	check.Contains(stdout, "# Planned report")
+	check.NotContains(stdout, "Survey the vendors", "the plan must not leak onto stdout")
+	check.Contains(stderr, "Survey the vendors", "the plan must be rendered on stderr")
 
-	if len(bodies) != 2 {
-		t.Fatalf("creates = %d, want plan + approval", len(bodies))
-	}
+	must.Len(bodies, 2, "want plan + approval creates")
 	planCfg, _ := bodies[0]["agent_config"].(map[string]any)
-	if planCfg == nil || planCfg["collaborative_planning"] != true {
-		t.Errorf("plan create agent_config = %v, want collaborative_planning true", planCfg)
-	}
+	check.Equal(true, planCfg["collaborative_planning"], "plan create agent_config")
 	approveCfg, _ := bodies[1]["agent_config"].(map[string]any)
-	if approveCfg == nil || approveCfg["collaborative_planning"] != false {
-		t.Errorf("approval agent_config = %v, want collaborative_planning false", approveCfg)
-	}
-	if bodies[1]["previous_interaction_id"] != "v1_plan" {
-		t.Errorf("approval previous_interaction_id = %v, want the accepted plan", bodies[1]["previous_interaction_id"])
-	}
+	check.Equal(false, approveCfg["collaborative_planning"], "approval agent_config")
+	check.Equal("v1_plan", bodies[1]["previous_interaction_id"], "approval must chain to the accepted plan")
 }
 
 func TestResearchPlanNonInteractiveNeedsAcceptPlan(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("no request must be sent when the plan cannot be reviewed, got %s %s", r.Method, r.URL.Path)
+		check.Fail("no request must be sent when the plan cannot be reviewed", "got %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
@@ -320,22 +284,22 @@ func TestResearchPlanNonInteractiveNeedsAcceptPlan(t *testing.T) {
 
 	// The test stdin is not a terminal, so --plan alone must abort.
 	_, _, err := execute(t, "research", "--query", "q", "--plan", "-o", "none")
-	if err == nil || !strings.Contains(err.Error(), "--accept-plan") {
-		t.Errorf("err = %v, want the --accept-plan guidance", err)
-	}
+	must.ErrorContains(err, "--accept-plan")
 }
 
 func TestResearchBudgetGatesThePlanPhaseToo(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("plan rounds spend; the budget gate must block them, got %s %s", r.Method, r.URL.Path)
+		check.Fail("plan rounds spend; the budget gate must block them", "got %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
 	_, _, err := execute(t, "research", "--query", "q", "--plan", "--accept-plan", "--budget", "1.00", "-o", "none")
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok || exitErr.Code != ExitBlocked {
-		t.Errorf("err = %v, want ExitBlocked before any plan round", err)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr)
+	must.Equal(ExitBlocked, exitErr.Code, "want ExitBlocked before any plan round")
 }

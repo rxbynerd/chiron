@@ -3,12 +3,14 @@ package gemini
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/interactions"
 )
@@ -18,11 +20,13 @@ import (
 // captured for shape assertions.
 func newPlanServer(t *testing.T, bodies *[]map[string]any) *httptest.Server {
 	t.Helper()
+	check := assert.New(t)
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			var body map[string]any
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				t.Fatalf("decoding create body: %v", err)
+				check.NoError(err, "decoding create body")
+				return
 			}
 			*bodies = append(*bodies, body)
 			w.Write([]byte(`{"id":"v1_plan_` + string(rune('0'+len(*bodies))) + `","status":"in_progress"}`))
@@ -41,101 +45,94 @@ func newPlanServer(t *testing.T, bodies *[]map[string]any) *httptest.Server {
 
 func newPlanner(t *testing.T, server *httptest.Server, mutate ...func(*Options)) *Planner {
 	t.Helper()
+	must := require.New(t)
 	opts := Options{APIKey: testKey, BaseURL: server.URL}
 	fastPoll(&opts)
 	for _, m := range mutate {
 		m(&opts)
 	}
 	p, err := NewPlanner(opts)
-	if err != nil {
-		t.Fatalf("NewPlanner: %v", err)
-	}
+	must.NoError(err, "NewPlanner")
 	return p
 }
 
-func TestPlannerProposeBuildsPlanningCreate(t *testing.T) {
+func TestPlanner_Propose_BuildsPlanningCreate(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var bodies []map[string]any
 	server := newPlanServer(t, &bodies)
 	defer server.Close()
 
 	plan, err := newPlanner(t, server).Propose(context.Background(), "Why is the sky blue?")
-	if err != nil {
-		t.Fatalf("Propose: %v", err)
-	}
-	if plan.InteractionID != "v1_plan_1" {
-		t.Errorf("plan id = %q", plan.InteractionID)
-	}
-	if !strings.Contains(plan.Text, "Search vendor sites") {
-		t.Errorf("plan text = %q, want the agent's plan", plan.Text)
-	}
+	must.NoError(err)
+	check.Equal("v1_plan_1", plan.InteractionID)
+	check.Contains(plan.Text, "Search vendor sites", "plan text must be the agent's plan")
 
-	if len(bodies) != 1 {
-		t.Fatalf("creates = %d, want 1", len(bodies))
-	}
+	must.Len(bodies, 1)
 	body := bodies[0]
-	if body["agent"] != "deep-research-preview-04-2026" {
-		t.Errorf("agent = %v, want the research agent — planning is a research create", body["agent"])
-	}
+	check.Equal("deep-research-preview-04-2026", body["agent"], "planning is a research create")
 	cfg, _ := body["agent_config"].(map[string]any)
-	if cfg == nil || cfg["collaborative_planning"] != true {
-		t.Errorf("agent_config = %v, want collaborative_planning true", cfg)
-	}
-	if body["background"] != true || body["store"] != true {
-		t.Errorf("background/store = %v/%v, want true/true (§7: all steps in background)", body["background"], body["store"])
-	}
-	if _, hasPrev := body["previous_interaction_id"]; hasPrev {
-		t.Error("a proposal chains to nothing")
-	}
+	check.NotNil(cfg, "agent_config")
+	check.Equal(true, cfg["collaborative_planning"])
+	check.Equal(true, body["background"], "planning steps must run in background")
+	check.Equal(true, body["store"], "planning steps must be stored")
+	_, hasPrev := body["previous_interaction_id"]
+	check.False(hasPrev, "a proposal chains to nothing")
 	// The proposal renders the research template, so the agent plans
 	// the report it will actually write.
 	input, _ := body["input"].(string)
-	if !strings.Contains(input, "Why is the sky blue?") || !strings.Contains(input, "## Conclusion") {
-		t.Errorf("input must be the templated research prompt: %q", input)
-	}
+	check.Contains(input, "Why is the sky blue?", "input must carry the query")
+	check.Contains(input, "## Conclusion", "input must be the templated research prompt")
 }
 
-func TestPlannerRefineChainsWithFeedbackVerbatim(t *testing.T) {
+func TestPlanner_Refine_ChainsWithFeedbackVerbatim(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var bodies []map[string]any
 	server := newPlanServer(t, &bodies)
 	defer server.Close()
 
 	plan, err := newPlanner(t, server).Refine(context.Background(), "v1_plan_prev", "skip consumer products")
-	if err != nil {
-		t.Fatalf("Refine: %v", err)
-	}
-	if plan.InteractionID == "v1_plan_prev" {
-		t.Error("a refinement is a new interaction, not the one it revises")
-	}
+	must.NoError(err)
+	check.NotEqual("v1_plan_prev", plan.InteractionID, "a refinement is a new interaction, not the one it revises")
 
 	body := bodies[0]
-	if body["previous_interaction_id"] != "v1_plan_prev" {
-		t.Errorf("previous_interaction_id = %v", body["previous_interaction_id"])
-	}
-	if body["input"] != "skip consumer products" {
-		t.Errorf("input = %v, want the feedback verbatim", body["input"])
-	}
+	check.Equal("v1_plan_prev", body["previous_interaction_id"])
+	check.Equal("skip consumer products", body["input"], "feedback must be sent verbatim")
 	cfg, _ := body["agent_config"].(map[string]any)
-	if cfg == nil || cfg["collaborative_planning"] != true {
-		t.Errorf("agent_config = %v, refinement is still planning", cfg)
-	}
+	check.NotNil(cfg, "agent_config")
+	check.Equal(true, cfg["collaborative_planning"], "a refinement is still planning")
 }
 
-func TestPlannerRefineValidatesInputs(t *testing.T) {
+func TestPlanner_Refine_ValidatesInputs(t *testing.T) {
 	server := newPlanServer(t, &[]map[string]any{})
 	defer server.Close()
 	p := newPlanner(t, server)
 
-	if _, err := p.Refine(context.Background(), "", "feedback"); err == nil {
-		t.Error("refine without a previous id must fail before spending")
+	tests := []struct {
+		name       string
+		previousID string
+		feedback   string
+	}{
+		{name: "without previous id", previousID: "", feedback: "feedback"},
+		{name: "without feedback", previousID: "v1_plan_1", feedback: ""},
 	}
-	if _, err := p.Refine(context.Background(), "v1_plan_1", ""); err == nil {
-		t.Error("refine without feedback must fail before spending")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			_, err := p.Refine(context.Background(), tt.previousID, tt.feedback)
+			must.Error(err, "must fail before spending")
+		})
 	}
 }
 
 func TestPlannerCreateIsNeverRetried(t *testing.T) {
-	// Same duplicate-spend rationale as the research create: an
-	// ambiguous 5xx on a plan round must surface, not retry.
+	must := require.New(t)
+
+	// A create is paid, so an ambiguous 5xx on a plan round must surface
+	// rather than retry.
 	var posts atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		posts.Add(1)
@@ -143,15 +140,14 @@ func TestPlannerCreateIsNeverRetried(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := newPlanner(t, server).Propose(context.Background(), "q"); err == nil {
-		t.Fatal("a 502 on the plan create must fail the round")
-	}
-	if got := posts.Load(); got != 1 {
-		t.Errorf("create attempts = %d, want exactly 1", got)
-	}
+	_, err := newPlanner(t, server).Propose(context.Background(), "q")
+	must.Error(err, "a 502 on the plan create must fail the round")
+	must.EqualValues(1, posts.Load())
 }
 
 func TestPlannerFailedPlanRoundSurfaces(t *testing.T) {
+	must := require.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_plan_bad","status":"in_progress"}`))
@@ -162,17 +158,16 @@ func TestPlannerFailedPlanRoundSurfaces(t *testing.T) {
 	defer server.Close()
 
 	_, err := newPlanner(t, server).Propose(context.Background(), "q")
-	if err == nil || !strings.Contains(err.Error(), "ended failed") {
-		t.Errorf("err = %v, want the failed plan round surfaced", err)
-	}
+	must.ErrorContains(err, "ended failed")
 }
 
-// TestPlannerRoundCompletesWithoutText pins C2-TEST-3 (1/2): the beta
-// API may complete a plan round with no text part — an empty plan
-// renders nothing, silently spending a round, so the guard must
-// surface it. The paid round's id still travels as the recovery
-// handle.
+// A plan round can complete without a text part. That must surface as an
+// error, because an empty plan spends a round for nothing. The paid round's
+// id still travels back as the recovery handle.
 func TestPlannerRoundCompletesWithoutText(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_plan_empty","status":"in_progress"}`))
@@ -183,20 +178,18 @@ func TestPlannerRoundCompletesWithoutText(t *testing.T) {
 	defer server.Close()
 
 	plan, err := newPlanner(t, server).Propose(context.Background(), "q")
-	if err == nil || !strings.Contains(err.Error(), "without plan text") {
-		t.Errorf("err = %v, want the empty-plan guard", err)
-	}
-	if plan == nil || plan.InteractionID != "v1_plan_empty" {
-		t.Errorf("plan = %+v, want the paid round's id as the recovery handle", plan)
-	}
+	must.ErrorContains(err, "without plan text")
+	must.NotNil(plan, "the paid round must be returned")
+	check.Equal("v1_plan_empty", plan.InteractionID, "the paid round's id is the recovery handle")
 }
 
-// TestPlannerRoundRequiresAction pins C2-TEST-3 (2/2): a
-// requires_action plan outcome must keep its typed identity through
-// the planner's wrap — errors.Is, not string matching — so concludeRun
-// maps it to the research-outcome exit code rather than an
-// infrastructure error.
+// A requires_action plan outcome must stay matchable with errors.Is through
+// the planner's wrap, so concludeRun maps it to the research-outcome exit
+// code rather than an infrastructure error.
 func TestPlannerRoundRequiresAction(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_plan_ra","status":"in_progress"}`))
@@ -207,10 +200,7 @@ func TestPlannerRoundRequiresAction(t *testing.T) {
 	defer server.Close()
 
 	plan, err := newPlanner(t, server).Propose(context.Background(), "q")
-	if !errors.Is(err, interactions.ErrRequiresAction) {
-		t.Errorf("err = %v, want ErrRequiresAction to survive the planner wrap", err)
-	}
-	if plan == nil || plan.InteractionID != "v1_plan_ra" {
-		t.Errorf("plan = %+v, want the paid round's id as the recovery handle", plan)
-	}
+	must.ErrorIs(err, interactions.ErrRequiresAction)
+	must.NotNil(plan, "the paid round must be returned")
+	check.Equal("v1_plan_ra", plan.InteractionID, "the paid round's id is the recovery handle")
 }

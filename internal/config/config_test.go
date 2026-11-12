@@ -3,50 +3,45 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
-func TestDecodeEmptyInputYieldsDefaults(t *testing.T) {
+func TestDecode_EmptyInput_YieldsDefaults(t *testing.T) {
+	must := require.New(t)
 	cfg, err := decode(strings.NewReader(""))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !reflect.DeepEqual(cfg, Default()) {
-		t.Errorf("got %+v, want defaults %+v", cfg, Default())
-	}
+	must.NoError(err)
+	must.Equal(Default(), cfg)
 }
 
-func TestDecodeOverlaysDefaults(t *testing.T) {
+func TestDecode_OverlaysDefaults(t *testing.T) {
 	// Absent keys must keep their defaults; present keys must override.
+	must := require.New(t)
+	check := assert.New(t)
 	cfg, err := decode(strings.NewReader("agent: deep-research-max\nstream: false\n"))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if cfg.Agent != AgentDeepResearchMax {
-		t.Errorf("agent: got %q", cfg.Agent)
-	}
-	if cfg.Stream {
-		t.Error("stream: explicit false was clobbered")
-	}
-	if cfg.Output != OutputText || cfg.APIKeyRef != DefaultAPIKeyRef {
-		t.Errorf("absent keys lost defaults: %+v", cfg)
-	}
+	must.NoError(err)
+	check.Equal(AgentDeepResearchMax, cfg.Agent)
+	check.False(cfg.Stream, "stream: explicit false was clobbered")
+	check.Equal(OutputText, cfg.Output)
+	check.Equal(DefaultAPIKeyRef, cfg.APIKeyRef)
 }
 
-func TestDecodeRejectsUnknownKeys(t *testing.T) {
-	if _, err := decode(strings.NewReader("agnet: deep-research\n")); err == nil {
-		t.Error("typo key was accepted silently")
-	}
+func TestDecode_RejectsUnknownKeys(t *testing.T) {
+	must := require.New(t)
+	_, err := decode(strings.NewReader("agnet: deep-research\n"))
+	must.Error(err, "typo key was accepted silently")
 }
 
 func TestJSONRoundTripThroughDecode(t *testing.T) {
 	// research-config emits JSON; the next pipeline stage decodes it.
+	must := require.New(t)
+	check := assert.New(t)
 	in := Default()
 	in.Query = "10BASE-T1L PHY vendors"
 	in.Agent = AgentDeepResearchMax
@@ -54,87 +49,64 @@ func TestJSONRoundTripThroughDecode(t *testing.T) {
 	in.Timeout = Duration(45 * time.Minute)
 
 	var buf bytes.Buffer
-	if err := in.EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
+	must.NoError(in.EncodeJSON(&buf))
 	out, err := decode(&buf)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.Query != in.Query || out.Agent != in.Agent || out.Timeout != in.Timeout || out.MCP["corp"] != "https://mcp.internal" {
-		t.Errorf("round trip lost data: %+v", out)
-	}
+	must.NoError(err)
+	check.Equal(in.Query, out.Query)
+	check.Equal(in.Agent, out.Agent)
+	check.Equal(in.Timeout, out.Timeout)
+	check.Equal("https://mcp.internal", out.MCP["corp"])
 }
 
 func TestApplyFlagsOverlaysOnlySetFlags(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	base := Default()
 	base.Agent = AgentDeepResearchMax
 	base.Query = "from the pipe"
 
 	fs := newFlagSet(t)
-	if err := fs.Parse([]string{"--visualise", "--quiet"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if err := ApplyFlags(&base, fs); err != nil {
-		t.Fatalf("ApplyFlags: %v", err)
-	}
+	must.NoError(fs.Parse([]string{"--visualise", "--quiet"}))
+	must.NoError(ApplyFlags(&base, fs))
 
-	if !base.Visualise {
-		t.Error("visualise flag not applied")
-	}
-	if base.Stream {
-		t.Error("--quiet must mean stream=false")
-	}
+	check.True(base.Visualise, "visualise flag not applied")
+	check.False(base.Stream, "--quiet must mean stream=false")
 	// Unset flags must not reset piped base values to flag defaults.
-	if base.Agent != AgentDeepResearchMax || base.Query != "from the pipe" {
-		t.Errorf("unset flags clobbered the base: %+v", base)
-	}
+	check.Equal(AgentDeepResearchMax, base.Agent, "unset flags clobbered the base")
+	check.Equal("from the pipe", base.Query, "unset flags clobbered the base")
 }
 
-func TestApplyFlagsPlanningAndModelLevers(t *testing.T) {
+func TestApplyFlags_PlanningAndModelLevers(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	cfg := Default()
 	fs := newFlagSet(t)
-	if err := fs.Parse([]string{"--plan", "--accept-plan", "--model", "gemini-3.1-pro-preview"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if err := ApplyFlags(&cfg, fs); err != nil {
-		t.Fatalf("ApplyFlags: %v", err)
-	}
-	if !cfg.Plan || !cfg.AcceptPlan {
-		t.Errorf("plan levers not applied: %+v", cfg)
-	}
-	if cfg.Model != "gemini-3.1-pro-preview" {
-		t.Errorf("model = %q", cfg.Model)
-	}
+	must.NoError(fs.Parse([]string{"--plan", "--accept-plan", "--model", "gemini-3.1-pro-preview"}))
+	must.NoError(ApplyFlags(&cfg, fs))
+	check.True(cfg.Plan, "--plan not applied")
+	check.True(cfg.AcceptPlan, "--accept-plan not applied")
+	check.Equal("gemini-3.1-pro-preview", cfg.Model)
 }
 
-func TestApplyFlagsParsesMCP(t *testing.T) {
+func TestApplyFlags_ParsesMCP(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	cfg := Default()
 	fs := newFlagSet(t)
-	if err := fs.Parse([]string{"--mcp", "corp=https://mcp.internal", "--mcp", "docs=https://docs.internal"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if err := ApplyFlags(&cfg, fs); err != nil {
-		t.Fatalf("ApplyFlags: %v", err)
-	}
-	if cfg.MCP["corp"] != "https://mcp.internal" || cfg.MCP["docs"] != "https://docs.internal" {
-		t.Errorf("mcp: %+v", cfg.MCP)
-	}
+	must.NoError(fs.Parse([]string{"--mcp", "corp=https://mcp.internal", "--mcp", "docs=https://docs.internal"}))
+	must.NoError(ApplyFlags(&cfg, fs))
+	check.Equal("https://mcp.internal", cfg.MCP["corp"])
+	check.Equal("https://docs.internal", cfg.MCP["docs"])
 
 	fs = newFlagSet(t)
-	if err := fs.Parse([]string{"--mcp", "missing-equals"}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if err := ApplyFlags(&cfg, fs); err == nil {
-		t.Error("malformed --mcp entry was accepted")
-	}
+	must.NoError(fs.Parse([]string{"--mcp", "missing-equals"}))
+	must.Error(ApplyFlags(&cfg, fs), "malformed --mcp entry was accepted")
 }
 
 func TestValidate(t *testing.T) {
+	must := require.New(t)
 	good := Default()
-	if err := good.Validate(); err != nil {
-		t.Errorf("defaults must validate: %v", err)
-	}
+	must.NoError(good.Validate(), "defaults must validate")
 
 	cases := map[string]func(*ResearchConfig){
 		"unknown agent":     func(c *ResearchConfig) { c.Agent = "deep-thought" },
@@ -143,18 +115,18 @@ func TestValidate(t *testing.T) {
 		"zero timeout":      func(c *ResearchConfig) { c.Timeout = 0 },
 		"negative budget":   func(c *ResearchConfig) { c.BudgetGBP = -1 },
 		"literal api key":   func(c *ResearchConfig) { c.APIKeyRef = "AIzaSyLiteralKey" },
-		// C2-CODE-3: MCP servers are remote endpoints; non-web schemes
-		// must fail locally, not as a confusing API error.
+		// MCP servers are remote endpoints; non-web schemes must fail locally.
 		"mcp file url":       func(c *ResearchConfig) { c.MCP = map[string]string{"local": "file:///srv/mcp"} },
 		"mcp javascript url": func(c *ResearchConfig) { c.MCP = map[string]string{"js": "javascript:alert(1)"} },
 		"mcp bare host":      func(c *ResearchConfig) { c.MCP = map[string]string{"bare": "mcp.internal"} },
 	}
 	for name, mutate := range cases {
-		cfg := Default()
-		mutate(&cfg)
-		if err := cfg.Validate(); err == nil {
-			t.Errorf("%s: validated", name)
-		}
+		t.Run(name, func(t *testing.T) {
+			must := require.New(t)
+			cfg := Default()
+			mutate(&cfg)
+			must.Error(cfg.Validate())
+		})
 	}
 }
 
@@ -165,117 +137,109 @@ func newFlagSet(t *testing.T) *pflag.FlagSet {
 	return fs
 }
 
-// TestJSONNativeRoundTrip pins C2-TEST-5: pipeline tooling may decode
-// research-config output with encoding/json rather than a YAML decoder,
-// which routes durations through UnmarshalJSON — a path decode (yaml.v3
-// underneath) never exercises. The string duration form EncodeJSON
-// emits must survive json.Unmarshal.
-func TestJSONNativeRoundTrip(t *testing.T) {
+// TestResearchConfig_EncodeJSON_StdlibRoundTrip: pipeline tooling may decode
+// research-config output with encoding/json rather than the YAML decoder.
+// Durations then go through UnmarshalJSON, which must accept the string
+// form EncodeJSON emits.
+func TestResearchConfig_EncodeJSON_StdlibRoundTrip(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	in := Default()
 	in.Query = "10BASE-T1L PHY vendors"
 	in.Timeout = Duration(45 * time.Minute)
 
 	var buf bytes.Buffer
-	if err := in.EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
+	must.NoError(in.EncodeJSON(&buf))
 	var got ResearchConfig
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
-	}
-	if got.Timeout != in.Timeout {
-		t.Errorf("timeout = %v, want %v — UnmarshalJSON must parse the string duration form", got.Timeout, in.Timeout)
-	}
-	if got.Query != in.Query {
-		t.Errorf("query = %q, want %q", got.Query, in.Query)
-	}
+	must.NoError(json.Unmarshal(buf.Bytes(), &got))
+	check.Equal(in.Timeout, got.Timeout, "UnmarshalJSON must parse the string duration form")
+	check.Equal(in.Query, got.Query)
 }
 
-// TestDurationUnmarshalJSONForms: both accepted wire forms, plus the
+// TestDuration_UnmarshalJSON_Forms: both accepted wire forms, plus the
 // rejection of anything else.
-func TestDurationUnmarshalJSONForms(t *testing.T) {
-	var d Duration
-	if err := json.Unmarshal([]byte(`"30m"`), &d); err != nil || time.Duration(d) != 30*time.Minute {
-		t.Errorf(`"30m" = %v, %v; want 30m`, d, err)
-	}
-	if err := json.Unmarshal([]byte(`60000000000`), &d); err != nil || time.Duration(d) != time.Minute {
-		t.Errorf("nanosecond form = %v, %v; want 1m", d, err)
-	}
-	if err := json.Unmarshal([]byte(`"not a duration"`), &d); err == nil {
-		t.Error("garbage duration was accepted")
-	}
-	if err := json.Unmarshal([]byte(`true`), &d); err == nil {
-		t.Error("a boolean duration was accepted")
-	}
+func TestDuration_UnmarshalJSON_Forms(t *testing.T) {
+	t.Run("string form", func(t *testing.T) {
+		must := require.New(t)
+		var d Duration
+		must.NoError(json.Unmarshal([]byte(`"30m"`), &d))
+		must.Equal(30*time.Minute, time.Duration(d))
+	})
+
+	t.Run("nanosecond form", func(t *testing.T) {
+		must := require.New(t)
+		var d Duration
+		must.NoError(json.Unmarshal([]byte(`60000000000`), &d))
+		must.Equal(time.Minute, time.Duration(d))
+	})
+
+	t.Run("rejects garbage string", func(t *testing.T) {
+		must := require.New(t)
+		var d Duration
+		must.Error(json.Unmarshal([]byte(`"not a duration"`), &d))
+	})
+
+	t.Run("rejects boolean", func(t *testing.T) {
+		must := require.New(t)
+		var d Duration
+		must.Error(json.Unmarshal([]byte(`true`), &d))
+	})
 }
 
-// TestDurationMarshalYAML pins C2-TEST-12: the YAML form is the
+// TestDuration_MarshalYAML_UsesStringForm: the YAML form is the
 // human-readable string, never a nanosecond integer.
-func TestDurationMarshalYAML(t *testing.T) {
+func TestDuration_MarshalYAML_UsesStringForm(t *testing.T) {
+	must := require.New(t)
 	out, err := yaml.Marshal(Duration(30 * time.Minute))
-	if err != nil {
-		t.Fatalf("yaml.Marshal: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "30m0s" {
-		t.Errorf("YAML form = %q, want %q", got, "30m0s")
-	}
+	must.NoError(err)
+	must.Equal("30m0s", strings.TrimSpace(string(out)))
 }
 
-// TestApplyFlagsOutputAndCostLevers pins C2-TEST-9: each flag is set
-// alone and only its field may change — a transposed pflag binding or
-// type coercion bug must fail here, not three layers up the CLI stack.
-func TestApplyFlagsOutputAndCostLevers(t *testing.T) {
+// TestApplyFlags_OutputAndCostLevers: each flag is set alone and only its
+// field may change. A transposed pflag binding or a type coercion bug must
+// fail here, not three layers up the CLI stack.
+func TestApplyFlags_OutputAndCostLevers(t *testing.T) {
 	cases := []struct {
 		name   string
 		args   []string
 		assert func(t *testing.T, cfg ResearchConfig)
 	}{
 		{"budget", []string{"--budget", "2.50"}, func(t *testing.T, cfg ResearchConfig) {
-			if cfg.BudgetGBP != 2.50 {
-				t.Errorf("BudgetGBP = %v, want 2.50", cfg.BudgetGBP)
-			}
+			must := require.New(t)
+			must.InDelta(2.50, cfg.BudgetGBP, 0)
 		}},
 		{"timeout", []string{"--timeout", "45m"}, func(t *testing.T, cfg ResearchConfig) {
-			if time.Duration(cfg.Timeout) != 45*time.Minute {
-				t.Errorf("Timeout = %v, want 45m", cfg.Timeout)
-			}
+			must := require.New(t)
+			must.Equal(45*time.Minute, time.Duration(cfg.Timeout))
 		}},
 		{"output", []string{"--output", "json"}, func(t *testing.T, cfg ResearchConfig) {
-			if cfg.Output != OutputJSON {
-				t.Errorf("Output = %q, want %q", cfg.Output, OutputJSON)
-			}
+			must := require.New(t)
+			must.Equal("json", cfg.Output)
 		}},
 		{"out", []string{"--out", "/tmp/x.md"}, func(t *testing.T, cfg ResearchConfig) {
-			if cfg.Out != "/tmp/x.md" {
-				t.Errorf("Out = %q, want /tmp/x.md", cfg.Out)
-			}
+			must := require.New(t)
+			must.Equal("/tmp/x.md", cfg.Out)
 		}},
 		{"template", []string{"--template", "/tmp/t.md"}, func(t *testing.T, cfg ResearchConfig) {
-			if cfg.Template != "/tmp/t.md" {
-				t.Errorf("Template = %q, want /tmp/t.md", cfg.Template)
-			}
+			must := require.New(t)
+			must.Equal("/tmp/t.md", cfg.Template)
 		}},
 		{"input", []string{"--input", "a.pdf", "--input", "b.png"}, func(t *testing.T, cfg ResearchConfig) {
-			if len(cfg.Inputs) != 2 || cfg.Inputs[0] != "a.pdf" || cfg.Inputs[1] != "b.png" {
-				t.Errorf("Inputs = %v, want [a.pdf b.png]", cfg.Inputs)
-			}
+			must := require.New(t)
+			must.Equal([]string{"a.pdf", "b.png"}, cfg.Inputs)
 		}},
 		{"file-search", []string{"--file-search", "store-1"}, func(t *testing.T, cfg ResearchConfig) {
-			if len(cfg.FileSearch) != 1 || cfg.FileSearch[0] != "store-1" {
-				t.Errorf("FileSearch = %v, want [store-1]", cfg.FileSearch)
-			}
+			must := require.New(t)
+			must.Equal([]string{"store-1"}, cfg.FileSearch)
 		}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := Default()
 			fs := newFlagSet(t)
-			if err := fs.Parse(tt.args); err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if err := ApplyFlags(&cfg, fs); err != nil {
-				t.Fatalf("ApplyFlags: %v", err)
-			}
+			must.NoError(fs.Parse(tt.args))
+			must.NoError(ApplyFlags(&cfg, fs))
 			tt.assert(t, cfg)
 
 			// Only the flag under test may diverge from the defaults:
@@ -288,9 +252,7 @@ func TestApplyFlagsOutputAndCostLevers(t *testing.T) {
 			rest.Template = ""
 			rest.Inputs = nil
 			rest.FileSearch = nil
-			if !reflect.DeepEqual(rest, Default()) {
-				t.Errorf("an unrelated field changed: %+v", cfg)
-			}
+			must.Equal(Default(), rest, "an unrelated field changed")
 		})
 	}
 }

@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
@@ -23,6 +26,7 @@ import (
 // results.
 func newWorker(t *testing.T, modelSrv *modeltest.FakeServer, results []search.Result) *Worker {
 	t.Helper()
+	must := require.New(t)
 	searchSrv := searchtest.NewFakeServer(results)
 	t.Cleanup(searchSrv.Close)
 	w, err := NewWorker(WorkerDeps{
@@ -31,17 +35,17 @@ func newWorker(t *testing.T, modelSrv *modeltest.FakeServer, results []search.Re
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 	return w
 }
 
-// TestWorkerStartAwaitResult drives the researcher seam: Start returns an
-// opaque id immediately, Await blocks until the run finishes, and Result maps
-// the Finding onto an Interaction with the worker's agent, tools, query, one
-// text output, and the cited source.
-func TestWorkerStartAwaitResult(t *testing.T) {
+// TestWorker_Result_MapsFindingToInteraction drives the researcher seam: Start
+// returns an opaque id immediately, Await blocks until the run finishes, and
+// Result maps the Finding onto an Interaction with the worker's agent, tools,
+// query, one text output, and the cited source.
+func TestWorker_Result_MapsFindingToInteraction(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`, FinishReason: "stop"},
 		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
@@ -51,74 +55,56 @@ func TestWorkerStartAwaitResult(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if !strings.HasPrefix(id, "wkr_") {
-		t.Errorf("id = %q, want a local wkr_ handle", id)
-	}
+	must.NoError(err, "Start")
+	check.True(strings.HasPrefix(id, "wkr_"), "id = %q, want a local wkr_ handle", id)
 
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(w.Await(ctx, id), "Await")
 	awaited := time.Now()
 	in, err := w.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusCompleted {
-		t.Errorf("status = %s (%s), want completed", in.Status, in.StatusDetail)
-	}
-	if in.CompletedAt.After(awaited) || in.CompletedAt.Before(in.CreatedAt) {
-		t.Errorf("CompletedAt = %v, want within [%v, %v]: it must be the loop's end, not Result's call time", in.CompletedAt, in.CreatedAt, awaited)
-	}
-	if in.Agent != "worker" {
-		t.Errorf("agent = %q, want worker", in.Agent)
-	}
-	if in.Query != "why is the sky blue" {
-		t.Errorf("query = %q", in.Query)
-	}
-	if want := []string{"web_search", "web_fetch"}; strings.Join(in.Tools, ",") != strings.Join(want, ",") {
-		t.Errorf("tools = %v, want %v", in.Tools, want)
-	}
-	if len(in.Outputs) != 1 || in.Outputs[0].Type != types.OutputText || !strings.Contains(in.Outputs[0].Text, "blue sky") {
-		t.Errorf("outputs = %+v, want one text output with the answer", in.Outputs)
-	}
-	if len(in.Citations) != 1 || in.Citations[0].URI != "https://example.org/sky" {
-		t.Errorf("citations = %+v, want the cited source", in.Citations)
-	}
-	if in.CreatedAt.IsZero() || in.CompletedAt.IsZero() {
-		t.Errorf("timestamps = %v / %v, want both set", in.CreatedAt, in.CompletedAt)
-	}
+	must.NoError(err, "Result")
+	check.Equal(types.StatusCompleted, in.Status, "StatusDetail = %q", in.StatusDetail)
+	check.False(in.CompletedAt.After(awaited), "CompletedAt = %v, want no later than %v: the loop's end, not Result's call time", in.CompletedAt, awaited)
+	check.False(in.CompletedAt.Before(in.CreatedAt), "CompletedAt = %v, want no earlier than CreatedAt = %v", in.CompletedAt, in.CreatedAt)
+	check.Equal("worker", in.Agent)
+	check.Equal("why is the sky blue", in.Query)
+	check.Equal([]string{"web_search", "web_fetch"}, in.Tools)
+	must.Len(in.Outputs, 1, "outputs = %+v, want one text output with the answer", in.Outputs)
+	check.Equal(types.OutputText, in.Outputs[0].Type)
+	check.Contains(in.Outputs[0].Text, "blue sky")
+	must.Len(in.Citations, 1, "citations = %+v, want the cited source", in.Citations)
+	check.Equal("https://example.org/sky", in.Citations[0].URI)
+	check.NotZero(in.CreatedAt, "CreatedAt must be set")
+	check.NotZero(in.CompletedAt, "CompletedAt must be set")
 }
 
-// TestWorkerUnknownIDRejected: Await and Result on an id this Worker never
+// TestWorker_UnknownID_IsRejected: Await and Result on an id this Worker never
 // issued are programming faults reported as errors, not panics or hangs.
-func TestWorkerUnknownIDRejected(t *testing.T) {
+func TestWorker_UnknownID_IsRejected(t *testing.T) {
+	must := require.New(t)
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	w := newWorker(t, modelSrv, nil)
 
 	ctx := context.Background()
-	if err := w.Await(ctx, "wkr_not_issued"); err == nil || !strings.Contains(err.Error(), "no worker run") {
-		t.Errorf("Await(unknown) = %v, want a no-worker-run error", err)
-	}
-	if in, err := w.Result(ctx, "wkr_not_issued"); err == nil || in != nil {
-		t.Errorf("Result(unknown) = %+v, %v, want nil and an error", in, err)
-	}
+	err := w.Await(ctx, "wkr_not_issued")
+	must.ErrorContains(err, "no worker run")
+
+	in, err := w.Result(ctx, "wkr_not_issued")
+	must.Error(err, "Result(unknown) must fail")
+	must.Nil(in, "Result(unknown) must return no interaction")
 }
 
-// TestWorkerResultBeforeCompletionIsInProgress: Result on a live run reports
+// TestWorker_Result_BeforeCompletionIsInProgress: Result on a live run reports
 // in_progress with the run's identity rather than blocking or failing.
-func TestWorkerResultBeforeCompletionIsInProgress(t *testing.T) {
+func TestWorker_Result_BeforeCompletionIsInProgress(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	release := make(chan struct{})
-	blockingModel := httptest.NewServer(blockingModel(release))
-	defer blockingModel.Close()
+	blockingSrv := httptest.NewServer(blockingModel(release))
+	defer blockingSrv.Close()
 
-	mc, err := model.New(model.Options{Endpoint: blockingModel.URL, Model: "m", APIKey: "k"})
-	if err != nil {
-		t.Fatalf("model.New: %v", err)
-	}
+	mc, err := model.New(model.Options{Endpoint: blockingSrv.URL, Model: "m", APIKey: "k"})
+	must.NoError(err, "model.New")
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
@@ -127,50 +113,41 @@ func TestWorkerResultBeforeCompletionIsInProgress(t *testing.T) {
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	in, err := w.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusInProgress || in.ID != id || in.Query != "q" || in.Agent != "worker" {
-		t.Errorf("in-progress Result = %+v, want status in_progress with the run's identity", in)
-	}
-	if !in.CompletedAt.IsZero() || len(in.Outputs) != 0 {
-		t.Errorf("in-progress Result carries completion state: %+v", in)
-	}
+	must.NoError(err, "Result")
+	check.Equal(types.StatusInProgress, in.Status)
+	check.Equal(id, in.ID)
+	check.Equal("q", in.Query)
+	check.Equal("worker", in.Agent)
+	check.Zero(in.CompletedAt, "an in-progress Result carries no completion time")
+	check.Empty(in.Outputs, "an in-progress Result carries no outputs")
 
 	close(release)
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
-	if in, _ := w.Result(ctx, id); in.Status == types.StatusInProgress {
-		t.Errorf("Result after Await still in_progress: %+v", in)
-	}
+	must.NoError(w.Await(ctx, id), "Await")
+	after, _ := w.Result(ctx, id)
+	check.NotEqual(types.StatusInProgress, after.Status, "Result after Await = %+v", after)
 }
 
 // TestWorkerStartReturnsImmediately: Start must not block on the run (§3). A
 // model fake that would block indefinitely on its turn must not stop Start
 // from returning the resume handle.
 func TestWorkerStartReturnsImmediately(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	release := make(chan struct{})
 	// A raw server that hangs until released, so any synchronous await inside
 	// Start would deadlock the test.
-	blockingModel := httptest.NewServer(blockingModel(release))
-	defer blockingModel.Close()
+	blockingSrv := httptest.NewServer(blockingModel(release))
+	defer blockingSrv.Close()
 	defer close(release)
 
-	mc, err := model.New(model.Options{Endpoint: blockingModel.URL, Model: "m", APIKey: "k"})
-	if err != nil {
-		t.Fatalf("model.New: %v", err)
-	}
+	mc, err := model.New(model.Options{Endpoint: blockingSrv.URL, Model: "m", APIKey: "k"})
+	must.NoError(err, "model.New")
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
@@ -179,41 +156,34 @@ func TestWorkerStartReturnsImmediately(t *testing.T) {
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 
 	done := make(chan string, 1)
 	go func() {
 		id, startErr := w.Start(context.Background(), researcher.Task{Query: "q"})
-		if startErr != nil {
-			t.Errorf("Start: %v", startErr)
-		}
+		check.NoError(startErr, "Start")
 		done <- id
 	}()
 
 	select {
 	case id := <-done:
-		if id == "" {
-			t.Error("Start returned an empty id")
-		}
+		must.NotEmpty(id, "Start returned an empty id")
 	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not return promptly — it must not block on the run")
+		must.Fail("Start did not return promptly — it must not block on the run")
 	}
 }
 
 // TestWorkerAwaitRespectsContext: Await returns when its context is cancelled,
 // even though the run is still going, rather than blocking forever.
 func TestWorkerAwaitRespectsContext(t *testing.T) {
+	must := require.New(t)
 	release := make(chan struct{})
-	blockingModel := httptest.NewServer(blockingModel(release))
-	defer blockingModel.Close()
+	blockingSrv := httptest.NewServer(blockingModel(release))
+	defer blockingSrv.Close()
 	defer close(release)
 
-	mc, err := model.New(model.Options{Endpoint: blockingModel.URL, Model: "m", APIKey: "k"})
-	if err != nil {
-		t.Fatalf("model.New: %v", err)
-	}
+	mc, err := model.New(model.Options{Endpoint: blockingSrv.URL, Model: "m", APIKey: "k"})
+	must.NoError(err, "model.New")
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	w, err := NewWorker(WorkerDeps{
@@ -222,38 +192,33 @@ func TestWorkerAwaitRespectsContext(t *testing.T) {
 		Fetch:  newFetchClient(t),
 		Caps:   Caps{MaxTurns: 8, Timeout: 30 * time.Second},
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 
 	id, err := w.Start(context.Background(), researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := w.Await(ctx, id); err == nil {
-		t.Fatal("Await must return the context error when cancelled before the run finishes")
-	}
+	err = w.Await(ctx, id)
+	must.Error(err, "Await must return the context error when cancelled before the run finishes")
 }
 
-// TestWorkerRejectsFollowUp: the in-process worker has no stored interaction
-// chain, so a follow-up task is rejected at Start before any work.
-func TestWorkerRejectsFollowUp(t *testing.T) {
+// TestWorker_Start_RejectsFollowUp: the in-process worker has no stored
+// interaction chain, so a follow-up task is rejected at Start before any work.
+func TestWorker_Start_RejectsFollowUp(t *testing.T) {
+	must := require.New(t)
 	modelSrv := modeltest.NewFakeServer(finalReply("x"))
 	defer modelSrv.Close()
 	w := newWorker(t, modelSrv, nil)
 
-	if _, err := w.Start(context.Background(), researcher.Task{Query: "q", PreviousInteractionID: "wkr_prev"}); err == nil {
-		t.Fatal("a follow-up must be rejected — the worker has no interaction chain")
-	}
+	_, err := w.Start(context.Background(), researcher.Task{Query: "q", PreviousInteractionID: "wkr_prev"})
+	must.Error(err, "a follow-up must be rejected: the worker has no interaction chain")
 }
 
-// TestNewWorkerValidatesDeps: NewWorker fails when a required collaborator is
-// missing, so a misconfigured worker never emits a resume handle for a run
-// that cannot proceed.
-func TestNewWorkerValidatesDeps(t *testing.T) {
+// TestNewWorker_Validate_RejectsInvalidDeps: NewWorker fails when a required
+// collaborator is missing, so a misconfigured worker never emits a resume
+// handle for a run that cannot proceed.
+func TestNewWorker_Validate_RejectsInvalidDeps(t *testing.T) {
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
@@ -274,11 +239,11 @@ func TestNewWorkerValidatesDeps(t *testing.T) {
 		{"zero turn cap", func(d *WorkerDeps) { d.Caps.MaxTurns = 0 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			d := good
 			tt.mutate(&d)
-			if _, err := NewWorker(d); err == nil {
-				t.Errorf("%s: NewWorker must fail", tt.name)
-			}
+			_, err := NewWorker(d)
+			must.Error(err)
 		})
 	}
 }
@@ -289,6 +254,8 @@ func TestNewWorkerValidatesDeps(t *testing.T) {
 // appears nowhere in the resulting Interaction — not the StatusDetail, not any
 // output, not the citations.
 func TestWorkerScrubsModelCredential(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// A high-entropy key-shaped literal that both the model client's exact
 	// redaction and secret.Scrub's backstop will catch.
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
@@ -303,48 +270,33 @@ func TestWorkerScrubsModelCredential(t *testing.T) {
 	defer searchSrv.Close()
 
 	mc, err := model.New(model.Options{Endpoint: modelSrv.URL(), Model: "m", APIKey: key})
-	if err != nil {
-		t.Fatalf("model.New: %v", err)
-	}
+	must.NoError(err, "model.New")
 	w, err := NewWorker(WorkerDeps{
 		Model:  mc,
 		Search: newSearchClient(t, searchSrv),
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err, "Start")
+	must.NoError(w.Await(ctx, id), "Await")
 	in, err := w.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusFailed {
-		t.Fatalf("status = %s, want failed", in.Status)
-	}
-	if strings.Contains(in.StatusDetail, key) {
-		t.Errorf("the model key leaked into StatusDetail:\n%s", in.StatusDetail)
-	}
+	must.NoError(err, "Result")
+	must.Equal(types.StatusFailed, in.Status)
+	check.NotContains(in.StatusDetail, key, "the model key leaked into StatusDetail")
 	for _, out := range in.Outputs {
-		if strings.Contains(out.Text, key) {
-			t.Errorf("the model key leaked into an output:\n%s", out.Text)
-		}
+		check.NotContains(out.Text, key, "the model key leaked into an output")
 	}
 }
 
-// TestWorkerScrubsSearchCredential is the search-path analogue: a search MCP
+// TestWorker_Scrub_SearchKeyNotLeaked is the search-path analogue: a search MCP
 // that rejects the tools/call with a body echoing the key must not leak it
 // into the failed Interaction's StatusDetail.
-func TestWorkerScrubsSearchCredential(t *testing.T) {
+func TestWorker_Scrub_SearchKeyNotLeaked(t *testing.T) {
+	must := require.New(t)
 	const key = "sk-search-Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2H1g0"
 	// A search MCP that answers initialize but rejects tools/call, echoing the
 	// key in the error — the provider-echo path on the search side.
@@ -352,9 +304,7 @@ func TestWorkerScrubsSearchCredential(t *testing.T) {
 	defer searchSrv.Close()
 
 	sc, err := search.New(search.Options{Endpoint: searchSrv.URL, APIKey: key})
-	if err != nil {
-		t.Fatalf("search.New: %v", err)
-	}
+	must.NoError(err, "search.New")
 	// The model searches on turn 1, which triggers the leaky tools/call.
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"search","query":"x"}`, FinishReason: "stop"},
@@ -367,35 +317,23 @@ func TestWorkerScrubsSearchCredential(t *testing.T) {
 		Fetch:  newFetchClient(t),
 		Caps:   caps(),
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err, "Start")
+	must.NoError(w.Await(ctx, id), "Await")
 	in, err := w.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusFailed {
-		t.Fatalf("status = %s (%s), want failed", in.Status, in.StatusDetail)
-	}
-	if strings.Contains(in.StatusDetail, key) {
-		t.Errorf("the search key leaked into StatusDetail:\n%s", in.StatusDetail)
-	}
+	must.NoError(err, "Result")
+	must.Equal(types.StatusFailed, in.Status, "StatusDetail = %q", in.StatusDetail)
+	must.NotContains(in.StatusDetail, key, "the search key leaked into StatusDetail")
 }
 
-// TestWorkerRecoversARunPanic: a panic in the run's goroutine never reaches
+// TestWorker_Run_RecoversPanic: a panic in the run's goroutine never reaches
 // the process. Before the loop has recorded its Finding the run is Failed
 // under the fixed detail, never the recovered value; during the save-back
 // the recorded Finding stands. Await returns nil either way.
-func TestWorkerRecoversARunPanic(t *testing.T) {
+func TestWorker_Run_RecoversPanic(t *testing.T) {
 	panickingRemember := rememberFunc(func(context.Context, memory.Namespace, memory.Memory) (memory.Reference, error) {
 		panic("store failure for key " + panicValueKey)
 	})
@@ -425,6 +363,7 @@ func TestWorkerRecoversARunPanic(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.replies...)
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
@@ -437,34 +376,19 @@ func TestWorkerRecoversARunPanic(t *testing.T) {
 				Tracer:   tt.tracer,
 				Caps:     caps(),
 			})
-			if err != nil {
-				t.Fatalf("NewWorker: %v", err)
-			}
+			must.NoError(err, "NewWorker")
 
 			ctx := context.Background()
 			id, err := w.Start(ctx, researcher.Task{Query: "q"})
-			if err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if err := w.Await(ctx, id); err != nil {
-				t.Fatalf("Await: %v", err)
-			}
+			must.NoError(err, "Start")
+			must.NoError(w.Await(ctx, id), "Await")
 			in, err := w.Result(ctx, id)
-			if err != nil {
-				t.Fatalf("Result: %v", err)
-			}
-			if in.Status != tt.wantStatus || in.StatusDetail != tt.wantDetail {
-				t.Errorf("Result = %s %q, want %s %q", in.Status, in.StatusDetail, tt.wantStatus, tt.wantDetail)
-			}
-			if got := len(in.Outputs) == 1; got != tt.wantOutput {
-				t.Errorf("outputs = %+v, want the answer: %v", in.Outputs, tt.wantOutput)
-			}
-			if in.CompletedAt.IsZero() {
-				t.Error("CompletedAt is zero, want the time the run recorded its Finding")
-			}
-			if n := modelSrv.CallCount(); n != tt.wantCalls {
-				t.Errorf("model calls = %d, want %d", n, tt.wantCalls)
-			}
+			must.NoError(err, "Result")
+			must.Equal(tt.wantStatus, in.Status)
+			must.Equal(tt.wantDetail, in.StatusDetail)
+			must.Equal(tt.wantOutput, len(in.Outputs) == 1, "outputs = %+v, want the answer as its only output", in.Outputs)
+			must.NotZero(in.CompletedAt, "CompletedAt should be the time the run recorded its Finding")
+			must.Equal(tt.wantCalls, modelSrv.CallCount(), "model calls")
 		})
 	}
 }

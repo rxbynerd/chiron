@@ -3,13 +3,15 @@ package interactions
 import (
 	"bufio"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // sseClient wires a Client to a server that answers every request with
@@ -27,10 +29,9 @@ func sseClient(t *testing.T, body string, gotQuery *url.Values, opts ...Option) 
 
 func mustNext(t *testing.T, s *Stream) *Event {
 	t.Helper()
+	must := require.New(t)
 	ev, err := s.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
+	must.NoError(err)
 	return ev
 }
 
@@ -73,74 +74,65 @@ func TestStreamEventSequence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			c := sseClient(t, tt.script, nil)
 			s, err := c.Stream(context.Background(), "v1_abc", "")
-			if err != nil {
-				t.Fatalf("Stream: %v", err)
-			}
+			must.NoError(err)
 			defer s.Close()
 
 			// interaction.created: payload is the resource itself.
 			ev := mustNext(t, s)
-			if ev.Type != EventInteractionCreated || ev.ID != "ev_1" {
-				t.Fatalf("event 1 = %+v", ev)
-			}
-			if ev.Interaction == nil || ev.Interaction.ID != "v1_abc" || ev.Interaction.Status != StatusInProgress {
-				t.Errorf("created interaction = %+v", ev.Interaction)
-			}
+			must.Equal(EventInteractionCreated, ev.Type, "event 1 = %+v", ev)
+			must.Equal("ev_1", ev.ID, "event 1 = %+v", ev)
+			must.NotNil(ev.Interaction)
+			must.Equal("v1_abc", ev.Interaction.ID)
+			must.Equal(StatusInProgress, ev.Interaction.Status)
 
 			// step.delta: text, with multi-line data joined by \n.
 			ev = mustNext(t, s)
-			if ev.Type != EventStepDelta || ev.ID != "ev_2" || ev.Index != 1 {
-				t.Fatalf("event 2 = %+v", ev)
-			}
-			if ev.Delta == nil || ev.Delta.Type != DeltaText || ev.Delta.Text != "Hello" {
-				t.Errorf("text delta = %+v", ev.Delta)
-			}
+			must.Equal(EventStepDelta, ev.Type, "event 2 = %+v", ev)
+			must.Equal("ev_2", ev.ID, "event 2 = %+v", ev)
+			must.Equal(1, ev.Index)
+			must.NotNil(ev.Delta)
+			must.Equal(DeltaText, ev.Delta.Type)
+			must.Equal("Hello", ev.Delta.Text)
 
 			// step.delta: thought summary.
 			ev = mustNext(t, s)
-			if ev.Delta == nil || ev.Delta.Type != DeltaThoughtSummary || ev.Delta.Text != "Reading sources" {
-				t.Errorf("thought delta = %+v", ev.Delta)
-			}
+			must.NotNil(ev.Delta)
+			must.Equal(DeltaThoughtSummary, ev.Delta.Type)
+			must.Equal("Reading sources", ev.Delta.Text)
 
 			// step.delta: image with base64 data.
 			ev = mustNext(t, s)
-			if ev.Delta == nil || ev.Delta.Type != DeltaImage || ev.Delta.MIMEType != "image/png" ||
-				string(ev.Delta.Data) != "png-bytes" {
-				t.Errorf("image delta = %+v", ev.Delta)
-			}
-			if ev.Index != 2 {
-				t.Errorf("image delta index = %d, want 2", ev.Index)
-			}
+			must.NotNil(ev.Delta)
+			must.Equal(DeltaImage, ev.Delta.Type)
+			must.Equal("image/png", ev.Delta.MIMEType)
+			must.Equal("png-bytes", string(ev.Delta.Data))
+			must.Equal(2, ev.Index)
 
 			// interaction.status_update.
 			ev = mustNext(t, s)
-			if ev.Type != EventInteractionStatusUpdate || ev.InteractionID != "v1_abc" || ev.Status != StatusCompleted {
-				t.Errorf("status update = %+v", ev)
-			}
+			must.Equal(EventInteractionStatusUpdate, ev.Type, "status update = %+v", ev)
+			must.Equal("v1_abc", ev.InteractionID)
+			must.Equal(StatusCompleted, ev.Status)
 
 			// interaction.completed: payload nested under "interaction".
 			ev = mustNext(t, s)
-			if ev.Type != EventInteractionCompleted || ev.ID != "ev_6" {
-				t.Fatalf("event 6 = %+v", ev)
-			}
-			if ev.Interaction == nil || ev.Interaction.Status != StatusCompleted {
-				t.Errorf("completed interaction = %+v", ev.Interaction)
-			}
-			if s.LastEventID() != "ev_6" {
-				t.Errorf("LastEventID = %q, want ev_6", s.LastEventID())
-			}
+			must.Equal(EventInteractionCompleted, ev.Type, "event 6 = %+v", ev)
+			must.Equal("ev_6", ev.ID, "event 6 = %+v", ev)
+			must.NotNil(ev.Interaction)
+			must.Equal(StatusCompleted, ev.Interaction.Status)
+			must.Equal("ev_6", s.LastEventID())
 
 			// Clean end of stream.
-			if _, err := s.Next(); !errors.Is(err, io.EOF) {
-				t.Errorf("after last event Next() = %v, want io.EOF", err)
-			}
+			_, err = s.Next()
+			must.ErrorIs(err, io.EOF)
 		})
 	}
 }
 
-func TestStreamResumeQuery(t *testing.T) {
+func TestStream_Attach_SendsResumeQuery(t *testing.T) {
 	tests := []struct {
 		name        string
 		lastEventID string
@@ -151,71 +143,61 @@ func TestStreamResumeQuery(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var got url.Values
 			c := sseClient(t, "", &got)
 			s, err := c.Stream(context.Background(), "v1_abc", tt.lastEventID)
-			if err != nil {
-				t.Fatalf("Stream: %v", err)
-			}
+			must.NoError(err)
 			defer s.Close()
-			if got.Get("stream") != "true" {
-				t.Errorf("stream query = %q, want true", got.Get("stream"))
-			}
+			must.Equal("true", got.Get("stream"))
 			if tt.wantResume {
-				if got.Get("last_event_id") != tt.lastEventID {
-					t.Errorf("last_event_id = %q, want %q", got.Get("last_event_id"), tt.lastEventID)
-				}
-				if s.LastEventID() != tt.lastEventID {
-					t.Errorf("LastEventID = %q before any event, want resume value", s.LastEventID())
-				}
-			} else if got.Has("last_event_id") {
-				t.Errorf("last_event_id sent on fresh attach: %v", got)
+				must.Equal(tt.lastEventID, got.Get("last_event_id"))
+				must.Equal(tt.lastEventID, s.LastEventID(), "LastEventID before any event")
+			} else {
+				must.False(got.Has("last_event_id"), "last_event_id sent on fresh attach: %v", got)
 			}
 		})
 	}
 }
 
-func TestStreamErrorEvent(t *testing.T) {
+func TestStream_Next_DecodesErrorEvent(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	c := sseClient(t, `event: error
 id: ev_9
 data: {"error":{"code":"https://errors.example/internal","message":"boom"}}
 
 `, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	ev := mustNext(t, s)
-	if ev.Type != EventError || ev.Err == nil {
-		t.Fatalf("event = %+v", ev)
-	}
-	if ev.Err.Code != "https://errors.example/internal" || ev.Err.Message != "boom" {
-		t.Errorf("Err = %+v", ev.Err)
-	}
+	must.Equal(EventError, ev.Type, "event = %+v", ev)
+	must.NotNil(ev.Err, "event = %+v", ev)
+	check.Equal("https://errors.example/internal", ev.Err.Code)
+	check.Equal("boom", ev.Err.Message)
 }
 
-func TestStreamEnvelopeFieldsInJSON(t *testing.T) {
+func TestStream_Next_ReadsEnvelopeFieldsFromData(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// No SSE event/id lines: event_type and event_id travel in the data
 	// payload instead, and must still be honoured for resume.
 	c := sseClient(t, `data: {"event_type":"interaction.status_update","event_id":"ev_7","interaction_id":"v1_abc","status":"failed"}
 
 `, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	ev := mustNext(t, s)
-	if ev.Type != EventInteractionStatusUpdate || ev.ID != "ev_7" || ev.Status != StatusFailed {
-		t.Errorf("event = %+v", ev)
-	}
-	if s.LastEventID() != "ev_7" {
-		t.Errorf("LastEventID = %q, want ev_7", s.LastEventID())
-	}
+	check.Equal(EventInteractionStatusUpdate, ev.Type)
+	check.Equal("ev_7", ev.ID)
+	check.Equal(StatusFailed, ev.Status)
+	check.Equal("ev_7", s.LastEventID())
 }
 
-func TestStreamIDPersistsAcrossFrames(t *testing.T) {
+func TestStream_ID_PersistsAcrossFrames(t *testing.T) {
+	must := require.New(t)
 	c := sseClient(t, `id: ev_1
 event: interaction.status_update
 data: {"interaction_id":"v1_abc","status":"in_progress"}
@@ -225,38 +207,32 @@ data: {"index":0,"delta":{"type":"text","text":"hi"}}
 
 `, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	mustNext(t, s)
 	ev := mustNext(t, s)
-	if ev.ID != "ev_1" {
-		t.Errorf("id-less frame event ID = %q, want persisted ev_1", ev.ID)
-	}
+	must.Equal("ev_1", ev.ID, "id-less frame should keep the persisted ID")
 }
 
-func TestStreamUnknownEventType(t *testing.T) {
+func TestStream_Next_KeepsRawPayloadForUnknownType(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	c := sseClient(t, `event: step.tool_call
 id: ev_2
 data: {"index":0,"tool":"google_search"}
 
 `, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	ev := mustNext(t, s)
-	if ev.Type != EventType("step.tool_call") || ev.ID != "ev_2" {
-		t.Errorf("event = %+v", ev)
-	}
-	if string(ev.Raw) != `{"index":0,"tool":"google_search"}` {
-		t.Errorf("Raw = %s", ev.Raw)
-	}
+	check.Equal(EventType("step.tool_call"), ev.Type)
+	check.Equal("ev_2", ev.ID)
+	check.Equal(`{"index":0,"tool":"google_search"}`, string(ev.Raw)) //nolint:testifylint // Raw is the verbatim payload, so equivalent JSON is not enough.
 }
 
-func TestStreamDiscardsTruncatedFinalEvent(t *testing.T) {
+func TestStream_Next_DiscardsTruncatedFinalEvent(t *testing.T) {
+	must := require.New(t)
 	// The final frame has no terminating blank line: per the SSE spec it
 	// is discarded, and the stream ends with io.EOF.
 	c := sseClient(t, `event: step.delta
@@ -267,33 +243,29 @@ event: step.delta
 id: ev_2
 data: {"index":0,"delta":{"type":"text","text":"trunc`, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	mustNext(t, s)
-	if _, err := s.Next(); !errors.Is(err, io.EOF) {
-		t.Errorf("Next() = %v, want io.EOF for truncated frame", err)
-	}
+	_, err = s.Next()
+	must.ErrorIs(err, io.EOF)
 }
 
-func TestStreamMalformedJSON(t *testing.T) {
+func TestStream_Next_ReportsMalformedJSON(t *testing.T) {
+	must := require.New(t)
 	c := sseClient(t, `event: step.delta
 id: ev_1
 data: {not json
 
 `, nil)
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
-	if _, err := s.Next(); err == nil || !strings.Contains(err.Error(), "decoding") {
-		t.Errorf("Next() = %v, want decode error", err)
-	}
+	_, err = s.Next()
+	must.ErrorContains(err, "decoding")
 }
 
-func TestStreamAttachHTTPError(t *testing.T) {
+func TestStream_Attach_ReturnsAPIErrorOnHTTPError(t *testing.T) {
+	must := require.New(t)
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -301,12 +273,12 @@ func TestStreamAttachHTTPError(t *testing.T) {
 	}))
 	_, err := c.Stream(context.Background(), "v1_gone", "")
 	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusNotFound {
-		t.Errorf("error = %v, want APIError 404", err)
-	}
+	must.ErrorAs(err, &apiErr)
+	must.Equal(http.StatusNotFound, apiErr.HTTPStatus)
 }
 
-func TestStreamAttachRetriesTransient(t *testing.T) {
+func TestStream_Attach_RetriesTransientFailure(t *testing.T) {
+	must := require.New(t)
 	var attempts atomic.Int32
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if attempts.Add(1) == 1 {
@@ -317,56 +289,43 @@ func TestStreamAttachRetriesTransient(t *testing.T) {
 		io.WriteString(w, "id: ev_1\ndata: {\"event_type\":\"interaction.created\",\"id\":\"v1_abc\"}\n\n")
 	}))
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
-	if got := attempts.Load(); got != 2 {
-		t.Errorf("attempts = %d, want 2", got)
-	}
+	must.EqualValues(2, attempts.Load())
 }
 
-func TestStreamWrongContentType(t *testing.T) {
+func TestStream_Attach_RejectsWrongContentType(t *testing.T) {
+	must := require.New(t)
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, sampleInteraction)
 	}))
 	_, err := c.Stream(context.Background(), "v1_abc", "")
-	if err == nil || !strings.Contains(err.Error(), "content type") {
-		t.Errorf("error = %v, want content-type complaint", err)
-	}
+	must.ErrorContains(err, "content type")
 }
 
 func TestStreamEventTooLarge(t *testing.T) {
+	must := require.New(t)
 	c := sseClient(t, "data: {\"pad\":\""+strings.Repeat("x", 1024)+"\"}\n\n", nil,
 		WithMaxEventBytes(128))
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
-	if _, err := s.Next(); !errors.Is(err, bufio.ErrTooLong) {
-		t.Errorf("Next() = %v, want bufio.ErrTooLong", err)
-	}
+	_, err = s.Next()
+	must.ErrorIs(err, bufio.ErrTooLong)
 }
 
 func TestStreamEventDataAccumulationBounded(t *testing.T) {
-	// C1-SSE-1: two data: lines of 80 bytes each are individually under
-	// the 128-byte bound — the scanner alone would pass them — but the
-	// accumulated payload (80 + 1 + 80 = 161 bytes) must trip the bound
-	// before the event is dispatched.
+	must := require.New(t)
+	check := assert.New(t)
+	// Each data line is under the 128-byte bound, but the accumulated payload
+	// (80 + 1 + 80 bytes) must trip it before the event is dispatched.
 	line := strings.Repeat("x", 80)
 	body := "event: step.delta\ndata: " + line + "\ndata: " + line + "\n\n"
 	c := sseClient(t, body, nil, WithMaxEventBytes(128))
 	s, err := c.Stream(context.Background(), "v1_abc", "")
-	if err != nil {
-		t.Fatalf("Stream: %v", err)
-	}
+	must.NoError(err)
 	defer s.Close()
 	ev, err := s.Next()
-	if ev != nil {
-		t.Errorf("an over-bound event must not be dispatched, got %+v", ev)
-	}
-	if err == nil || !strings.Contains(err.Error(), "exceeds 128-byte bound") {
-		t.Errorf("Next() = %v, want the accumulation bound error", err)
-	}
+	check.Nil(ev, "an over-bound event must not be dispatched")
+	check.ErrorContains(err, "exceeds 128-byte bound")
 }

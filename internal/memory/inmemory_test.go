@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // testClock is an injectable clock the tests advance by hand.
@@ -43,41 +46,36 @@ func newTestStore(opts InMemoryOptions) (*InMemory, *testClock) {
 
 func mustOpen(t *testing.T, s *InMemory, ref SessionRef) Session {
 	t.Helper()
+	must := require.New(t)
 	sess, err := s.OpenSession(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("OpenSession(%q): %v", ref.ID, err)
-	}
+	must.NoError(err, "OpenSession(%q)", ref.ID)
 	return sess
 }
 
 func mustPut(t *testing.T, s *InMemory, ns Namespace, body string, meta ArtifactMeta) Reference {
 	t.Helper()
+	must := require.New(t)
 	ref, err := s.Put(context.Background(), ns, strings.NewReader(body), meta)
-	if err != nil {
-		t.Fatalf("Put(%q): %v", ns, err)
-	}
+	must.NoError(err, "Put(%q)", ns)
 	return ref
 }
 
 func mustGet(t *testing.T, s *InMemory, ref Reference) (string, ArtifactMeta) {
 	t.Helper()
+	must := require.New(t)
 	rc, meta, err := s.Get(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("Get(%+v): %v", ref, err)
-	}
+	must.NoError(err, "Get(%+v)", ref)
 	defer rc.Close()
 	b, err := io.ReadAll(rc)
-	if err != nil {
-		t.Fatalf("reading artifact: %v", err)
-	}
+	must.NoError(err, "reading artifact")
 	return string(b), meta
 }
 
 func wantNotFound(t *testing.T, s *InMemory, ref Reference) {
 	t.Helper()
-	if _, _, err := s.Get(context.Background(), ref); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Get(%+v) err = %v, want ErrNotFound", ref, err)
-	}
+	must := require.New(t)
+	_, _, err := s.Get(context.Background(), ref)
+	must.ErrorIs(err, ErrNotFound, "Get(%+v)", ref)
 }
 
 func sha256Digest(body string) string {
@@ -118,7 +116,7 @@ func (endless) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestNewInMemoryDefaults(t *testing.T) {
+func TestInMemory_New_AppliesDefaults(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		opts InMemoryOptions
@@ -127,20 +125,20 @@ func TestNewInMemoryDefaults(t *testing.T) {
 		{"negative", InMemoryOptions{MaxArtifactBytes: -1, SessionTTL: -time.Second}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			s := NewInMemory(tt.opts)
-			if s.maxBytes != DefaultMaxArtifactBytes || s.ttl != DefaultSessionTTL || s.now == nil {
-				t.Errorf("defaults not applied: maxBytes=%d ttl=%s now=%v", s.maxBytes, s.ttl, s.now != nil)
-			}
+			must.EqualValues(DefaultMaxArtifactBytes, s.maxBytes, "max artifact bytes")
+			must.Equal(DefaultSessionTTL, s.ttl, "session ttl")
+			must.NotNil(s.now, "clock")
 		})
 	}
 }
 
-func TestInMemoryContentAddressing(t *testing.T) {
+func TestInMemory_Put_ContentAddressing(t *testing.T) {
+	must := require.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	sess := mustOpen(t, s, SessionRef{ID: "run-1"})
-	if sess.Namespace() != "session/run-1" {
-		t.Fatalf("Namespace = %q, want it derived from the id", sess.Namespace())
-	}
+	must.Equal(Namespace("session/run-1"), sess.Namespace())
 
 	for _, tt := range []struct {
 		name string
@@ -151,45 +149,40 @@ func TestInMemoryContentAddressing(t *testing.T) {
 		{"multibyte", "Zürich · 東京"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			meta := ArtifactMeta{Name: tt.name, MediaType: "text/markdown", Labels: map[string]string{"worker": "1"}}
 			ref := mustPut(t, s, sess.Namespace(), tt.body, meta)
-			if ref.Namespace != sess.Namespace() {
-				t.Errorf("ref.Namespace = %q, want %q", ref.Namespace, sess.Namespace())
-			}
-			if ref.Digest != sha256Digest(tt.body) {
-				t.Errorf("ref.Digest = %q, want %q", ref.Digest, sha256Digest(tt.body))
-			}
+			must.Equal(sess.Namespace(), ref.Namespace, "namespace")
+			must.Equal(sha256Digest(tt.body), ref.Digest, "digest")
 			got, gotMeta := mustGet(t, s, ref)
-			if got != tt.body {
-				t.Errorf("Get body = %q, want %q", got, tt.body)
-			}
-			if gotMeta.Name != meta.Name || gotMeta.MediaType != meta.MediaType || gotMeta.Labels["worker"] != "1" {
-				t.Errorf("Get meta = %+v, want %+v", gotMeta, meta)
-			}
+			must.Equal(tt.body, got, "body")
+			must.Equal(meta.Name, gotMeta.Name, "name")
+			must.Equal(meta.MediaType, gotMeta.MediaType, "media type")
+			must.Equal("1", gotMeta.Labels["worker"], "label worker")
 		})
 	}
 }
 
-// TestInMemoryPutIsIdempotent: identical content yields the same Reference
+// TestInMemory_Put_IsIdempotent: identical content yields the same Reference
 // and the first write's meta survives a second Put.
-func TestInMemoryPutIsIdempotent(t *testing.T) {
+func TestInMemory_Put_IsIdempotent(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
 
 	first := mustPut(t, s, ns, "same content", ArtifactMeta{Name: "first"})
 	second := mustPut(t, s, ns, "same content", ArtifactMeta{Name: "second"})
-	if first != second {
-		t.Fatalf("re-put returned %+v, want %+v", second, first)
-	}
-	if _, meta := mustGet(t, s, first); meta.Name != "first" {
-		t.Errorf("meta.Name = %q after re-put, want the first write's %q", meta.Name, "first")
-	}
-	if other := mustPut(t, s, ns, "other content", ArtifactMeta{}); other.Digest == first.Digest {
-		t.Error("different content produced the same digest")
-	}
+	must.Equal(first, second, "re-put returns the first reference")
+
+	_, meta := mustGet(t, s, first)
+	check.Equal("first", meta.Name, "meta name after re-put")
+
+	other := mustPut(t, s, ns, "other content", ArtifactMeta{})
+	check.NotEqual(first.Digest, other.Digest, "digest of different content")
 }
 
-func TestInMemoryGetMissing(t *testing.T) {
+func TestInMemory_Get_MissingReferenceNotFound(t *testing.T) {
 	s, _ := newTestStore(InMemoryOptions{})
 	a := mustOpen(t, s, SessionRef{ID: "a"}).Namespace()
 	b := mustOpen(t, s, SessionRef{ID: "b"}).Namespace()
@@ -211,9 +204,11 @@ func TestInMemoryGetMissing(t *testing.T) {
 	}
 }
 
-// TestInMemoryOversizedArtifact: the bound is inclusive, a larger body is a
-// typed error with nothing stored, and at most bound+1 bytes are read.
-func TestInMemoryOversizedArtifact(t *testing.T) {
+// TestInMemory_Put_RejectsOversizedArtifact: the bound is inclusive, a larger
+// body is a typed error with nothing stored, and at most bound+1 bytes are read.
+func TestInMemory_Put_RejectsOversizedArtifact(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const bound = 16
 	s, _ := newTestStore(InMemoryOptions{MaxArtifactBytes: bound})
 	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
@@ -222,21 +217,15 @@ func TestInMemoryOversizedArtifact(t *testing.T) {
 	mustPut(t, s, ns, atBound, ArtifactMeta{})
 
 	over := strings.Repeat("b", bound+1)
-	if _, err := s.Put(context.Background(), ns, strings.NewReader(over), ArtifactMeta{}); !errors.Is(err, ErrArtifactTooLarge) {
-		t.Fatalf("oversized Put err = %v, want ErrArtifactTooLarge", err)
-	}
+	_, err := s.Put(context.Background(), ns, strings.NewReader(over), ArtifactMeta{})
+	must.ErrorIs(err, ErrArtifactTooLarge, "Put of an oversized body")
 	wantNotFound(t, s, Reference{Namespace: ns, Digest: sha256Digest(over)})
-	if n := len(s.sessions[ns].artifacts); n != 1 {
-		t.Errorf("session holds %d artifacts after a rejected Put, want 1", n)
-	}
+	check.Len(s.sessions[ns].artifacts, 1, "artifacts after a rejected Put")
 
 	src := &countingReader{r: endless{}}
-	if _, err := s.Put(context.Background(), ns, src, ArtifactMeta{}); !errors.Is(err, ErrArtifactTooLarge) {
-		t.Fatalf("endless Put err = %v, want ErrArtifactTooLarge", err)
-	}
-	if src.n > bound+1 {
-		t.Errorf("Put read %d bytes from an endless body, want at most %d", src.n, bound+1)
-	}
+	_, err = s.Put(context.Background(), ns, src, ArtifactMeta{})
+	must.ErrorIs(err, ErrArtifactTooLarge, "Put of an endless body")
+	check.LessOrEqual(src.n, bound+1, "bytes read from an endless body")
 }
 
 // errReader's Read always fails, simulating a body that errors mid-read.
@@ -244,29 +233,27 @@ type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 
-// TestInMemoryPutBodyReadError: a body read failure is wrapped, not
-// swallowed, and nothing is stored.
-func TestInMemoryPutBodyReadError(t *testing.T) {
+// TestInMemory_Put_BodyReadErrorStoresNothing: a body read failure is wrapped,
+// not swallowed, and nothing is stored.
+func TestInMemory_Put_BodyReadErrorStoresNothing(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
 
 	wantErr := errors.New("body read boom")
-	if _, err := s.Put(context.Background(), ns, errReader{err: wantErr}, ArtifactMeta{}); !errors.Is(err, wantErr) {
-		t.Fatalf("Put err = %v, want it wrapping %v", err, wantErr)
-	}
-	if n := len(s.sessions[ns].artifacts); n != 0 {
-		t.Errorf("session holds %d artifacts after a failed read, want 0", n)
-	}
+	_, err := s.Put(context.Background(), ns, errReader{err: wantErr}, ArtifactMeta{})
+	must.ErrorIs(err, wantErr, "Put err")
+	check.Empty(s.sessions[ns].artifacts, "artifacts after a failed read")
 }
 
-// TestInMemoryPutRequiresLiveSession: a namespace that is not an open
+// TestInMemory_Put_RequiresLiveSession: a namespace that is not an open
 // session is rejected before the body is read.
-func TestInMemoryPutRequiresLiveSession(t *testing.T) {
+func TestInMemory_Put_RequiresLiveSession(t *testing.T) {
+	must := require.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	closed := mustOpen(t, s, SessionRef{ID: "closed"})
-	if err := closed.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	must.NoError(closed.Close(context.Background()), "Close")
 
 	for _, tt := range []struct {
 		name string
@@ -277,19 +264,16 @@ func TestInMemoryPutRequiresLiveSession(t *testing.T) {
 		{"empty", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			src := &countingReader{r: strings.NewReader("body")}
-			if _, err := s.Put(context.Background(), tt.ns, src, ArtifactMeta{}); !errors.Is(err, ErrSessionNotOpen) {
-				t.Fatalf("Put err = %v, want ErrSessionNotOpen", err)
-			}
-			if src.n != 0 {
-				t.Errorf("Put read %d bytes before rejecting the namespace", src.n)
-			}
+			_, err := s.Put(context.Background(), tt.ns, src, ArtifactMeta{})
+			must.ErrorIs(err, ErrSessionNotOpen)
+			must.Zero(src.n, "bytes read before rejecting the namespace")
 		})
 	}
 
-	if _, err := s.Put(context.Background(), "session/x", nil, ArtifactMeta{}); err == nil {
-		t.Error("Put accepted a nil body")
-	}
+	_, err := s.Put(context.Background(), "session/x", nil, ArtifactMeta{})
+	must.Error(err, "Put accepted a nil body")
 }
 
 // closingReader closes sess on its first Read, simulating a session
@@ -311,90 +295,78 @@ func (c *closingReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// TestInMemoryPutRaceWithSessionClose: a session closed while Put's body
+// TestInMemory_Put_SessionClosedMidRead: a session closed while Put's body
 // read is in flight is caught by Put's re-check under the lock, so the
 // write lands ErrSessionNotOpen instead of writing into (or panicking on)
 // the now-nil artifacts map.
-func TestInMemoryPutRaceWithSessionClose(t *testing.T) {
+func TestInMemory_Put_SessionClosedMidRead(t *testing.T) {
+	must := require.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	sess := mustOpen(t, s, SessionRef{ID: "run-1"})
 	ns := sess.Namespace()
 
 	src := &closingReader{r: strings.NewReader("body"), sess: sess}
-	if _, err := s.Put(context.Background(), ns, src, ArtifactMeta{}); !errors.Is(err, ErrSessionNotOpen) {
-		t.Fatalf("Put err = %v, want ErrSessionNotOpen", err)
-	}
+	_, err := s.Put(context.Background(), ns, src, ArtifactMeta{})
+	must.ErrorIs(err, ErrSessionNotOpen, "Put err")
 }
 
-// TestInMemoryNamespaceIsolation: the same content in two sessions is two
+// TestInMemory_Sessions_AreIsolated: the same content in two sessions is two
 // independent artifacts, and closing one session leaves the other intact.
-func TestInMemoryNamespaceIsolation(t *testing.T) {
+func TestInMemory_Sessions_AreIsolated(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	a := mustOpen(t, s, SessionRef{ID: "a"})
 	b := mustOpen(t, s, SessionRef{ID: "b"})
 
 	refA := mustPut(t, s, a.Namespace(), "shared finding", ArtifactMeta{Name: "from a"})
 	refB := mustPut(t, s, b.Namespace(), "shared finding", ArtifactMeta{Name: "from b"})
-	if refA.Digest != refB.Digest {
-		t.Fatalf("same content, different digests: %q vs %q", refA.Digest, refB.Digest)
-	}
-	if refA.Namespace == refB.Namespace {
-		t.Fatalf("two sessions share namespace %q", refA.Namespace)
-	}
-	if _, meta := mustGet(t, s, refB); meta.Name != "from b" {
-		t.Errorf("b's meta = %q, want its own write", meta.Name)
-	}
+	must.Equal(refA.Digest, refB.Digest, "digest of the same content")
+	must.NotEqual(refA.Namespace, refB.Namespace, "namespace of each session")
+	_, meta := mustGet(t, s, refB)
+	check.Equal("from b", meta.Name, "b's meta")
 
-	if err := a.Close(context.Background()); err != nil {
-		t.Fatalf("Close a: %v", err)
-	}
+	must.NoError(a.Close(context.Background()), "Close a")
 	wantNotFound(t, s, refA)
-	if got, meta := mustGet(t, s, refB); got != "shared finding" || meta.Name != "from b" {
-		t.Errorf("b after closing a = %q, %+v", got, meta)
-	}
+	got, meta := mustGet(t, s, refB)
+	check.Equal("shared finding", got, "b's body after closing a")
+	check.Equal("from b", meta.Name, "b's meta after closing a")
 	mustPut(t, s, b.Namespace(), "still writable", ArtifactMeta{})
 }
 
-func TestInMemorySessionClose(t *testing.T) {
+func TestInMemory_Session_CloseReleasesArtifacts(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	sess := mustOpen(t, s, SessionRef{ID: "run-1"})
 	ref := mustPut(t, s, sess.Namespace(), "finding", ArtifactMeta{})
 
-	if err := sess.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := sess.Close(context.Background()); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
+	must.NoError(sess.Close(context.Background()), "Close")
+	must.NoError(sess.Close(context.Background()), "second Close")
 	wantNotFound(t, s, ref)
-	if len(s.sessions) != 0 {
-		t.Errorf("store holds %d sessions after Close, want 0", len(s.sessions))
-	}
+	check.Empty(s.sessions, "sessions held after Close")
 
 	// The ID is free again; the reopened session starts empty, and the
 	// stale handle's Close does not reach it.
 	reopened := mustOpen(t, s, SessionRef{ID: "run-1"})
 	wantNotFound(t, s, ref)
 	fresh := mustPut(t, s, reopened.Namespace(), "second run", ArtifactMeta{})
-	if err := sess.Close(context.Background()); err != nil {
-		t.Fatalf("stale Close: %v", err)
-	}
-	if got, _ := mustGet(t, s, fresh); got != "second run" {
-		t.Errorf("reopened session after a stale Close = %q", got)
-	}
+	must.NoError(sess.Close(context.Background()), "stale Close")
+	got, _ := mustGet(t, s, fresh)
+	check.Equal("second run", got, "reopened session after a stale Close")
 
 	// A cancelled context still releases the session.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := reopened.Close(ctx); err != nil {
-		t.Fatalf("Close with a cancelled context: %v", err)
-	}
+	must.NoError(reopened.Close(ctx), "Close with a cancelled context")
 	wantNotFound(t, s, fresh)
 }
 
-// TestInMemoryTTLExpiry: expiry is absolute from open time, an expired
+// TestInMemory_Session_TTLExpiry: expiry is absolute from open time, an expired
 // session and its artifacts are swept, and its ID can be opened again.
-func TestInMemoryTTLExpiry(t *testing.T) {
+func TestInMemory_Session_TTLExpiry(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, clock := newTestStore(InMemoryOptions{SessionTTL: time.Hour})
 	short := mustOpen(t, s, SessionRef{ID: "short", TTL: 10 * time.Minute})
 	long := mustOpen(t, s, SessionRef{ID: "long"})
@@ -408,30 +380,24 @@ func TestInMemoryTTLExpiry(t *testing.T) {
 
 	clock.advance(time.Second)
 	wantNotFound(t, s, shortRef)
-	if _, err := s.Put(context.Background(), short.Namespace(), strings.NewReader("x"), ArtifactMeta{}); !errors.Is(err, ErrSessionNotOpen) {
-		t.Errorf("Put to an expired session err = %v, want ErrSessionNotOpen", err)
-	}
-	if _, live := s.sessions[short.Namespace()]; live {
-		t.Error("expired session was not swept")
-	}
+	_, err := s.Put(context.Background(), short.Namespace(), strings.NewReader("x"), ArtifactMeta{})
+	must.ErrorIs(err, ErrSessionNotOpen, "Put to an expired session")
+	_, live := s.sessions[short.Namespace()]
+	check.False(live, "expired session was swept")
 	mustGet(t, s, longRef)
 
 	clock.advance(50 * time.Minute)
 	wantNotFound(t, s, longRef)
-	if len(s.sessions) != 0 {
-		t.Errorf("store holds %d sessions after both expired, want 0", len(s.sessions))
-	}
+	check.Empty(s.sessions, "sessions held after both expired")
 
 	again := mustOpen(t, s, SessionRef{ID: "short"})
 	wantNotFound(t, s, shortRef)
-	if err := short.Close(context.Background()); err != nil {
-		t.Fatalf("Close of the expired handle: %v", err)
-	}
+	must.NoError(short.Close(context.Background()), "Close of the expired handle")
 	mustPut(t, s, again.Namespace(), "new run", ArtifactMeta{})
 }
 
-// TestInMemoryDefaultTTL: a zero SessionRef.TTL takes the store default.
-func TestInMemoryDefaultTTL(t *testing.T) {
+// TestInMemory_Session_DefaultTTL: a zero SessionRef.TTL takes the store default.
+func TestInMemory_Session_DefaultTTL(t *testing.T) {
 	s, clock := newTestStore(InMemoryOptions{})
 	ref := mustPut(t, s, mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace(), "finding", ArtifactMeta{})
 
@@ -441,7 +407,7 @@ func TestInMemoryDefaultTTL(t *testing.T) {
 	wantNotFound(t, s, ref)
 }
 
-func TestInMemoryOpenSessionRejects(t *testing.T) {
+func TestInMemory_OpenSession_Rejects(t *testing.T) {
 	s, _ := newTestStore(InMemoryOptions{})
 	mustOpen(t, s, SessionRef{ID: "live"})
 	mustOpen(t, s, SessionRef{ID: strings.Repeat("i", MaxSessionIDBytes)})
@@ -457,20 +423,21 @@ func TestInMemoryOpenSessionRejects(t *testing.T) {
 		{"duplicate live id", SessionRef{ID: "live"}, ErrSessionExists},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			sess, err := s.OpenSession(context.Background(), tt.ref)
-			if err == nil {
-				t.Fatalf("OpenSession(%+v) opened %q", tt.ref, sess.Namespace())
-			}
-			if tt.is != nil && !errors.Is(err, tt.is) {
-				t.Errorf("err = %v, want %v", err, tt.is)
+			must := require.New(t)
+			_, err := s.OpenSession(context.Background(), tt.ref)
+			must.Error(err, "OpenSession(%+v) should be rejected", tt.ref)
+			if tt.is != nil {
+				must.ErrorIs(err, tt.is)
 			}
 		})
 	}
 }
 
-// TestInMemoryCopiesState: neither the caller's input nor anything Get
+// TestInMemory_State_IsNotAliased: neither the caller's input nor anything Get
 // returns aliases stored state.
-func TestInMemoryCopiesState(t *testing.T) {
+func TestInMemory_State_IsNotAliased(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
 
@@ -479,60 +446,48 @@ func TestInMemoryCopiesState(t *testing.T) {
 	labels["worker"] = "mutated by caller"
 
 	rc, meta, err := s.Get(context.Background(), ref)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	must.NoError(err, "Get")
 	// io.Copy hands the reader's own slice to Write via WriterTo.
-	if _, err := io.Copy(scribbler{}, rc); err != nil {
-		t.Fatalf("copy: %v", err)
-	}
+	_, err = io.Copy(scribbler{}, rc)
+	must.NoError(err, "copy")
 	meta.Labels["worker"] = "mutated by reader"
 	meta.Labels["extra"] = "added"
 
 	got, again := mustGet(t, s, ref)
-	if got != "original" {
-		t.Errorf("stored body = %q after mutating a read", got)
-	}
-	if len(again.Labels) != 1 || again.Labels["worker"] != "1" {
-		t.Errorf("stored labels = %v, want the Put-time copy", again.Labels)
-	}
+	check.Equal("original", got, "stored body after mutating a read")
+	check.Equal(map[string]string{"worker": "1"}, again.Labels, "stored labels")
 }
 
-func TestInMemoryLongTermMemoryNotImplemented(t *testing.T) {
+func TestInMemory_LongTermMemory_NotImplemented(t *testing.T) {
+	must := require.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
-	if _, err := s.Remember(context.Background(), "session/x", Memory{Text: "fact"}); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("Remember err = %v, want ErrNotImplemented", err)
-	}
+	_, err := s.Remember(context.Background(), "session/x", Memory{Text: "fact"})
+	must.ErrorIs(err, ErrNotImplemented, "Remember")
 	hits, err := s.Recall(context.Background(), "session/x", Query{Text: "fact"})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("Recall err = %v, want ErrNotImplemented", err)
-	}
-	if hits != nil {
-		t.Errorf("Recall hits = %v, want none", hits)
-	}
+	must.ErrorIs(err, ErrNotImplemented, "Recall")
+	must.Nil(hits, "Recall hits")
 }
 
-func TestInMemoryHonoursCancelledContext(t *testing.T) {
+func TestInMemory_Operations_HonourCancelledContext(t *testing.T) {
+	must := require.New(t)
 	s, _ := newTestStore(InMemoryOptions{})
 	ns := mustOpen(t, s, SessionRef{ID: "run-1"}).Namespace()
 	ref := mustPut(t, s, ns, "finding", ArtifactMeta{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.OpenSession(ctx, SessionRef{ID: "run-2"}); !errors.Is(err, context.Canceled) {
-		t.Errorf("OpenSession err = %v, want context.Canceled", err)
-	}
-	if _, err := s.Put(ctx, ns, strings.NewReader("x"), ArtifactMeta{}); !errors.Is(err, context.Canceled) {
-		t.Errorf("Put err = %v, want context.Canceled", err)
-	}
-	if _, _, err := s.Get(ctx, ref); !errors.Is(err, context.Canceled) {
-		t.Errorf("Get err = %v, want context.Canceled", err)
-	}
+	_, err := s.OpenSession(ctx, SessionRef{ID: "run-2"})
+	must.ErrorIs(err, context.Canceled, "OpenSession")
+	_, err = s.Put(ctx, ns, strings.NewReader("x"), ArtifactMeta{})
+	must.ErrorIs(err, context.Canceled, "Put")
+	_, _, err = s.Get(ctx, ref)
+	must.ErrorIs(err, context.Canceled, "Get")
 }
 
-// TestInMemoryConcurrentUse drives parallel writers and readers across
+// TestInMemory_Concurrent_ParallelUse drives parallel writers and readers across
 // sessions while other sessions open and close, for the race detector.
-func TestInMemoryConcurrentUse(t *testing.T) {
+func TestInMemory_Concurrent_ParallelUse(t *testing.T) {
+	check := assert.New(t)
 	s := NewInMemory(InMemoryOptions{})
 	const (
 		sessions = 4
@@ -551,19 +506,17 @@ func TestInMemoryConcurrentUse(t *testing.T) {
 					}
 					ref, err := s.Put(context.Background(), ns, strings.NewReader(body), ArtifactMeta{Labels: map[string]string{"w": fmt.Sprint(w)}})
 					if err != nil {
-						t.Errorf("Put: %v", err)
+						check.NoError(err, "Put")
 						return
 					}
 					rc, _, err := s.Get(context.Background(), ref)
 					if err != nil {
-						t.Errorf("Get: %v", err)
+						check.NoError(err, "Get")
 						return
 					}
 					got, _ := io.ReadAll(rc)
 					rc.Close()
-					if string(got) != body {
-						t.Errorf("Get = %q, want %q", got, body)
-					}
+					check.Equal(body, string(got), "Get body")
 				}
 			})
 		}
@@ -572,23 +525,24 @@ func TestInMemoryConcurrentUse(t *testing.T) {
 		for i := range puts {
 			sess, err := s.OpenSession(context.Background(), SessionRef{ID: fmt.Sprintf("churn-%d", i)})
 			if err != nil {
-				t.Errorf("OpenSession: %v", err)
+				check.NoError(err, "OpenSession")
 				return
 			}
-			if _, err := s.Put(context.Background(), sess.Namespace(), strings.NewReader("churn"), ArtifactMeta{}); err != nil {
-				t.Errorf("churn Put: %v", err)
-			}
-			if err := sess.Close(context.Background()); err != nil {
-				t.Errorf("Close: %v", err)
-			}
+			_, err = s.Put(context.Background(), sess.Namespace(), strings.NewReader("churn"), ArtifactMeta{})
+			check.NoError(err, "churn Put")
+			check.NoError(sess.Close(context.Background()), "Close")
 		}
 	})
 	wg.Wait()
 
 	for i := range sessions {
-		rec := s.sessions[Namespace(fmt.Sprintf("session/run-%d", i))]
-		if want := writers*(puts-puts/5) + 1; len(rec.artifacts) != want {
-			t.Errorf("run-%d holds %d artifacts, want %d", i, len(rec.artifacts), want)
-		}
+		t.Run(fmt.Sprintf("run-%d", i), func(t *testing.T) {
+			must := require.New(t)
+			rec := s.sessions[Namespace(fmt.Sprintf("session/run-%d", i))]
+			// Each worker writes puts-puts/5 distinct findings, and every worker
+			// writes the same shared finding, which is stored once.
+			want := writers*(puts-puts/5) + 1
+			must.Len(rec.artifacts, want)
+		})
 	}
 }

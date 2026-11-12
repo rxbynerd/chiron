@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // fakeGoogleKey is shaped exactly like a Google API key (AIza + 35 key
@@ -29,9 +31,8 @@ const (
 )
 
 func TestScrubPatterns(t *testing.T) {
-	if len(fakeGoogleKey) != 39 {
-		t.Fatalf("fakeGoogleKey is %d chars, want 39", len(fakeGoogleKey))
-	}
+	must := require.New(t)
+	must.Len(fakeGoogleKey, 39, "fakeGoogleKey must match the Google API key length")
 
 	tests := []struct {
 		name   string
@@ -53,22 +54,19 @@ func TestScrubPatterns(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got := Scrub(tt.in)
-			if strings.Contains(got, tt.leaked) {
-				t.Fatalf("Scrub(%q) = %q; credential survived", tt.in, got)
-			}
-			if !strings.Contains(got, "[REDACTED") {
-				t.Fatalf("Scrub(%q) = %q; no redaction marker", tt.in, got)
-			}
+			must.NotContains(got, tt.leaked, "Scrub(%q): credential survived", tt.in)
+			must.Contains(got, "[REDACTED", "Scrub(%q): no redaction marker", tt.in)
 		})
 	}
 }
 
-// TestScrubLangfuseKeys covers Langfuse keys on their own, in the OTLP
-// Basic Authorization header Langfuse ingestion uses, in a URL, in JSON
-// and in prose. Neither half of any credential may survive, so a pattern
-// that stops part-way through a key fails here.
-func TestScrubLangfuseKeys(t *testing.T) {
+// Langfuse keys are scrubbed on their own, in the OTLP Basic Authorization
+// header Langfuse ingestion uses, in a URL, in JSON and in prose. Neither
+// half of any credential may survive, so a pattern that stops part-way
+// through a key fails here.
+func TestScrub_LangfuseKeys_NeitherHalfSurvives(t *testing.T) {
 	basic := func(public, secret string) string {
 		return base64.StdEncoding.EncodeToString([]byte(public + ":" + secret))
 	}
@@ -99,66 +97,63 @@ func TestScrubLangfuseKeys(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got := Scrub(tt.in)
 			for _, secret := range tt.leaked {
 				half := len(secret) / 2
 				for _, part := range []string{secret[:half], secret[half:]} {
-					if strings.Contains(got, part) {
-						t.Fatalf("Scrub(%q) = %q; credential fragment %q survived", tt.in, got, part)
-					}
+					must.NotContains(got, part, "Scrub(%q): credential fragment survived", tt.in)
 				}
 			}
-			if !strings.Contains(got, "[REDACTED") {
-				t.Fatalf("Scrub(%q) = %q; no redaction marker", tt.in, got)
-			}
+			must.Contains(got, "[REDACTED", "Scrub(%q): no redaction marker", tt.in)
 		})
 	}
 }
 
 func TestScrubLeavesProseAlone(t *testing.T) {
-	tests := []string{
-		"polling interaction for status, attempt 3 of 12",
-		"credentialPatternScrubbingHandlerWrapperImplementation", // long identifier, no digits
-		"the research agent searched 14 sources in 32 minutes",
-		"wrote report to /tmp/chiron/deep-research-output.md",
-		"basic authorization rules apply: the desk-lf team owns keys",
-		"langfuse keys start pk-lf- or sk-lf- followed by a uuid",
-		"the task-lf-database-name-here config key",
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"poll status", "polling interaction for status, attempt 3 of 12"},
+		{"long identifier", "credentialPatternScrubbingHandlerWrapperImplementation"}, // no digits
+		{"search summary", "the research agent searched 14 sources in 32 minutes"},
+		{"report path", "wrote report to /tmp/chiron/deep-research-output.md"},
+		{"basic authorization prose", "basic authorization rules apply: the desk-lf team owns keys"},
+		{"langfuse key prose", "langfuse keys start pk-lf- or sk-lf- followed by a uuid"},
+		{"lf config key", "the task-lf-database-name-here config key"},
 	}
-	for _, in := range tests {
-		if got := Scrub(in); got != in {
-			t.Errorf("Scrub(%q) = %q; want unchanged", in, got)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.in, Scrub(tt.in))
+		})
 	}
 }
 
-// TestScrubBasicAuthSplitAcrossKeyAndValue proves the Basic-credential
-// pattern fires on a value scrubbed on its own, with no "authorization"
-// anywhere in the same string — the shape a tracer's SetAttr produces
-// when it scrubs an attribute's key and value as two independent Scrub
-// calls (see TestJSONLScrubsSplitBasicAuthHeader for the same regression
-// through the real tracer).
-func TestScrubBasicAuthSplitAcrossKeyAndValue(t *testing.T) {
+// Attribute keys and values are scrubbed in separate calls, so a Basic
+// credential must be redacted when it is scrubbed without its key.
+func TestScrub_BasicAuth_RedactsValueWithoutAuthorizationKey(t *testing.T) {
 	pair := base64.StdEncoding.EncodeToString([]byte(fakeLangfuseZeroPublic + ":" + fakeLangfuseZeroSecret))
 
-	key := Scrub("http.request.header.authorization")
-	if key != "http.request.header.authorization" {
-		t.Errorf("Scrub(key) = %q; want unchanged, no credential in the key", key)
-	}
+	t.Run("key is left unchanged", func(t *testing.T) {
+		must := require.New(t)
+		must.Equal("http.request.header.authorization", Scrub("http.request.header.authorization"))
+	})
 
-	value := Scrub("Basic " + pair)
-	if strings.Contains(value, pair) {
-		t.Fatalf("Scrub(value) = %q; credential survived a value-only call", value)
-	}
-	if !strings.Contains(value, "[REDACTED") {
-		t.Fatalf("Scrub(value) = %q; no redaction marker", value)
-	}
+	t.Run("value is redacted on its own", func(t *testing.T) {
+		must := require.New(t)
+		value := Scrub("Basic " + pair)
+		must.NotContains(value, pair, "credential survived a value-only call")
+		must.Contains(value, "[REDACTED", "no redaction marker")
+	})
 }
 
 // TestKeyCannotTransitLogger is the structural guarantee: a credential
 // logged through any slog surface — message, attr, error, group,
 // WithAttrs, WithGroup, LogValuer — must never reach the inner handler.
 func TestKeyCannotTransitLogger(t *testing.T) {
+	must := require.New(t)
 	var buf bytes.Buffer
 	logger := slog.New(NewScrubHandler(slog.NewJSONHandler(&buf, nil)))
 
@@ -172,14 +167,9 @@ func TestKeyCannotTransitLogger(t *testing.T) {
 	logger.Info("logvaluer", "v", leakyValuer{})
 
 	out := buf.String()
-	for _, leaked := range []string{fakeGoogleKey, fakeToken} {
-		if strings.Contains(out, leaked) {
-			t.Fatalf("credential transited the logger:\n%s", out)
-		}
-	}
-	if !strings.Contains(out, "[REDACTED") {
-		t.Fatalf("no redaction markers in output:\n%s", out)
-	}
+	must.NotContains(out, fakeGoogleKey, "credential transited the logger:\n%s", out)
+	must.NotContains(out, fakeToken, "credential transited the logger:\n%s", out)
+	must.Contains(out, "[REDACTED", "no redaction markers in output:\n%s", out)
 }
 
 // leakyValuer resolves to a string carrying a credential, the way an
@@ -190,16 +180,13 @@ func (leakyValuer) LogValue() slog.Value {
 	return slog.StringValue("resolved to " + fakeGoogleKey)
 }
 
-func TestScrubHandlerEnabledDelegates(t *testing.T) {
+func TestScrubHandler_Enabled_DelegatesLevelFiltering(t *testing.T) {
+	must := require.New(t)
 	var buf bytes.Buffer
 	h := NewScrubHandler(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	logger := slog.New(h)
 	logger.Info("below level", "api_key", fakeGoogleKey)
-	if buf.Len() != 0 {
-		t.Fatalf("record below level reached inner handler: %s", buf.String())
-	}
+	must.Empty(buf.String(), "record below level reached inner handler")
 	logger.Warn("at level")
-	if buf.Len() == 0 {
-		t.Fatal("record at level did not reach inner handler")
-	}
+	must.NotEmpty(buf.String(), "record at level did not reach inner handler")
 }

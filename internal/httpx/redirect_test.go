@@ -4,23 +4,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
 func redirectRequest(t *testing.T, raw string) *http.Request {
 	t.Helper()
+	must := require.New(t)
 	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatalf("url.Parse(%q): %v", raw, err)
-	}
+	must.NoError(err, "url.Parse(%q)", raw)
 	return &http.Request{URL: u}
 }
 
-func TestRefuseUnsafeRedirects(t *testing.T) {
+func redirectChain(t *testing.T, raws []string) []*http.Request {
+	t.Helper()
+	var via []*http.Request
+	for _, raw := range raws {
+		via = append(via, redirectRequest(t, raw))
+	}
+	return via
+}
+
+func TestRedirectPolicy_RefuseUnsafe(t *testing.T) {
 	tests := []struct {
 		name    string
 		via     []string
@@ -43,25 +53,18 @@ func TestRefuseUnsafeRedirects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, redirectRequest(t, v))
-			}
-			err := httpx.RefuseUnsafeRedirects(redirectRequest(t, tt.target), via)
+			must := require.New(t)
+			err := httpx.RefuseUnsafeRedirects(redirectRequest(t, tt.target), redirectChain(t, tt.via))
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("RefuseUnsafeRedirects = %v, want the redirect followed", err)
-				}
+				must.NoError(err)
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("RefuseUnsafeRedirects = %v, want an error containing %q", err, tt.wantErr)
-			}
+			must.ErrorContains(err, tt.wantErr)
 		})
 	}
 }
 
-func TestRefuseAllRedirects(t *testing.T) {
+func TestRedirectPolicy_RefuseAll(t *testing.T) {
 	tests := []struct {
 		name   string
 		via    []string
@@ -73,23 +76,21 @@ func TestRefuseAllRedirects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var via []*http.Request
-			for _, v := range tt.via {
-				via = append(via, redirectRequest(t, v))
-			}
-			err := httpx.RefuseAllRedirects(redirectRequest(t, tt.target), via)
-			if err == nil || !strings.Contains(err.Error(), "redirect") {
-				t.Errorf("RefuseAllRedirects = %v, want a redirect refusal", err)
-			}
+			must := require.New(t)
+			err := httpx.RefuseAllRedirects(redirectRequest(t, tt.target), redirectChain(t, tt.via))
+			must.ErrorContains(err, "redirect")
 		})
 	}
 }
 
-// TestRedirectPoliciesOnAClient drives each policy through a real
+// TestRedirectPolicy_OnHTTPClient drives each policy through a real
 // http.Client: the unsafe-only policy follows a same-host redirect and
 // refuses a cross-host one without contacting the target, and the refuse-all
 // policy stops at the first redirect.
-func TestRedirectPoliciesOnAClient(t *testing.T) {
+func TestRedirectPolicy_OnHTTPClient(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var targetHits atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		targetHits.Add(1)
@@ -119,24 +120,12 @@ func TestRedirectPoliciesOnAClient(t *testing.T) {
 		return err
 	}
 
-	if err := get(httpx.RefuseUnsafeRedirects, "/same-host"); err != nil {
-		t.Fatalf("RefuseUnsafeRedirects on a same-host redirect: %v", err)
-	}
-	if got := nextHits.Load(); got != 1 {
-		t.Errorf("same-host target hits = %d, want 1", got)
-	}
+	must.NoError(get(httpx.RefuseUnsafeRedirects, "/same-host"), "RefuseUnsafeRedirects on a same-host redirect")
+	check.Equal(int32(1), nextHits.Load(), "same-host target hits")
 
-	if err := get(httpx.RefuseUnsafeRedirects, "/cross-host"); err == nil || !strings.Contains(err.Error(), "cross-origin") {
-		t.Errorf("RefuseUnsafeRedirects on a cross-host redirect = %v, want a cross-origin refusal", err)
-	}
-	if got := targetHits.Load(); got != 0 {
-		t.Errorf("cross-host target hits = %d, want 0", got)
-	}
+	must.ErrorContains(get(httpx.RefuseUnsafeRedirects, "/cross-host"), "cross-origin", "RefuseUnsafeRedirects on a cross-host redirect")
+	check.Equal(int32(0), targetHits.Load(), "cross-host target hits")
 
-	if err := get(httpx.RefuseAllRedirects, "/same-host"); err == nil || !strings.Contains(err.Error(), "redirect") {
-		t.Errorf("RefuseAllRedirects on a same-host redirect = %v, want a refusal", err)
-	}
-	if got := nextHits.Load(); got != 1 {
-		t.Errorf("same-host target hits after RefuseAllRedirects = %d, want still 1", got)
-	}
+	must.ErrorContains(get(httpx.RefuseAllRedirects, "/same-host"), "redirect", "RefuseAllRedirects on a same-host redirect")
+	check.Equal(int32(1), nextHits.Load(), "same-host target hits after RefuseAllRedirects")
 }

@@ -2,21 +2,20 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-func TestGRPCEmitReturnsErrNotImplemented(t *testing.T) {
+func TestGRPC_Emit_ReturnsErrNotImplemented(t *testing.T) {
+	must := require.New(t)
 	tr := NewGRPC("control-plane:443")
 	err := tr.Emit(context.Background(), Event{Kind: KindRunStarted})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Emit error = %v, want ErrNotImplemented", err)
-	}
+	must.ErrorIs(err, ErrNotImplemented)
 }
 
-func TestGRPCCloseIsSafe(t *testing.T) {
+func TestGRPC_Close_IsSafe(t *testing.T) {
+	must := require.New(t)
 	tr := NewGRPC("control-plane:443")
-	if err := tr.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	must.NoError(tr.Close())
 }

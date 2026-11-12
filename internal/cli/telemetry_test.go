@@ -18,6 +18,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/config"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -50,12 +53,13 @@ type otlpRequest struct {
 
 // handler records each request and answers with status and reply.
 func (c *otlpCollector) handler(t *testing.T, status int, reply string) http.HandlerFunc {
+	check := assert.New(t)
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body io.Reader = r.Body
 		if r.Header.Get("Content-Encoding") == "gzip" {
 			zr, err := gzip.NewReader(r.Body)
 			if err != nil {
-				t.Errorf("collector: gzip body: %v", err)
+				check.NoError(err, "collector: gzip body")
 				http.Error(w, "bad gzip body", http.StatusBadRequest)
 				return
 			}
@@ -63,9 +67,7 @@ func (c *otlpCollector) handler(t *testing.T, status int, reply string) http.Han
 			body = zr
 		}
 		raw, err := io.ReadAll(body)
-		if err != nil {
-			t.Errorf("collector: reading body: %v", err)
-		}
+		check.NoError(err, "collector: reading body")
 		c.mu.Lock()
 		c.requests = append(c.requests, otlpRequest{method: r.Method, path: r.URL.Path, header: r.Header.Clone(), body: raw})
 		c.mu.Unlock()
@@ -109,9 +111,10 @@ func assertWorkerSpend(t *testing.T, bodies []byte) {
 		{"run metric task_duration_seconds", protoKey("metric." + trace.MetricTaskDurationSeconds)},
 		{"run metric estimated_cost_gbp", protoKey("metric." + trace.MetricEstimatedCostGBP)},
 	} {
-		if !bytes.Contains(bodies, want.wire) {
-			t.Errorf("exported spans lack %s", want.name)
-		}
+		t.Run(want.name, func(t *testing.T) {
+			must := require.New(t)
+			must.True(bytes.Contains(bodies, want.wire))
+		})
 	}
 }
 
@@ -147,13 +150,13 @@ func isolateOTLPEnv(t *testing.T) {
 	}
 }
 
-// TestWorkerForwardsSpansToLangfuse drives a worker run through the command
+// TestWorker_ForwardsSpansToLangfuse drives a worker run through the command
 // path with the Langfuse flags: spans reach <endpoint>/v1/traces with Basic
 // authentication and ingestion version 4, carry the worker's spend
 // attributes and the run core's metrics, and no credential transits a span
 // body, stderr or stdout. The OTLP environment variable names a decoy
 // collector that must receive nothing, since the flags win over it.
-func TestWorkerForwardsSpansToLangfuse(t *testing.T) {
+func TestWorker_ForwardsSpansToLangfuse(t *testing.T) {
 	for _, tt := range []struct {
 		name        string
 		compression string
@@ -162,6 +165,7 @@ func TestWorkerForwardsSpansToLangfuse(t *testing.T) {
 		{"gzip", "gzip"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			langfuse := &otlpCollector{}
 			langfuseSrv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
 			defer langfuseSrv.Close()
@@ -192,60 +196,40 @@ func TestWorkerForwardsSpansToLangfuse(t *testing.T) {
 				"--fleet-price-output", "9.6",
 			}, langfuseArgs(langfuseSrv.URL+"/api/public/otel")...)...)
 			stdout, stderr, err := execute(t, args...)
-			if err != nil {
-				t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-			}
-			if !strings.Contains(stdout, "Rayleigh scattering") {
-				t.Errorf("stdout lacks the report:\n%s", stdout)
-			}
+			must.NoError(err, "research --agent worker, stderr: %s", stderr)
+			must.Contains(stdout, "Rayleigh scattering", "stdout lacks the report")
 
 			requests := langfuse.recorded()
-			if len(requests) == 0 {
-				t.Fatal("no spans reached the Langfuse collector")
-			}
-			if got := decoy.recorded(); len(got) != 0 {
-				t.Errorf("the OTLP environment collector received %d requests; the Langfuse flags must win", len(got))
-			}
+			must.NotEmpty(requests, "no spans reached the Langfuse collector")
+			must.Empty(decoy.recorded(), "the OTLP environment collector received requests; the Langfuse flags must win")
 			basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
 			var bodies []byte
 			for _, r := range requests {
-				if r.path != "/api/public/otel/v1/traces" {
-					t.Errorf("export path = %q, want /api/public/otel/v1/traces", r.path)
-				}
-				if got := r.header.Get("Authorization"); got != "Basic "+basic {
-					t.Errorf("Authorization = %q, want Basic base64(public:secret)", got)
-				}
-				if got := r.header.Get("X-Langfuse-Ingestion-Version"); got != "4" {
-					t.Errorf("x-langfuse-ingestion-version = %q, want 4", got)
-				}
-				if got := r.header.Get("Content-Encoding"); got != tt.compression {
-					t.Errorf("Content-Encoding = %q, want %q", got, tt.compression)
-				}
+				must.Equal("/api/public/otel/v1/traces", r.path)
+				must.Equal("Basic "+basic, r.header.Get("Authorization"), "export must use Basic base64(public:secret)")
+				must.Equal("4", r.header.Get("X-Langfuse-Ingestion-Version"))
+				must.Equal(tt.compression, r.header.Get("Content-Encoding"))
 				bodies = append(bodies, r.body...)
 			}
 			assertWorkerSpend(t, bodies)
 
 			for _, leaked := range []string{testLangfusePublic, testLangfuseSecret, basic, testModelKey} {
-				if bytes.Contains(bodies, []byte(leaked)) {
-					t.Errorf("a credential transited a span body")
-				}
-				if strings.Contains(stderr, leaked) || strings.Contains(stdout, leaked) {
-					t.Errorf("a credential reached stderr or stdout")
-				}
+				must.False(bytes.Contains(bodies, []byte(leaked)), "a credential transited a span body")
+				must.False(strings.Contains(stderr, leaked) || strings.Contains(stdout, leaked), "a credential reached stderr or stdout")
 			}
-			if strings.Contains(stderr, "telemetry error") {
-				t.Errorf("a clean export reported an SDK error:\n%s", stderr)
-			}
+			must.NotContains(stderr, "telemetry error", "a clean export reported an SDK error")
 		})
 	}
 }
 
-// TestWorkerForwardsSpansToOTLPEndpoint drives a worker run through the
+// TestWorker_ForwardsSpansToOTLPEndpoint drives a worker run through the
 // command path with --otlp-endpoint: spans reach <endpoint>/v1/traces with
 // no authentication headers and carry the worker's spend attributes and
 // the run core's metrics. The OTLP environment variable names a decoy
 // collector that must receive nothing, since the flag wins over it.
-func TestWorkerForwardsSpansToOTLPEndpoint(t *testing.T) {
+func TestWorker_ForwardsSpansToOTLPEndpoint(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	collector := &otlpCollector{}
 	collectorSrv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 	defer collectorSrv.Close()
@@ -274,42 +258,31 @@ func TestWorkerForwardsSpansToOTLPEndpoint(t *testing.T) {
 		"--otlp-endpoint", collectorSrv.URL,
 	)
 	stdout, stderr, err := execute(t, args...)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
-	if !strings.Contains(stdout, "Rayleigh scattering") {
-		t.Errorf("stdout lacks the report:\n%s", stdout)
-	}
+	must.NoError(err, "research --agent worker, stderr: %s", stderr)
+	check.Contains(stdout, "Rayleigh scattering", "stdout lacks the report")
 
 	requests := collector.recorded()
-	if len(requests) == 0 {
-		t.Fatal("no spans reached the --otlp-endpoint collector")
-	}
-	if got := decoy.recorded(); len(got) != 0 {
-		t.Errorf("the OTLP environment collector received %d requests; --otlp-endpoint must win", len(got))
-	}
+	must.NotEmpty(requests, "no spans reached the --otlp-endpoint collector")
+	check.Empty(decoy.recorded(), "the OTLP environment collector received requests; --otlp-endpoint must win")
 	var bodies []byte
 	for _, r := range requests {
-		if r.method != http.MethodPost || r.path != "/v1/traces" {
-			t.Errorf("export = %s %s, want POST /v1/traces", r.method, r.path)
-		}
+		check.Equal(http.MethodPost, r.method)
+		check.Equal("/v1/traces", r.path)
 		for _, h := range []string{"Authorization", "X-Langfuse-Ingestion-Version"} {
-			if v := r.header.Get(h); v != "" {
-				t.Errorf("%s = %q, want no such header on a generic collector", h, v)
-			}
+			check.Empty(r.header.Get(h), "%s must not be sent to a generic collector", h)
 		}
 		bodies = append(bodies, r.body...)
 	}
 	assertWorkerSpend(t, bodies)
-	if bytes.Contains(bodies, []byte(testModelKey)) || strings.Contains(stderr, testModelKey) {
-		t.Error("the model key transited a span body or stderr")
-	}
+	check.False(bytes.Contains(bodies, []byte(testModelKey)) || strings.Contains(stderr, testModelKey), "the model key transited a span body or stderr")
 }
 
-// TestTelemetryExportErrorIsScrubbed: a collector that rejects the export
+// TestTelemetry_ExportError_IsScrubbed: a collector that rejects the export
 // and echoes the credentials in its error body does not fail the run, and
 // the SDK's error report reaches stderr scrubbed.
-func TestTelemetryExportErrorIsScrubbed(t *testing.T) {
+func TestTelemetry_ExportError_IsScrubbed(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
 	echo := `{"message":"invalid credentials","authorization":"Basic ` + basic +
 		`","publicKey":"` + testLangfusePublic + `","secretKey":"` + testLangfuseSecret + `"}`
@@ -330,29 +303,20 @@ func TestTelemetryExportErrorIsScrubbed(t *testing.T) {
 
 	args := workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, langfuseArgs(langfuseSrv.URL+"/api/public/otel")...)...)
 	_, stderr, err := execute(t, args...)
-	if err != nil {
-		t.Fatalf("a rejected export must not fail the run: %v\nstderr: %s", err, stderr)
-	}
-	if len(langfuse.recorded()) == 0 {
-		t.Fatal("no export reached the collector")
-	}
-	if !strings.Contains(stderr, "telemetry error") || !strings.Contains(stderr, "401") {
-		t.Errorf("stderr lacks the export failure:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "[REDACTED") {
-		t.Errorf("stderr lacks redaction markers:\n%s", stderr)
-	}
+	must.NoError(err, "a rejected export must not fail the run; stderr: %s", stderr)
+	must.NotEmpty(langfuse.recorded(), "no export reached the collector")
+	check.Contains(stderr, "telemetry error", "stderr lacks the export failure")
+	check.Contains(stderr, "401", "stderr lacks the export failure")
+	check.Contains(stderr, "[REDACTED", "stderr lacks redaction markers")
 	for _, leaked := range []string{testLangfusePublic, testLangfuseSecret, basic} {
-		if strings.Contains(stderr, leaked) {
-			t.Errorf("a credential from the collector's reply reached stderr:\n%s", stderr)
-		}
+		check.NotContains(stderr, leaked, "a credential from the collector's reply reached stderr")
 	}
 }
 
-// TestLangfuseKeyResolutionFailsBeforeSpend: an unresolvable Langfuse key
+// TestLangfuse_KeyResolutionFailure_StopsBeforeSpend: an unresolvable Langfuse key
 // reference stops the run before any model, search or collector request,
 // and the error names the field without echoing the other key's value.
-func TestLangfuseKeyResolutionFailsBeforeSpend(t *testing.T) {
+func TestLangfuse_KeyResolutionFailure_StopsBeforeSpend(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		unset string
@@ -362,6 +326,7 @@ func TestLangfuseKeyResolutionFailsBeforeSpend(t *testing.T) {
 		{"secret key", "LANGFUSE_SECRET_KEY", "telemetry.langfuse_secret_key_ref"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			langfuse := &otlpCollector{}
 			langfuseSrv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
 			defer langfuseSrv.Close()
@@ -377,17 +342,13 @@ func TestLangfuseKeyResolutionFailsBeforeSpend(t *testing.T) {
 
 			args := workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, langfuseArgs(langfuseSrv.URL+"/api/public/otel")...)...)
 			_, stderr, err := execute(t, args...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want it to name %s", err, tt.want)
-			}
+			must.ErrorContains(err, tt.want)
 			for _, leaked := range []string{testLangfusePublic, testLangfuseSecret, testModelKey} {
-				if strings.Contains(err.Error(), leaked) || strings.Contains(stderr, leaked) {
-					t.Errorf("a resolved key leaked: %v", err)
-				}
+				must.False(strings.Contains(err.Error(), leaked) || strings.Contains(stderr, leaked), "a resolved key leaked: %v", err)
 			}
-			if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(langfuse.recorded()) != 0 {
-				t.Error("a run with an unresolvable telemetry key must not dial any endpoint")
-			}
+			must.Zero(modelSrv.CallCount(), "a run with an unresolvable telemetry key must not dial any endpoint")
+			must.Zero(searchSrv.CallCount(), "a run with an unresolvable telemetry key must not dial any endpoint")
+			must.Empty(langfuse.recorded(), "a run with an unresolvable telemetry key must not dial any endpoint")
 		})
 	}
 }
@@ -395,35 +356,29 @@ func TestLangfuseKeyResolutionFailsBeforeSpend(t *testing.T) {
 // exportOneSpan binds newTracer for tc, records one span and flushes it.
 func exportOneSpan(t *testing.T, tc config.TelemetryConfig) {
 	t.Helper()
+	must := require.New(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	tr, shutdown, err := newTracer(ctx, tc, io.Discard)
-	if err != nil {
-		t.Fatalf("newTracer: %v", err)
-	}
-	if shutdown == nil {
-		t.Fatalf("newTracer bound %T, want the OTel binding", tr)
-	}
+	must.NoError(err, "newTracer")
+	must.NotNil(shutdown, "newTracer bound %T, want the OTel binding", tr)
 	_, span := tr.StartSpan(ctx, trace.SpanResearch)
 	span.End(nil)
-	if err := shutdown(ctx); err != nil {
-		t.Fatalf("shutdown: %v", err)
-	}
+	must.NoError(shutdown(ctx), "shutdown")
 }
 
-// TestNewTracerPrecedence: the Langfuse keys win over an explicit OTLP
+// TestNewTracer_EndpointPrecedence: the Langfuse keys win over an explicit OTLP
 // endpoint, which wins over the OTLP environment variables; the variables
 // alone still bind OTel, and with none the no-op tracer applies.
-func TestNewTracerPrecedence(t *testing.T) {
+func TestNewTracer_EndpointPrecedence(t *testing.T) {
 	t.Run("no destination binds noop", func(t *testing.T) {
+		must := require.New(t)
 		isolateOTLPEnv(t)
 		tr, shutdown, err := newTracer(context.Background(), config.TelemetryConfig{}, io.Discard)
-		if err != nil {
-			t.Fatalf("newTracer: %v", err)
-		}
-		if _, ok := tr.(trace.Noop); !ok || shutdown != nil {
-			t.Errorf("newTracer bound %T (shutdown set: %v), want trace.Noop with no shutdown", tr, shutdown != nil)
-		}
+		must.NoError(err, "newTracer")
+		_, isNoop := tr.(trace.Noop)
+		must.True(isNoop, "newTracer bound %T, want trace.Noop", tr)
+		must.Nil(shutdown, "the no-op tracer must not return a shutdown")
 	})
 
 	for _, tt := range []struct {
@@ -436,6 +391,7 @@ func TestNewTracerPrecedence(t *testing.T) {
 		{"flag wins over the traces variable", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "/v1/traces", "/v1/traces"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			flagCollector := &otlpCollector{}
 			flagSrv := httptest.NewServer(flagCollector.handler(t, http.StatusOK, ""))
 			defer flagSrv.Close()
@@ -448,19 +404,14 @@ func TestNewTracerPrecedence(t *testing.T) {
 			exportOneSpan(t, config.TelemetryConfig{OTLPEndpoint: flagSrv.URL})
 
 			got := flagCollector.recorded()
-			if len(got) == 0 {
-				t.Fatal("no span reached the flag's collector")
-			}
-			if got[0].path != tt.wantPath {
-				t.Errorf("export path = %q, want %q", got[0].path, tt.wantPath)
-			}
-			if n := len(envCollector.recorded()); n != 0 {
-				t.Errorf("the environment's collector received %d requests", n)
-			}
+			must.NotEmpty(got, "no span reached the flag's collector")
+			must.Equal(tt.wantPath, got[0].path)
+			must.Empty(envCollector.recorded(), "the environment's collector received requests")
 		})
 	}
 
 	t.Run("environment alone binds OTel", func(t *testing.T) {
+		must := require.New(t)
 		envCollector := &otlpCollector{}
 		envSrv := httptest.NewServer(envCollector.handler(t, http.StatusOK, ""))
 		defer envSrv.Close()
@@ -469,12 +420,11 @@ func TestNewTracerPrecedence(t *testing.T) {
 
 		exportOneSpan(t, config.TelemetryConfig{})
 
-		if len(envCollector.recorded()) == 0 {
-			t.Fatal("no span reached the environment's collector")
-		}
+		must.NotEmpty(envCollector.recorded(), "no span reached the environment's collector")
 	})
 
 	t.Run("langfuse wins over an explicit endpoint", func(t *testing.T) {
+		must := require.New(t)
 		langfuse := &otlpCollector{}
 		langfuseSrv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
 		defer langfuseSrv.Close()
@@ -490,32 +440,24 @@ func TestNewTracerPrecedence(t *testing.T) {
 		tc.OTLPEndpoint = otlpSrv.URL
 		exportOneSpan(t, tc)
 
-		if len(langfuse.recorded()) == 0 {
-			t.Fatal("no span reached the Langfuse collector")
-		}
-		if n := len(otlp.recorded()); n != 0 {
-			t.Errorf("the explicit OTLP endpoint received %d requests", n)
-		}
+		must.NotEmpty(langfuse.recorded(), "no span reached the Langfuse collector")
+		must.Empty(otlp.recorded(), "the explicit OTLP endpoint received requests")
 	})
 }
 
-// TestNewTracerReleasesErrorRouteOnFailure: when the exporter cannot be
+// TestNewTracer_Failure_ReleasesErrorRoute: when the exporter cannot be
 // built, newTracer unbinds the SDK error route it took, so later reports
 // do not reach the failed run's stderr.
-func TestNewTracerReleasesErrorRouteOnFailure(t *testing.T) {
+func TestNewTracer_Failure_ReleasesErrorRoute(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	isolateOTLPEnv(t)
 	var buf bytes.Buffer
 	_, _, err := newTracer(context.Background(), config.TelemetryConfig{OTLPEndpoint: "not a url"}, &buf)
-	if err == nil {
-		t.Fatal("newTracer accepted an unusable endpoint")
-	}
-	if otelErrors.logger.Load() != nil {
-		t.Error("the SDK error route is still bound after newTracer failed")
-	}
+	must.Error(err, "newTracer accepted an unusable endpoint")
+	check.Nil(otelErrors.logger.Load(), "the SDK error route is still bound after newTracer failed")
 	otelErrors.Handle(errors.New("x"))
-	if buf.Len() != 0 {
-		t.Errorf("a later report reached the failed run's stderr: %q", buf.String())
-	}
+	check.Empty(buf.String(), "a later report reached the failed run's stderr")
 }
 
 // reportOTelError passes err to the SDK error handler while a run is bound
@@ -528,88 +470,69 @@ func reportOTelError(err error) string {
 	return buf.String()
 }
 
-// TestOTelErrorReportIsBounded: a report is scrubbed within a bounded
+// TestOTelError_Report_IsBounded: a report is scrubbed within a bounded
 // prefix of the SDK's text, cut to 1 KiB of valid UTF-8, and marked
 // truncated whenever either cut dropped text.
-func TestOTelErrorReportIsBounded(t *testing.T) {
+func TestOTelError_Report_IsBounded(t *testing.T) {
 	const marker = " [truncated]\"\n"
 
 	t.Run("cut at 1 KiB", func(t *testing.T) {
+		must := require.New(t)
 		out := reportOTelError(errors.New(strings.Repeat("x", 2000)))
-		if !strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes)+marker) {
-			t.Errorf("report does not end with 1 KiB of the error and the marker:\n%s", out)
-		}
-		if strings.Contains(out, strings.Repeat("x", maxOTelErrorBytes+1)) {
-			t.Error("report carries more than 1 KiB of the error")
-		}
+		must.True(strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes)+marker), "report does not end with 1 KiB of the error and the marker:\n%s", out)
+		must.NotContains(out, strings.Repeat("x", maxOTelErrorBytes+1), "report carries more than 1 KiB of the error")
 	})
 
 	t.Run("credential straddling the cut", func(t *testing.T) {
+		must := require.New(t)
 		basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
 		head := "failed to send: 401 Unauthorized (body: Authorization: Basic " + basic + " "
 		body := head + strings.Repeat(".", 1000-len(head)) + testLangfuseSecret + " " + strings.Repeat("y", 4<<20)
-		if strings.Index(body, testLangfuseSecret) != 1000 {
-			t.Fatal("the secret key must start at byte 1000 to straddle the cut")
-		}
+		must.Equal(1000, strings.Index(body, testLangfuseSecret), "the secret key must start at byte 1000 to straddle the cut")
 		out := reportOTelError(errors.New(body))
-		if strings.Contains(out, basic) || strings.Contains(out, testLangfuseSecret[:len("sk-lf-")+8]) {
-			t.Errorf("a credential survived the report:\n%.2000s", out)
-		}
-		if !strings.HasSuffix(out, marker) {
-			t.Errorf("report lacks the truncation marker:\n%.2000s", out)
-		}
+		must.False(strings.Contains(out, basic) || strings.Contains(out, testLangfuseSecret[:len("sk-lf-")+8]), "a credential survived the report:\n%.2000s", out)
+		must.True(strings.HasSuffix(out, marker), "report lacks the truncation marker:\n%.2000s", out)
 	})
 
 	t.Run("rune split by the cut", func(t *testing.T) {
+		must := require.New(t)
 		out := reportOTelError(errors.New(strings.Repeat("x", maxOTelErrorBytes-1) + "é" + strings.Repeat("z", 100)))
-		if !utf8.ValidString(out) {
-			t.Errorf("report is not valid UTF-8: %q", out)
-		}
-		if !strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes-1)+marker) {
-			t.Errorf("the split rune was not dropped:\n%q", out)
-		}
+		must.True(utf8.ValidString(out), "report is not valid UTF-8: %q", out)
+		must.True(strings.HasSuffix(out, strings.Repeat("x", maxOTelErrorBytes-1)+marker), "the split rune was not dropped:\n%q", out)
 	})
 
 	t.Run("scan cut alone marks the report", func(t *testing.T) {
+		must := require.New(t)
 		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 		out := reportOTelError(errors.New(strings.Repeat(alphabet, 300)))
-		if !strings.Contains(out, "[REDACTED:high-entropy]") {
-			t.Errorf("the scanned prefix was not scrubbed:\n%s", out)
-		}
-		if !strings.HasSuffix(out, marker) {
-			t.Errorf("report lacks the truncation marker although the scan cut dropped text:\n%s", out)
-		}
+		must.Contains(out, "[REDACTED:high-entropy]", "the scanned prefix was not scrubbed:\n%s", out)
+		must.True(strings.HasSuffix(out, marker), "report lacks the truncation marker although the scan cut dropped text:\n%s", out)
 	})
 
 	t.Run("invalid UTF-8 with no cut", func(t *testing.T) {
+		must := require.New(t)
 		// slog's text handler escapes any invalid byte it is given into a
 		// valid-UTF-8 \xNN sequence, so utf8.ValidString(out) alone cannot
 		// tell whether Handle sanitized msg or slog merely escaped it: check
 		// that the invalid bytes were dropped, not preserved as an escape.
 		out := reportOTelError(errors.New("failed to send: 400 Bad Request (body: \xff\xfe bad bytes)"))
-		if !utf8.ValidString(out) {
-			t.Errorf("report is not valid UTF-8: %q", out)
-		}
-		if strings.Contains(out, `\xff`) || strings.Contains(out, `\xfe`) {
-			t.Errorf("invalid bytes were escaped rather than stripped by Handle:\n%q", out)
-		}
-		if !strings.Contains(out, "failed to send") || !strings.Contains(out, "bad bytes") {
-			t.Errorf("report lost the valid text around the invalid bytes:\n%q", out)
-		}
-		if strings.Contains(out, "[truncated]") {
-			t.Errorf("a short error was marked truncated:\n%s", out)
-		}
+		must.True(utf8.ValidString(out), "report is not valid UTF-8: %q", out)
+		must.NotContains(out, `\xff`, "invalid bytes were escaped rather than stripped by Handle:\n%q", out)
+		must.NotContains(out, `\xfe`, "invalid bytes were escaped rather than stripped by Handle:\n%q", out)
+		must.Contains(out, "failed to send", "report lost the valid text around the invalid bytes:\n%q", out)
+		must.Contains(out, "bad bytes", "report lost the valid text around the invalid bytes:\n%q", out)
+		must.NotContains(out, "[truncated]", "a short error was marked truncated:\n%s", out)
 	})
 }
 
-// TestOTelErrorsDroppedWithoutRun: with no run bound, including after a
+// TestOTelError_WithoutRun_IsDropped: with no run bound, including after a
 // run's route is restored, SDK error reports are dropped rather than
 // written to the process stderr.
-func TestOTelErrorsDroppedWithoutRun(t *testing.T) {
+func TestOTelError_WithoutRun_IsDropped(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
+	must.NoError(err, "os.Pipe")
 	orig := os.Stderr
 	os.Stderr = w
 	t.Cleanup(func() {
@@ -628,15 +551,9 @@ func TestOTelErrorsDroppedWithoutRun(t *testing.T) {
 	os.Stderr = orig
 	w.Close()
 	written, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("reading the stderr pipe: %v", err)
-	}
-	if len(written) != 0 {
-		t.Errorf("an unbound report reached the process stderr: %q", written)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a report after restore reached the run's stderr: %q", buf.String())
-	}
+	must.NoError(err, "reading the stderr pipe")
+	check.Empty(string(written), "an unbound report reached the process stderr")
+	check.Empty(buf.String(), "a report after restore reached the run's stderr")
 }
 
 // malformedHeaderSecret is the credential fragment every entry of
@@ -653,15 +570,16 @@ var malformedHeaderLists = []struct {
 	{"credential in the name", "Authorization Basic b3RlbC11c2Vy=x"},
 }
 
-// TestMalformedOTLPHeaderEnvRefused: on the Langfuse path and the
+// TestOTLP_HeaderEnv_RefusesMalformed: on the Langfuse path and the
 // environment-only path, a malformed header variable stops newTracer
 // before an exporter or error route exists, and the error names the
 // variable without its value.
-func TestMalformedOTLPHeaderEnvRefused(t *testing.T) {
+func TestOTLP_HeaderEnv_RefusesMalformed(t *testing.T) {
 	for _, tt := range malformedHeaderLists {
 		for _, name := range otlpHeaderEnv {
 			for _, path := range []string{"langfuse", "environment"} {
 				t.Run(tt.name+"/"+name+"/"+path, func(t *testing.T) {
+					must := require.New(t)
 					collector := &otlpCollector{}
 					srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 					defer srv.Close()
@@ -679,30 +597,24 @@ func TestMalformedOTLPHeaderEnvRefused(t *testing.T) {
 					_, shutdown, err := newTracer(context.Background(), tc, io.Discard)
 					if err == nil {
 						_ = shutdown(context.Background())
-						t.Fatal("newTracer accepted a malformed header list")
 					}
-					if !strings.HasPrefix(err.Error(), name+":") {
-						t.Errorf("err = %v, want it to name %s", err, name)
-					}
-					if strings.Contains(err.Error(), malformedHeaderSecret) {
-						t.Errorf("the error echoes the header value: %v", err)
-					}
-					if n := len(collector.recorded()); n != 0 {
-						t.Errorf("the collector received %d requests", n)
-					}
-					if otelErrors.logger.Load() != nil {
-						t.Error("a refused run left the SDK error route bound")
-					}
+					must.Error(err, "newTracer accepted a malformed header list")
+					must.True(strings.HasPrefix(err.Error(), name+":"), "err = %v, want it to name %s", err, name)
+					must.NotContains(err.Error(), malformedHeaderSecret, "the error echoes the header value")
+					must.Empty(collector.recorded(), "the collector received requests")
+					must.Nil(otelErrors.logger.Load(), "a refused run left the SDK error route bound")
 				})
 			}
 		}
 	}
 }
 
-// TestWellFormedOTLPHeaderEnvReachesCollector: a well-formed list, blank
+// TestOTLP_HeaderEnv_WellFormedReachesCollector: a well-formed list, blank
 // entries included, passes the check and reaches the environment's
 // collector decoded.
-func TestWellFormedOTLPHeaderEnvReachesCollector(t *testing.T) {
+func TestOTLP_HeaderEnv_WellFormedReachesCollector(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	collector := &otlpCollector{}
 	srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 	defer srv.Close()
@@ -713,16 +625,10 @@ func TestWellFormedOTLPHeaderEnvReachesCollector(t *testing.T) {
 	exportOneSpan(t, config.TelemetryConfig{})
 
 	got := collector.recorded()
-	if len(got) == 0 {
-		t.Fatal("no span reached the environment's collector")
-	}
+	must.NotEmpty(got, "no span reached the environment's collector")
 	for _, r := range got {
-		if v := r.header.Get("X-Team"); v != "abc" {
-			t.Errorf("x-team = %q, want abc", v)
-		}
-		if v := r.header.Get("Authorization"); v != "Basic Zm9vOmJhcg==" {
-			t.Errorf("Authorization = %q, want the decoded value", v)
-		}
+		check.Equal("abc", r.header.Get("X-Team"), "x-team header")
+		check.Equal("Basic Zm9vOmJhcg==", r.header.Get("Authorization"), "Authorization header, decoded")
 	}
 }
 
@@ -740,14 +646,15 @@ var malformedEndpointEnvLists = []struct {
 	{"control character", "https://collector.example/\x7f"},
 }
 
-// TestMalformedOTLPEndpointEnvRefused: on every OTel path, an endpoint
+// TestOTLP_EndpointEnv_RefusesMalformed: on every OTel path, an endpoint
 // variable url.Parse rejects stops newTracer before an exporter or error
 // route exists, and the error names the variable without its value.
-func TestMalformedOTLPEndpointEnvRefused(t *testing.T) {
+func TestOTLP_EndpointEnv_RefusesMalformed(t *testing.T) {
 	for _, tt := range malformedEndpointEnvLists {
 		for _, name := range otlpEndpointEnv {
 			for _, path := range []string{"langfuse", "otlp-endpoint", "environment"} {
 				t.Run(tt.name+"/"+name+"/"+path, func(t *testing.T) {
+					must := require.New(t)
 					collector := &otlpCollector{}
 					srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 					defer srv.Close()
@@ -766,30 +673,22 @@ func TestMalformedOTLPEndpointEnvRefused(t *testing.T) {
 					_, shutdown, err := newTracer(context.Background(), tc, io.Discard)
 					if err == nil {
 						_ = shutdown(context.Background())
-						t.Fatal("newTracer accepted a malformed endpoint variable")
 					}
-					if !strings.HasPrefix(err.Error(), name+":") {
-						t.Errorf("err = %v, want it to name %s", err, name)
-					}
-					if strings.Contains(err.Error(), malformedEndpointEnvSecret) {
-						t.Errorf("the error echoes the endpoint value: %v", err)
-					}
-					if n := len(collector.recorded()); n != 0 {
-						t.Errorf("the collector received %d requests", n)
-					}
-					if otelErrors.logger.Load() != nil {
-						t.Error("a refused run left the SDK error route bound")
-					}
+					must.Error(err, "newTracer accepted a malformed endpoint variable")
+					must.True(strings.HasPrefix(err.Error(), name+":"), "err = %v, want it to name %s", err, name)
+					must.NotContains(err.Error(), malformedEndpointEnvSecret, "the error echoes the endpoint value")
+					must.Empty(collector.recorded(), "the collector received requests")
+					must.Nil(otelErrors.logger.Load(), "a refused run left the SDK error route bound")
 				})
 			}
 		}
 	}
 }
 
-// TestWellFormedOTLPEndpointEnvReachesCollector: a well-formed endpoint
+// TestOTLP_EndpointEnv_WellFormedReachesCollector: a well-formed endpoint
 // variable passes the check, and the environment-only path still binds
 // OTel and reaches its collector.
-func TestWellFormedOTLPEndpointEnvReachesCollector(t *testing.T) {
+func TestOTLP_EndpointEnv_WellFormedReachesCollector(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		envVar  string
@@ -799,6 +698,7 @@ func TestWellFormedOTLPEndpointEnvReachesCollector(t *testing.T) {
 		{"traces endpoint", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "/v1/traces"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			collector := &otlpCollector{}
 			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 			defer srv.Close()
@@ -807,9 +707,7 @@ func TestWellFormedOTLPEndpointEnvReachesCollector(t *testing.T) {
 
 			exportOneSpan(t, config.TelemetryConfig{})
 
-			if len(collector.recorded()) == 0 {
-				t.Fatal("no span reached the environment's collector")
-			}
+			must.NotEmpty(collector.recorded(), "no span reached the environment's collector")
 		})
 	}
 }
@@ -824,14 +722,13 @@ const headerChildRole = "CHIRON_TEST_OTLP_HEADER_CHILD"
 // the exporter directly and shows the SDK prints a malformed value; the
 // newTracer child shows the refusal keeps it off stderr.
 func TestMalformedOTLPHeaderEnvStaysOffProcessStderr(t *testing.T) {
+	must := require.New(t)
 	switch os.Getenv(headerChildRole) {
 	case "sdk":
 		for _, tt := range malformedHeaderLists {
 			t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", tt.value)
 			_, shutdown, err := trace.NewOTel(context.Background(), "http://127.0.0.1:1")
-			if err != nil {
-				t.Fatalf("NewOTel: %v", err)
-			}
+			must.NoError(err, "NewOTel")
 			_ = shutdown(context.Background())
 		}
 		return
@@ -840,14 +737,22 @@ func TestMalformedOTLPHeaderEnvStaysOffProcessStderr(t *testing.T) {
 		t.Setenv("LANGFUSE_SECRET_KEY", testLangfuseSecret)
 		for _, tt := range malformedHeaderLists {
 			for _, name := range otlpHeaderEnv {
-				for _, tc := range []config.TelemetryConfig{langfuseTelemetry("http://127.0.0.1:1/api/public/otel"), {}} {
-					isolateOTLPEnv(t)
-					t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
-					t.Setenv(name, tt.value)
-					if _, shutdown, err := newTracer(context.Background(), tc, io.Discard); err == nil {
-						_ = shutdown(context.Background())
-						t.Errorf("%s in %s: newTracer accepted a malformed header list", tt.name, name)
-					}
+				for _, path := range []string{"langfuse", "environment"} {
+					t.Run(tt.name+"/"+name+"/"+path, func(t *testing.T) {
+						must := require.New(t)
+						var tc config.TelemetryConfig
+						if path == "langfuse" {
+							tc = langfuseTelemetry("http://127.0.0.1:1/api/public/otel")
+						}
+						isolateOTLPEnv(t)
+						t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+						t.Setenv(name, tt.value)
+						_, shutdown, err := newTracer(context.Background(), tc, io.Discard)
+						if err == nil {
+							_ = shutdown(context.Background())
+						}
+						must.Error(err, "newTracer accepted a malformed header list")
+					})
 				}
 			}
 		}
@@ -862,17 +767,16 @@ func TestMalformedOTLPHeaderEnvStaysOffProcessStderr(t *testing.T) {
 		{"newTracer", false},
 	} {
 		t.Run(tt.role, func(t *testing.T) {
+			must := require.New(t)
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMalformedOTLPHeaderEnvStaysOffProcessStderr$")
 			cmd.Env = append(os.Environ(), headerChildRole+"="+tt.role)
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &stdout
 			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("child: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-			}
-			if leaked := strings.Contains(stderr.String(), malformedHeaderSecret); leaked != tt.wantLeak {
-				t.Errorf("header value on the child's stderr = %v, want %v\nstderr: %s", leaked, tt.wantLeak, stderr.String())
-			}
+			err := cmd.Run()
+			must.NoError(err, "child stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			leaked := strings.Contains(stderr.String(), malformedHeaderSecret)
+			must.Equal(tt.wantLeak, leaked, "header value on the child's stderr\nstderr: %s", stderr.String())
 		})
 	}
 }
@@ -881,13 +785,14 @@ func TestMalformedOTLPHeaderEnvStaysOffProcessStderr(t *testing.T) {
 // the collector the environment names.
 const operatorHeaders = "x-honeycomb-team=operator-team-key"
 
-// TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector: the environment's
+// TestOTLP_HeaderEnv_GoesOnlyToEnvironmentCollector: the environment's
 // headers reach the collector the environment names and are replaced on
 // the Langfuse path; beside an explicit OTLP endpoint, newTracer refuses
 // to bind rather than send them there.
-func TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector(t *testing.T) {
+func TestOTLP_HeaderEnv_GoesOnlyToEnvironmentCollector(t *testing.T) {
 	for _, name := range otlpHeaderEnv {
 		t.Run("explicit endpoint refused/"+name, func(t *testing.T) {
+			must := require.New(t)
 			collector := &otlpCollector{}
 			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 			defer srv.Close()
@@ -897,17 +802,14 @@ func TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector(t *testing.T) {
 			_, shutdown, err := newTracer(context.Background(), config.TelemetryConfig{OTLPEndpoint: srv.URL}, io.Discard)
 			if err == nil {
 				_ = shutdown(context.Background())
-				t.Fatal("newTracer bound an explicit endpoint beside an OTLP header variable")
 			}
-			if !strings.Contains(err.Error(), name) || strings.Contains(err.Error(), "operator-team-key") {
-				t.Errorf("err = %v, want it to name %s without its value", err, name)
-			}
-			if n := len(collector.recorded()); n != 0 {
-				t.Errorf("the explicit endpoint received %d requests", n)
-			}
+			must.ErrorContains(err, name, "newTracer should refuse an explicit endpoint beside an OTLP header variable")
+			must.NotContains(err.Error(), "operator-team-key", "the error echoes the header value")
+			must.Empty(collector.recorded(), "the explicit endpoint received requests")
 		})
 
 		t.Run("environment collector receives them/"+name, func(t *testing.T) {
+			must := require.New(t)
 			collector := &otlpCollector{}
 			srv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 			defer srv.Close()
@@ -918,17 +820,14 @@ func TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector(t *testing.T) {
 			exportOneSpan(t, config.TelemetryConfig{})
 
 			got := collector.recorded()
-			if len(got) == 0 {
-				t.Fatal("no span reached the environment's collector")
-			}
+			must.NotEmpty(got, "no span reached the environment's collector")
 			for _, r := range got {
-				if v := r.header.Get("X-Honeycomb-Team"); v != "operator-team-key" {
-					t.Errorf("x-honeycomb-team = %q, want the environment's value", v)
-				}
+				must.Equal("operator-team-key", r.header.Get("X-Honeycomb-Team"), "x-honeycomb-team should be the environment's value")
 			}
 		})
 
 		t.Run("langfuse replaces them/"+name, func(t *testing.T) {
+			must := require.New(t)
 			langfuse := &otlpCollector{}
 			srv := httptest.NewServer(langfuse.handler(t, http.StatusOK, ""))
 			defer srv.Close()
@@ -940,27 +839,22 @@ func TestOTLPHeaderEnvGoesOnlyToEnvironmentCollector(t *testing.T) {
 			exportOneSpan(t, langfuseTelemetry(srv.URL+"/api/public/otel"))
 
 			got := langfuse.recorded()
-			if len(got) == 0 {
-				t.Fatal("no span reached the Langfuse collector")
-			}
+			must.NotEmpty(got, "no span reached the Langfuse collector")
 			basic := base64.StdEncoding.EncodeToString([]byte(testLangfusePublic + ":" + testLangfuseSecret))
 			for _, r := range got {
-				if v := r.header.Get("Authorization"); v != "Basic "+basic {
-					t.Errorf("Authorization = %q, want Basic base64(public:secret)", v)
-				}
-				if v := r.header.Get("X-Honeycomb-Team"); v != "" {
-					t.Errorf("x-honeycomb-team = %q reached Langfuse", v)
-				}
+				must.Equal("Basic "+basic, r.header.Get("Authorization"), "Authorization should be Basic base64(public:secret)")
+				must.Empty(r.header.Get("X-Honeycomb-Team"), "x-honeycomb-team reached Langfuse")
 			}
 		})
 	}
 }
 
-// TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend: through the command
+// TestOTLP_EndpointBesideHeaderEnv_FailsBeforeSpend: through the command
 // path, --otlp-endpoint beside an OTLP header variable stops the run
 // before any model, search or collector request, without echoing the
 // header.
-func TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend(t *testing.T) {
+func TestOTLP_EndpointBesideHeaderEnv_FailsBeforeSpend(t *testing.T) {
+	must := require.New(t)
 	collector := &otlpCollector{}
 	collectorSrv := httptest.NewServer(collector.handler(t, http.StatusOK, ""))
 	defer collectorSrv.Close()
@@ -973,13 +867,10 @@ func TestOTLPEndpointBesideHeaderEnvFailsBeforeSpend(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_HEADERS", operatorHeaders)
 
 	_, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "none", "--otlp-endpoint", collectorSrv.URL)...)
-	if err == nil || !strings.Contains(err.Error(), "OTEL_EXPORTER_OTLP_HEADERS") {
-		t.Fatalf("err = %v, want a refusal naming OTEL_EXPORTER_OTLP_HEADERS", err)
-	}
-	if strings.Contains(err.Error(), "operator-team-key") || strings.Contains(stderr, "operator-team-key") {
-		t.Error("the header value leaked")
-	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 || len(collector.recorded()) != 0 {
-		t.Error("a refused run must not dial any endpoint")
-	}
+	must.ErrorContains(err, "OTEL_EXPORTER_OTLP_HEADERS", "want a refusal naming the header variable")
+	must.NotContains(err.Error(), "operator-team-key", "the header value leaked into the error")
+	must.NotContains(stderr, "operator-team-key", "the header value leaked to stderr")
+	must.Zero(modelSrv.CallCount(), "a refused run must not call the model")
+	must.Zero(searchSrv.CallCount(), "a refused run must not call search")
+	must.Empty(collector.recorded(), "a refused run must not send to the collector")
 }

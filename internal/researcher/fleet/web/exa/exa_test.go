@@ -17,6 +17,9 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa/exatest"
@@ -28,36 +31,35 @@ const testKey = "exa-test-key-3f2b9c1e-5a7d-4e8f"
 
 func newClient(t *testing.T, endpoint string, mutate ...func(*exa.Options)) *exa.Client {
 	t.Helper()
+	must := require.New(t)
 	opts := exa.Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := exa.New(opts)
-	if err != nil {
-		t.Fatalf("exa.New: %v", err)
-	}
+	must.NoError(err, "exa.New")
 	return c
 }
 
 func fixture(t *testing.T, name string) string {
 	t.Helper()
+	must := require.New(t)
 	data, err := os.ReadFile(filepath.Join("testdata", name))
-	if err != nil {
-		t.Fatalf("reading fixture: %v", err)
-	}
+	must.NoError(err, "reading fixture %s", name)
 	return string(data)
 }
 
 func decodeBody(t *testing.T, raw json.RawMessage) map[string]any {
 	t.Helper()
+	must := require.New(t)
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("request body is not JSON: %v\n%s", err, raw)
-	}
+	err := json.Unmarshal(raw, &m)
+	must.NoError(err, "request body is not JSON:\n%s", raw)
 	return m
 }
 
-func TestNewValidatesOptions(t *testing.T) {
+func TestNew_ValidatesOptions(t *testing.T) {
+	must := require.New(t)
 	for _, tt := range []struct {
 		name   string
 		mutate func(*exa.Options)
@@ -75,35 +77,36 @@ func TestNewValidatesOptions(t *testing.T) {
 		{"body bound below a page", func(o *exa.Options) { o.MaxCharacters = 100_000; o.MaxBodyBytes = 600_000 }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			opts := exa.Options{Endpoint: "https://api.exa.ai", APIKey: testKey}
 			tt.mutate(&opts)
-			if _, err := exa.New(opts); err == nil {
-				t.Fatal("New succeeded, want an error")
-			}
+			_, err := exa.New(opts)
+			must.Error(err)
 		})
 	}
-	if _, err := exa.New(exa.Options{Endpoint: exa.DefaultEndpoint, APIKey: testKey, MaxCharacters: 1_000_000, MaxAgeHours: 720, NumResults: 100}); err != nil {
-		t.Errorf("New at the upper bounds: %v", err)
-	}
+	_, err := exa.New(exa.Options{Endpoint: exa.DefaultEndpoint, APIKey: testKey, MaxCharacters: 1_000_000, MaxAgeHours: 720, NumResults: 100})
+	must.NoError(err, "New at the upper bounds")
 }
 
-func TestSearchRequestShape(t *testing.T) {
+func TestSearch_RequestShape(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := exatest.NewFakeServer(exatest.WithResults([]web.Result{{Title: "t", URL: "https://example.com/a", Snippet: "s"}}))
 	defer fake.Close()
 	c := newClient(t, fake.URL(), func(o *exa.Options) { o.UserAgent = "chiron-test" })
 
-	if _, err := c.Search(context.Background(), web.Query{Text: "sky colour", Objective: "why is the sky blue"}); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := c.Search(context.Background(), web.Query{Text: "sky colour", Objective: "why is the sky blue"})
+	must.NoError(err, "Search")
 	reqs := fake.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("requests = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1)
 	r := reqs[0]
-	if r.Method != http.MethodPost || r.Path != "/search" || r.APIKey != testKey || r.Authorization != "" ||
-		r.ContentType != "application/json" || r.UserAgent != "chiron-test" {
-		t.Errorf("request = %+v, want POST /search with only x-api-key", r)
-	}
+	check.Equal(http.MethodPost, r.Method)
+	check.Equal("/search", r.Path)
+	check.Equal(testKey, r.APIKey)
+	check.Empty(r.Authorization, "only x-api-key is sent")
+	check.Equal("application/json", r.ContentType)
+	check.Equal("chiron-test", r.UserAgent)
+
 	body := decodeBody(t, r.Body)
 	want := map[string]any{
 		"query":      "sky colour",
@@ -114,81 +117,70 @@ func TestSearchRequestShape(t *testing.T) {
 	for k, v := range want {
 		got, _ := json.Marshal(body[k])
 		exp, _ := json.Marshal(v)
-		if string(got) != string(exp) {
-			t.Errorf("body[%s] = %s, want %s", k, got, exp)
-		}
+		check.Equal(string(exp), string(got), "body[%s]", k)
 	}
-	if _, ok := body["objective"]; ok {
-		t.Errorf("objective sent with SendObjective off: %s", r.Body)
-	}
+	check.NotContains(body, "objective", "objective sent with SendObjective off: %s", r.Body)
 }
 
-func TestSearchSendsObjectiveCutToFit(t *testing.T) {
+func TestSearch_ObjectiveCutToFit(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := exatest.NewFakeServer()
 	defer fake.Close()
 	c := newClient(t, fake.URL(), func(o *exa.Options) { o.SendObjective = true })
 
 	// Each emoji is two UTF-16 units, so 2,001 of them must be cut to 2,000.
 	long := strings.Repeat("\U0001F600", 2001)
-	if _, err := c.Search(context.Background(), web.Query{Text: "q", Objective: long}); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := c.Search(context.Background(), web.Query{Text: "q", Objective: long})
+	must.NoError(err, "Search")
 	got, _ := decodeBody(t, fake.Requests()[0].Body)["objective"].(string)
-	if units := len(utf16.Encode([]rune(got))); units != 4000 || !utf8.ValidString(got) {
-		t.Errorf("objective is %d UTF-16 units (valid UTF-8: %v), want 4000", units, utf8.ValidString(got))
-	}
+	check.True(utf8.ValidString(got), "objective is valid UTF-8")
+	check.Len(utf16.Encode([]rune(got)), 4000, "objective length in UTF-16 units")
 
-	if _, err := c.Search(context.Background(), web.Query{Text: "q", Objective: "short goal"}); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if got := decodeBody(t, fake.Requests()[1].Body)["objective"]; got != "short goal" {
-		t.Errorf("objective = %v, want it sent unchanged", got)
-	}
+	_, err = c.Search(context.Background(), web.Query{Text: "q", Objective: "short goal"})
+	must.NoError(err, "Search")
+	check.Equal("short goal", decodeBody(t, fake.Requests()[1].Body)["objective"])
 }
 
-func TestSearchMapsFixtures(t *testing.T) {
+func TestSearch_MapsFixtures(t *testing.T) {
 	for _, tt := range []struct {
+		name     string
 		fixture  string
 		wantURLs []string
 	}{
-		{"search-highlights.json", []string{
+		{"highlights", "search-highlights.json", []string{
 			"https://github.com/ericfitz/tmi/blob/main/internal/safehttp/safehttp.go",
 			"https://pkg.go.dev/github.com/richardwooding/ssrfguard",
 			"https://pkg.go.dev/github.com/cplieger/ssrf/v4",
 		}},
-		{"search-highlights-max.json", []string{
+		{"highlights max", "search-highlights-max.json", []string{
 			"https://github.com/ericfitz/tmi/blob/main/internal/safehttp/safehttp.go",
 			"https://pkg.go.dev/github.com/richardwooding/ssrfguard",
 			"https://pkg.go.dev/github.com/cplieger/ssrf/v4",
 		}},
 	} {
-		t.Run(tt.fixture, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithRawBody(fixture(t, tt.fixture)))
 			defer fake.Close()
 
 			resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "ssrf"})
-			if err != nil {
-				t.Fatalf("Search: %v", err)
-			}
-			if resp.Spend != (web.Spend{USD: 0.007}) {
-				t.Errorf("spend = %+v, want 0.007 USD", resp.Spend)
-			}
-			if len(resp.Results) != len(tt.wantURLs) {
-				t.Fatalf("results = %d, want %d", len(resp.Results), len(tt.wantURLs))
-			}
+			must.NoError(err, "Search")
+			must.Equal(web.Spend{USD: 0.007}, resp.Spend)
+			must.Len(resp.Results, len(tt.wantURLs))
 			for i, r := range resp.Results {
-				if r.URL != tt.wantURLs[i] || r.Title == "" || r.Snippet == "" {
-					t.Errorf("result %d = %+v, want %s with a title and snippet", i, r, tt.wantURLs[i])
-				}
-				if !utf8.ValidString(r.Snippet) {
-					t.Errorf("result %d snippet is not valid UTF-8", i)
-				}
+				must.Equal(tt.wantURLs[i], r.URL, "result %d URL", i)
+				must.NotEmpty(r.Title, "result %d title", i)
+				must.NotEmpty(r.Snippet, "result %d snippet", i)
+				must.True(utf8.ValidString(r.Snippet), "result %d snippet is valid UTF-8", i)
 			}
 		})
 	}
 }
 
-func TestSearchResultMapping(t *testing.T) {
+func TestSearch_ResultMapping(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	raw := `{"results":[
 		{"title":"h","url":"https://e.com/h","highlights":["one"," ","two"],"text":"ignored"},
 		{"title":"t","url":"https://e.com/t","text":"page text"},
@@ -203,28 +195,17 @@ func TestSearchResultMapping(t *testing.T) {
 	defer fake.Close()
 
 	resp, err := newClient(t, fake.URL(), func(o *exa.Options) { o.NumResults = 3 }).Search(context.Background(), web.Query{Text: "q"})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	must.NoError(err, "Search")
+	must.Len(resp.Results, 3, "results = %+v, want the first 3", resp.Results)
 	wantSnippets := []string{"one … two", "page text", "a summary"}
-	if len(resp.Results) != 3 {
-		t.Fatalf("results = %+v, want the first 3", resp.Results)
-	}
 	for i, want := range wantSnippets {
-		if resp.Results[i].Snippet != want {
-			t.Errorf("result %d snippet = %q, want %q", i, resp.Results[i].Snippet, want)
-		}
+		check.Equal(want, resp.Results[i].Snippet, "result %d snippet", i)
 	}
-	wantNotes := []string{"site: restriction\nrelaxed", "2", "3", "4", "5", "6"}
-	if strings.Join(resp.Notes, "|") != strings.Join(wantNotes, "|") {
-		t.Errorf("notes = %q, want %q", resp.Notes, wantNotes)
-	}
-	if resp.Spend != (web.Spend{USD: 0.007}) {
-		t.Errorf("spend = %+v, want 0.007 USD after rounding", resp.Spend)
-	}
+	check.Equal([]string{"site: restriction\nrelaxed", "2", "3", "4", "5", "6"}, resp.Notes)
+	check.Equal(web.Spend{USD: 0.007}, resp.Spend, "after rounding")
 }
 
-func TestSearchSpendAndShapeFailures(t *testing.T) {
+func TestSearch_SpendAndShapeFailures(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		raw       string
@@ -238,31 +219,30 @@ func TestSearchSpendAndShapeFailures(t *testing.T) {
 		{"not an object", `[]`, true, web.Spend{Unknown: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithRawBody(tt.raw))
 			defer fake.Close()
 			resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+			if tt.wantErr {
+				must.Error(err)
+			} else {
+				must.NoError(err)
 			}
-			if resp.Spend != tt.wantSpend {
-				t.Errorf("spend = %+v, want %+v", resp.Spend, tt.wantSpend)
-			}
+			must.Equal(tt.wantSpend, resp.Spend)
 		})
 	}
 }
 
-func TestSearchRefusesBlankQuery(t *testing.T) {
+func TestSearch_RefusesBlankQuery(t *testing.T) {
+	must := require.New(t)
 	fake := exatest.NewFakeServer()
 	defer fake.Close()
-	if _, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "  "}); err == nil {
-		t.Fatal("Search succeeded on a blank query")
-	}
-	if n := len(fake.Requests()); n != 0 {
-		t.Errorf("requests = %d, want none", n)
-	}
+	_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "  "})
+	must.Error(err, "Search succeeded on a blank query")
+	must.Empty(fake.Requests(), "requests sent for a blank query")
 }
 
-func TestFetchRequestShape(t *testing.T) {
+func TestFetch_RequestShape(t *testing.T) {
 	const page = "https://example.com/doc?id=7"
 	for _, tt := range []struct {
 		name        string
@@ -273,42 +253,40 @@ func TestFetchRequestShape(t *testing.T) {
 		{"cache age sent", 24, float64(24)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{page: "text"}))
 			defer fake.Close()
 			c := newClient(t, fake.URL(), func(o *exa.Options) { o.MaxCharacters = 500; o.MaxAgeHours = tt.maxAgeHours })
 
-			if _, err := c.Fetch(context.Background(), page+"#section"); err != nil {
-				t.Fatalf("Fetch: %v", err)
-			}
+			_, err := c.Fetch(context.Background(), page+"#section")
+			must.NoError(err, "Fetch")
 			r := fake.Requests()[0]
-			if r.Path != "/contents" || r.APIKey != testKey || r.Authorization != "" {
-				t.Errorf("request = %+v, want POST /contents with only x-api-key", r)
-			}
+			must.Equal("/contents", r.Path)
+			must.Equal(testKey, r.APIKey)
+			must.Empty(r.Authorization, "only x-api-key is sent")
 			body := decodeBody(t, r.Body)
-			if urls, _ := json.Marshal(body["urls"]); string(urls) != `["`+page+`"]` {
-				t.Errorf("urls = %s, want the URL without its fragment", urls)
-			}
-			if text, _ := json.Marshal(body["text"]); string(text) != `{"maxCharacters":500}` {
-				t.Errorf("text = %s, want the bounded text view", text)
-			}
-			if body["maxAgeHours"] != tt.wantAge {
-				t.Errorf("maxAgeHours = %v, want %v", body["maxAgeHours"], tt.wantAge)
-			}
+			urls, _ := json.Marshal(body["urls"])
+			must.Equal(`["`+page+`"]`, string(urls), "urls should be the URL without its fragment")
+			text, _ := json.Marshal(body["text"])
+			must.Equal(`{"maxCharacters":500}`, string(text), "text should be the bounded text view")
+			must.Equal(tt.wantAge, body["maxAgeHours"])
 		})
 	}
 }
 
-func TestFetchMapsFixtures(t *testing.T) {
+func TestFetch_MapsFixtures(t *testing.T) {
 	for _, tt := range []struct {
+		name    string
 		fixture string
 		url     string
 		prefix  string
 	}{
-		{"contents-slash.json", "https://go.dev/doc/", "Documentation - The Go Programming Language"},
-		{"contents-redirect.json", "http://github.com/rxbynerd/chiron", "# rxbynerd/chiron"},
-		{"contents-pdf.json", "https://www.rfc-editor.org/rfc/rfc9421.pdf", "## RFC 9421"},
+		{"slash path", "contents-slash.json", "https://go.dev/doc/", "Documentation - The Go Programming Language"},
+		{"redirect", "contents-redirect.json", "http://github.com/rxbynerd/chiron", "# rxbynerd/chiron"},
+		{"pdf", "contents-pdf.json", "https://www.rfc-editor.org/rfc/rfc9421.pdf", "## RFC 9421"},
 	} {
-		t.Run(tt.fixture, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			raw := fixture(t, tt.fixture)
 			if tt.fixture == "contents-slash.json" {
 				// The fixture records a two-URL request; the client sends one.
@@ -318,47 +296,39 @@ func TestFetchMapsFixtures(t *testing.T) {
 			defer fake.Close()
 
 			page, err := newClient(t, fake.URL(), func(o *exa.Options) { o.MaxCharacters = 500 }).Fetch(context.Background(), tt.url)
-			if err != nil {
-				t.Fatalf("Fetch: %v", err)
-			}
-			if page.URL != tt.url || page.ContentType != "text/markdown; charset=utf-8" {
-				t.Errorf("page = %s (%s), want %s as Markdown", page.URL, page.ContentType, tt.url)
-			}
-			if !strings.HasPrefix(string(page.Content), tt.prefix) {
-				t.Errorf("content = %.80q, want it to start %q", page.Content, tt.prefix)
-			}
-			if !page.Truncated {
-				t.Error("a page cut at the 500-character bound is not marked truncated")
-			}
-			if page.Spend != (web.Spend{USD: 0.001}) {
-				t.Errorf("spend = %+v, want 0.001 USD", page.Spend)
-			}
+			must.NoError(err, "Fetch")
+			must.Equal(tt.url, page.URL)
+			must.Equal("text/markdown; charset=utf-8", page.ContentType)
+			must.True(strings.HasPrefix(string(page.Content), tt.prefix), "content = %.80q, want it to start %q", page.Content, tt.prefix)
+			must.True(page.Truncated, "a page cut at the 500-character bound is not marked truncated")
+			must.Equal(web.Spend{USD: 0.001}, page.Spend)
 		})
 	}
 }
 
-func TestFetchFailedURLs(t *testing.T) {
+func TestFetch_FailedURLs(t *testing.T) {
+	must := require.New(t)
 	for _, tt := range []struct {
+		name       string
 		fixture    string
 		url        string
 		wantTag    string
 		wantStatus int
 	}{
-		{"contents-404.json", "https://go.dev/this-page-does-not-exist-chiron-smoke", "CRAWL_NOT_FOUND", 404},
-		{"contents-cacheonly.json", "https://github.com/rxbynerd/chiron/blob/main/AGENTS.md", "CONTENT_NOT_CACHED", 404},
+		{"not found", "contents-404.json", "https://go.dev/this-page-does-not-exist-chiron-smoke", "CRAWL_NOT_FOUND", 404},
+		{"not cached", "contents-cacheonly.json", "https://github.com/rxbynerd/chiron/blob/main/AGENTS.md", "CONTENT_NOT_CACHED", 404},
 	} {
-		t.Run(tt.fixture, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithRawBody(fixture(t, tt.fixture)))
 			defer fake.Close()
 
 			page, err := newClient(t, fake.URL()).Fetch(context.Background(), tt.url)
 			var fe *exa.FetchError
-			if !errors.As(err, &fe) || fe.Tag != tt.wantTag || fe.TargetStatus != tt.wantStatus {
-				t.Fatalf("err = %v, want a FetchError %s/%d", err, tt.wantTag, tt.wantStatus)
-			}
-			if page.Spend != (web.Spend{}) {
-				t.Errorf("spend = %+v, want zero for an unretrieved page", page.Spend)
-			}
+			must.ErrorAs(err, &fe)
+			must.Equal(tt.wantTag, fe.Tag)
+			must.Equal(tt.wantStatus, fe.TargetStatus)
+			must.Equal(web.Spend{}, page.Spend, "spend for an unretrieved page")
 		})
 	}
 
@@ -366,12 +336,12 @@ func TestFetchFailedURLs(t *testing.T) {
 	defer fake.Close()
 	_, err := newClient(t, fake.URL()).Fetch(context.Background(), "https://example.com/blocked")
 	var fe *exa.FetchError
-	if !errors.As(err, &fe) || fe.Tag != "CRAWL_HTTP_403" || fe.TargetStatus != 403 {
-		t.Errorf("err = %v, want CRAWL_HTTP_403 with target status 403", err)
-	}
+	must.ErrorAs(err, &fe)
+	must.Equal("CRAWL_HTTP_403", fe.Tag)
+	must.Equal(403, fe.TargetStatus)
 }
 
-func TestFetchRefusesInconsistentReplies(t *testing.T) {
+func TestFetch_RefusesInconsistentReplies(t *testing.T) {
 	const u = "https://example.com/a"
 	for _, tt := range []struct {
 		name      string
@@ -386,20 +356,17 @@ func TestFetchRefusesInconsistentReplies(t *testing.T) {
 		{"not JSON", `<html>`, web.Spend{Unknown: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithRawBody(tt.raw))
 			defer fake.Close()
 			page, err := newClient(t, fake.URL()).Fetch(context.Background(), u)
-			if err == nil {
-				t.Fatalf("Fetch succeeded with page %+v, want an error", page)
-			}
-			if page.Spend != tt.wantSpend {
-				t.Errorf("spend = %+v, want %+v", page.Spend, tt.wantSpend)
-			}
+			must.Error(err, "Fetch succeeded with page %+v", page)
+			must.Equal(tt.wantSpend, page.Spend)
 		})
 	}
 }
 
-func TestFetchURLHygiene(t *testing.T) {
+func TestFetch_URLHygiene(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		url  string
@@ -458,34 +425,29 @@ func TestFetchURLHygiene(t *testing.T) {
 		{"teredo", "http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer()
 			defer fake.Close()
 			_, err := newClient(t, fake.URL()).Fetch(context.Background(), tt.url)
-			if !errors.Is(err, web.ErrRefusedDestination) {
-				t.Fatalf("err = %v, want a refused destination", err)
-			}
-			if strings.Contains(err.Error(), "pass") {
-				t.Errorf("error echoes userinfo: %v", err)
-			}
-			if n := len(fake.Requests()); n != 0 {
-				t.Errorf("requests = %d, want nothing sent", n)
-			}
+			must.ErrorIs(err, web.ErrRefusedDestination)
+			must.NotContains(err.Error(), "pass", "error echoes userinfo")
+			must.Empty(fake.Requests(), "nothing should be sent")
 		})
 	}
 
 	exact := "https://example.com/" + strings.Repeat("a", 2048-len("https://example.com/"))
 	for _, ok := range []string{"https://8.8.8.8/dns", "https://xn--fiqs8s.example.com/", "http://example.com:8080/a?b=c", "http://example.com./a", exact} {
 		t.Run("admits "+ok[:min(len(ok), 40)], func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{ok: "text"}))
 			defer fake.Close()
-			if _, err := newClient(t, fake.URL()).Fetch(context.Background(), ok); err != nil {
-				t.Errorf("Fetch(%s): %v, want it admitted", ok, err)
-			}
+			_, err := newClient(t, fake.URL()).Fetch(context.Background(), ok)
+			must.NoError(err, "Fetch(%s) should be admitted", ok)
 		})
 	}
 }
 
-func TestErrorsClassifyAccountFailures(t *testing.T) {
+func TestErrors_ClassifyAccountFailures(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
 		status       int
@@ -498,48 +460,36 @@ func TestErrorsClassifyAccountFailures(t *testing.T) {
 		{"no credits", 402, `{"requestId":"r1","error":"out","tag":"NO_MORE_CREDITS"}`, "NO_MORE_CREDITS", true, web.Spend{}},
 		{"key budget", 402, `{"requestId":"r1","error":"out","tag":"API_KEY_BUDGET_EXCEEDED"}`, "API_KEY_BUDGET_EXCEEDED", true, web.Spend{}},
 		{"team budget", 402, `{"requestId":"r1","error":"out","tag":"TEAM_BUDGET_EXCEEDED"}`, "TEAM_BUDGET_EXCEEDED", true, web.Spend{}},
-		{"payment challenge", 402, "", "X402_PAYMENT_REQUIRED", false, web.Spend{}},
+		{"payment challenge", 402, fixture(t, "error-noauth.json"), "X402_PAYMENT_REQUIRED", false, web.Spend{}},
 		{"team blocked", 403, `{"requestId":"r1","error":"blocked","tag":"TEAM_BLOCKED"}`, "TEAM_BLOCKED", true, web.Spend{}},
 		{"feature disabled", 403, `{"requestId":"r1","error":"no","tag":"FEATURE_DISABLED"}`, "FEATURE_DISABLED", false, web.Spend{}},
-		{"invalid body", 400, "", "INVALID_REQUEST_BODY", false, web.Spend{}},
+		{"invalid body", 400, fixture(t, "error-long-objective.json"), "INVALID_REQUEST_BODY", false, web.Spend{}},
 		{"rate limited", 429, `{"requestId":"r1","error":"slow down","tag":"RATE_LIMIT_EXCEEDED"}`, "RATE_LIMIT_EXCEEDED", false, web.Spend{}},
 		{"server error", 500, `{"requestId":"r1","error":"boom","tag":"INTERNAL_ERROR"}`, "INTERNAL_ERROR", false, web.Spend{Unknown: true}},
 		{"deadline", 504, `<html>gateway timeout</html>`, "", false, web.Spend{Unknown: true}},
 		{"edge overload", 503, `<html>overloaded</html>`, "", false, web.Spend{Unknown: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			body := tt.body
-			switch tt.name {
-			case "payment challenge":
-				body = fixture(t, "error-noauth.json")
-			case "invalid body":
-				body = fixture(t, "error-long-objective.json")
-			}
-			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, body))
+			must := require.New(t)
+			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, tt.body))
 			defer fake.Close()
 
 			resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
 			var apiErr *exa.APIError
-			if !errors.As(err, &apiErr) || apiErr.Status != tt.status || apiErr.Tag != tt.wantTag {
-				t.Fatalf("err = %v, want an APIError %d %s", err, tt.status, tt.wantTag)
-			}
-			if got := errors.Is(err, web.ErrAccountUnusable); got != tt.wantUnusable {
-				t.Errorf("errors.Is(err, ErrAccountUnusable) = %v, want %v", got, tt.wantUnusable)
-			}
-			if resp.Spend != tt.wantSpend {
-				t.Errorf("spend = %+v, want %+v", resp.Spend, tt.wantSpend)
-			}
-			if len(fake.Requests()) != 1 {
-				t.Errorf("requests = %d, want 1: nothing but an enveloped overload is re-sent", len(fake.Requests()))
-			}
-			if strings.Contains(err.Error(), "<html>") {
-				t.Errorf("error echoes a non-JSON body: %v", err)
-			}
+			must.ErrorAs(err, &apiErr)
+			must.Equal(tt.status, apiErr.Status)
+			must.Equal(tt.wantTag, apiErr.Tag)
+			must.Equal(tt.wantUnusable, errors.Is(err, web.ErrAccountUnusable))
+			must.Equal(tt.wantSpend, resp.Spend)
+			must.Len(fake.Requests(), 1, "nothing but an enveloped overload is re-sent")
+			must.NotContains(err.Error(), "<html>", "error echoes a non-JSON body")
 		})
 	}
 }
 
-func TestErrorsNeverCarryTheKeyOrRequestBody(t *testing.T) {
+func TestErrors_NeverCarryTheKeyOrRequestBody(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const query = "the secret research question"
 	const objective = "a confidential  objective"
 	body := `{"requestId":"r1","error":"bad key ` + testKey + ` for x-api-key: ` + testKey +
@@ -549,46 +499,43 @@ func TestErrorsNeverCarryTheKeyOrRequestBody(t *testing.T) {
 
 	c := newClient(t, fake.URL(), func(o *exa.Options) { o.SendObjective = true })
 	_, err := c.Search(context.Background(), web.Query{Text: query, Objective: objective})
-	if err == nil {
-		t.Fatal("Search succeeded, want an error")
-	}
+	must.Error(err)
+	msg := err.Error()
 	for _, leak := range []string{testKey, query, "confidential objective"} {
-		if strings.Contains(err.Error(), leak) {
-			t.Errorf("error leaks %q: %v", leak, err)
-		}
+		check.NotContains(msg, leak, "error leaks %q", leak)
 	}
-	if !strings.Contains(err.Error(), "[REDACTED:request-text]") || !strings.Contains(err.Error(), "(request r1)") {
-		t.Errorf("error = %v, want the redaction marker and the request id", err)
-	}
+	check.Contains(msg, "[REDACTED:request-text]")
+	check.Contains(msg, "(request r1)")
 }
 
-// TestErrorRequestIDCarryingTheKeyIsDropped: a request id that is the key
+// TestErrors_RequestIDCarryingTheKeyIsDropped: a request id that is the key
 // itself is never echoed.
-func TestErrorRequestIDCarryingTheKeyIsDropped(t *testing.T) {
+func TestErrors_RequestIDCarryingTheKeyIsDropped(t *testing.T) {
+	must := require.New(t)
 	const key = "abc123def456"
 	fake := exatest.NewFakeServer(exatest.WithStatus(500, `{"requestId":"`+key+`","error":"boom","tag":"INTERNAL_ERROR"}`))
 	defer fake.Close()
 	_, err := newClient(t, fake.URL(), func(o *exa.Options) { o.APIKey = key }).Search(context.Background(), web.Query{Text: "q"})
 	var apiErr *exa.APIError
-	if !errors.As(err, &apiErr) || apiErr.RequestID != "" || strings.Contains(err.Error(), key) {
-		t.Errorf("err = %v, want the request id dropped", err)
-	}
+	must.ErrorAs(err, &apiErr)
+	must.Empty(apiErr.RequestID)
+	must.NotContains(err.Error(), key)
 }
 
-func TestErrorRequestIDFallsBackToHeader(t *testing.T) {
+func TestErrors_RequestIDFallsBackToHeader(t *testing.T) {
+	must := require.New(t)
 	fake := exatest.NewFakeServer(exatest.WithStatus(500, "upstream"), exatest.WithHeader("x-request-id", "abc123"))
 	defer fake.Close()
 	_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
 	var apiErr *exa.APIError
-	if !errors.As(err, &apiErr) || apiErr.RequestID != "abc123" {
-		t.Errorf("err = %v, want the header's request id", err)
-	}
+	must.ErrorAs(err, &apiErr)
+	must.Equal("abc123", apiErr.RequestID)
 }
 
-// TestOverloadedRequestIsSentOnceMore: only Exa's enveloped
+// TestOverloadedRequest_SentOnceMore: only Exa's enveloped
 // SERVICE_OVERLOADED 503 is re-sent, once, with the same body and key, on
 // either endpoint.
-func TestOverloadedRequestIsSentOnceMore(t *testing.T) {
+func TestOverloadedRequest_SentOnceMore(t *testing.T) {
 	const page = "https://example.com/a"
 	const overloaded = `{"requestId":"r1","error":"over capacity","tag":"SERVICE_OVERLOADED"}`
 	served := map[string]string{
@@ -613,6 +560,7 @@ func TestOverloadedRequestIsSentOnceMore(t *testing.T) {
 			{"500 is not re-sent", []reply{{500, `{"error":"x","tag":"SERVICE_OVERLOADED"}`}}, 1, true},
 		} {
 			t.Run(path+"/"+tt.name, func(t *testing.T) {
+				must := require.New(t)
 				var mu sync.Mutex
 				var bodies, keys []string
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -638,25 +586,26 @@ func TestOverloadedRequestIsSentOnceMore(t *testing.T) {
 				} else {
 					_, err = c.Fetch(context.Background(), page)
 				}
-				if (err != nil) != tt.wantErr {
-					t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+				if tt.wantErr {
+					must.Error(err)
+				} else {
+					must.NoError(err)
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if len(bodies) != tt.wantCalls {
-					t.Fatalf("requests = %d, want %d", len(bodies), tt.wantCalls)
-				}
+				must.Len(bodies, tt.wantCalls)
 				for i := 1; i < len(bodies); i++ {
-					if bodies[i] != bodies[0] || keys[i] != testKey {
-						t.Errorf("re-sent request %d = %s with key %q, want the first request's body and key", i, bodies[i], keys[i])
-					}
+					must.Equal(bodies[0], bodies[i], "re-sent request %d body", i)
+					must.Equal(testKey, keys[i], "re-sent request %d key", i)
 				}
 			})
 		}
 	}
 }
 
-func TestRedirectIsNeverFollowed(t *testing.T) {
+func TestRedirect_NeverFollowed(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var leaked atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("x-api-key") != "" {
@@ -668,34 +617,24 @@ func TestRedirectIsNeverFollowed(t *testing.T) {
 	defer fake.Close()
 
 	resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
-	if err == nil {
-		t.Fatal("Search followed a redirect")
-	}
-	if leaked.Load() {
-		t.Error("the key reached the redirect target")
-	}
-	if strings.Contains(err.Error(), "redirect-secret") {
-		t.Errorf("error echoes the redirect target's URL: %v", err)
-	}
-	if resp.Spend != (web.Spend{Unknown: true}) {
-		t.Errorf("spend = %+v, want unknown: the request reached Exa before it redirected", resp.Spend)
-	}
+	must.Error(err, "Search followed a redirect")
+	check.False(leaked.Load(), "the key reached the redirect target")
+	check.NotContains(err.Error(), "redirect-secret", "error echoes the redirect target's URL")
+	check.Equal(web.Spend{Unknown: true}, resp.Spend, "unknown: the request reached Exa before it redirected")
 }
 
-func TestOversizedBodyIsAnErrorWithUnknownSpend(t *testing.T) {
+func TestOversizedBody_IsErrorWithUnknownSpend(t *testing.T) {
+	must := require.New(t)
 	fake := exatest.NewFakeServer(exatest.WithOversizedBody(2 << 20))
 	defer fake.Close()
 	resp, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
-	if err == nil || !strings.Contains(err.Error(), "bound") {
-		t.Fatalf("err = %v, want the body bound named", err)
-	}
-	if resp.Spend != (web.Spend{Unknown: true}) {
-		t.Errorf("spend = %+v, want unknown for a billed reply that could not be read", resp.Spend)
-	}
+	must.ErrorContains(err, "bound", "the body bound should be named")
+	must.Equal(web.Spend{Unknown: true}, resp.Spend, "unknown for a billed reply that could not be read")
 }
 
-func TestTransportFailureSpend(t *testing.T) {
+func TestSearch_TransportFailureSpend(t *testing.T) {
 	t.Run("timeout after the request was sent", func(t *testing.T) {
+		must := require.New(t)
 		release := make(chan struct{})
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			select {
@@ -707,45 +646,37 @@ func TestTransportFailureSpend(t *testing.T) {
 		defer close(release)
 		c := newClient(t, srv.URL, func(o *exa.Options) { o.RequestTimeout = 100 * time.Millisecond })
 		resp, err := c.Search(context.Background(), web.Query{Text: "q"})
-		if err == nil {
-			t.Fatal("Search succeeded, want a timeout")
-		}
-		if resp.Spend != (web.Spend{Unknown: true}) {
-			t.Errorf("spend = %+v, want unknown once the request was sent", resp.Spend)
-		}
+		must.Error(err, "want a timeout")
+		must.Equal(web.Spend{Unknown: true}, resp.Spend, "unknown once the request was sent")
 	})
 	t.Run("connection refused", func(t *testing.T) {
+		must := require.New(t)
 		srv := httptest.NewServer(http.NotFoundHandler())
 		endpoint := srv.URL
 		srv.Close()
 		resp, err := newClient(t, endpoint).Search(context.Background(), web.Query{Text: "q"})
-		if err == nil {
-			t.Fatal("Search succeeded, want a connection error")
-		}
-		if resp.Spend != (web.Spend{}) {
-			t.Errorf("spend = %+v, want zero when nothing was sent", resp.Spend)
-		}
+		must.Error(err, "want a connection error")
+		must.Equal(web.Spend{}, resp.Spend, "zero when nothing was sent")
 	})
 }
 
-func TestFakeChallengesAKeylessRequest(t *testing.T) {
+func TestFakeServer_ChallengesKeylessRequest(t *testing.T) {
+	must := require.New(t)
 	fake := exatest.NewFakeServer()
 	defer fake.Close()
 	resp, err := http.Post(fake.URL()+"/search", "application/json", strings.NewReader(`{"query":"q"}`))
-	if err != nil {
-		t.Fatalf("POST: %v", err)
-	}
+	must.NoError(err, "POST")
 	defer resp.Body.Close()
 	var env exa.ErrorResponse
 	_ = json.NewDecoder(resp.Body).Decode(&env)
-	if resp.StatusCode != http.StatusPaymentRequired || env.Tag != "X402_PAYMENT_REQUIRED" {
-		t.Errorf("reply = %d %s, want 402 X402_PAYMENT_REQUIRED", resp.StatusCode, env.Tag)
-	}
+	must.Equal(http.StatusPaymentRequired, resp.StatusCode)
+	must.Equal("X402_PAYMENT_REQUIRED", env.Tag)
 }
 
-// TestFetchAcceptsNormalisedStatusID: the one status in a reply belongs to
+// TestFetch_AcceptsNormalisedStatusID: the one status in a reply belongs to
 // the one URL sent, even when Exa reports it in a normalised form.
-func TestFetchAcceptsNormalisedStatusID(t *testing.T) {
+func TestFetch_AcceptsNormalisedStatusID(t *testing.T) {
+	must := require.New(t)
 	const sent = "https://example.com/docs"
 	raw := `{"results":[{"id":"` + sent + `/","url":"` + sent + `/","text":"page text"}],` +
 		`"statuses":[{"id":"` + sent + `/","status":"success"}],"costDollars":{"total":0.001}}`
@@ -753,18 +684,15 @@ func TestFetchAcceptsNormalisedStatusID(t *testing.T) {
 	defer fake.Close()
 
 	page, err := newClient(t, fake.URL()).Fetch(context.Background(), sent)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if page.URL != sent || string(page.Content) != "page text" {
-		t.Errorf("page = %s %q, want the URL as sent and the text", page.URL, page.Content)
-	}
+	must.NoError(err, "Fetch")
+	must.Equal(sent, page.URL, "URL as sent")
+	must.Equal("page text", string(page.Content))
 }
 
-// TestFetchTruncationCountsUTF16Units: a page cut at the bound in UTF-16
+// TestFetch_TruncationCountsUTF16Units: a page cut at the bound in UTF-16
 // units, fewer runes than the bound when it holds astral characters, still
 // reads as truncated.
-func TestFetchTruncationCountsUTF16Units(t *testing.T) {
+func TestFetch_TruncationCountsUTF16Units(t *testing.T) {
 	const u = "https://example.com/emoji"
 	for _, tt := range []struct {
 		name string
@@ -776,71 +704,68 @@ func TestFetchTruncationCountsUTF16Units(t *testing.T) {
 		{"short page", strings.Repeat("a", 9), false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithPages(map[string]string{u: tt.text}))
 			defer fake.Close()
 			page, err := newClient(t, fake.URL(), func(o *exa.Options) { o.MaxCharacters = 10 }).Fetch(context.Background(), u)
-			if err != nil {
-				t.Fatalf("Fetch: %v", err)
-			}
-			if page.Truncated != tt.want {
-				t.Errorf("Truncated = %v, want %v", page.Truncated, tt.want)
-			}
+			must.NoError(err, "Fetch")
+			must.Equal(tt.want, page.Truncated)
 		})
 	}
 }
 
-// TestErrorsFromHostileEnvelopes: a malformed tag or request id is dropped,
+// TestErrors_HostileEnvelopes: a malformed tag or request id is dropped,
 // the message reaches the caller as one bounded line of printable text, and
 // an envelope cut off by the error-body bound contributes only its status.
-func TestErrorsFromHostileEnvelopes(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		status int
-		body   string
-		check  func(t *testing.T, e *exa.APIError)
-	}{
-		{"malformed tag", 400, `{"requestId":"r1","error":"bad","tag":"bad-tag!"}`, func(t *testing.T, e *exa.APIError) {
-			if e.Tag != "" || e.Message != "bad" {
-				t.Errorf("APIError = %+v, want the tag dropped and the message kept", e)
-			}
-		}},
-		{"request id with control characters", 400, `{"requestId":"r1\u001b[31m","error":"bad","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
-			if e.RequestID != "" {
-				t.Errorf("RequestID = %q, want it dropped", e.RequestID)
-			}
-		}},
-		{"message with newlines and escapes", 400, `{"error":"line one\nline two \u001b[31mred\u001b[0m\u0007","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
-			if e.Message != "line one line two [31mred[0m" {
-				t.Errorf("Message = %q, want one line without control characters", e.Message)
-			}
-		}},
-		{"multibyte message over the bound", 400, `{"error":"` + strings.Repeat("é", 600) + `","tag":"INVALID_REQUEST"}`, func(t *testing.T, e *exa.APIError) {
-			if len(e.Message) > 512 || !utf8.ValidString(e.Message) {
-				t.Errorf("Message is %d bytes (valid UTF-8: %v), want at most 512", len(e.Message), utf8.ValidString(e.Message))
-			}
-		}},
-		{"envelope past the body bound", 401, `{"error":"` + strings.Repeat("x", 10<<10) + `","tag":"INVALID_API_KEY"}`, func(t *testing.T, e *exa.APIError) {
-			if e.Tag != "" || e.Message != "" {
-				t.Errorf("APIError = %+v, want the status alone", e)
-			}
-		}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, tt.body))
-			defer fake.Close()
-			_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
-			var apiErr *exa.APIError
-			if !errors.As(err, &apiErr) || apiErr.Status != tt.status {
-				t.Fatalf("err = %v, want an APIError %d", err, tt.status)
-			}
-			tt.check(t, apiErr)
-		})
-	}
+func TestErrors_HostileEnvelopes(t *testing.T) {
+	t.Run("malformed tag", func(t *testing.T) {
+		must := require.New(t)
+		e := searchAPIError(t, 400, `{"requestId":"r1","error":"bad","tag":"bad-tag!"}`)
+		must.Empty(e.Tag)
+		must.Equal("bad", e.Message)
+	})
+	t.Run("request id with control characters", func(t *testing.T) {
+		must := require.New(t)
+		e := searchAPIError(t, 400, `{"requestId":"r1\u001b[31m","error":"bad","tag":"INVALID_REQUEST"}`)
+		must.Empty(e.RequestID)
+	})
+	t.Run("message with newlines and escapes", func(t *testing.T) {
+		must := require.New(t)
+		e := searchAPIError(t, 400, `{"error":"line one\nline two \u001b[31mred\u001b[0m\u0007","tag":"INVALID_REQUEST"}`)
+		must.Equal("line one line two [31mred[0m", e.Message)
+	})
+	t.Run("multibyte message over the bound", func(t *testing.T) {
+		must := require.New(t)
+		e := searchAPIError(t, 400, `{"error":"`+strings.Repeat("é", 600)+`","tag":"INVALID_REQUEST"}`)
+		must.LessOrEqual(len(e.Message), 512, "message length in bytes")
+		must.True(utf8.ValidString(e.Message), "message is valid UTF-8")
+	})
+	t.Run("envelope past the body bound", func(t *testing.T) {
+		must := require.New(t)
+		e := searchAPIError(t, 401, `{"error":"`+strings.Repeat("x", 10<<10)+`","tag":"INVALID_API_KEY"}`)
+		must.Empty(e.Tag)
+		must.Empty(e.Message)
+	})
 }
 
-// TestFetchErrorReplies: a non-2xx reply to a contents call carries the
-// spend its status implies and classifies the account as search does.
-func TestFetchErrorReplies(t *testing.T) {
+// searchAPIError runs a search against a fake that replies with status and
+// body, and returns the APIError the search fails with.
+func searchAPIError(t *testing.T, status int, body string) *exa.APIError {
+	t.Helper()
+	must := require.New(t)
+	fake := exatest.NewFakeServer(exatest.WithStatus(status, body))
+	t.Cleanup(func() { fake.Close() })
+	_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+	var apiErr *exa.APIError
+	must.ErrorAs(err, &apiErr)
+	must.Equal(status, apiErr.Status)
+	return apiErr
+}
+
+// TestFetch_ErrorReplySpendAndAccountState: a non-2xx reply to a contents call
+// carries the spend its status implies and classifies the account as search
+// does.
+func TestFetch_ErrorReplySpendAndAccountState(t *testing.T) {
 	const u = "https://example.com/a"
 	for _, tt := range []struct {
 		name         string
@@ -855,47 +780,45 @@ func TestFetchErrorReplies(t *testing.T) {
 		{"no credits", 402, `{"error":"out","tag":"NO_MORE_CREDITS"}`, web.Spend{}, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, tt.body))
 			defer fake.Close()
 			page, err := newClient(t, fake.URL()).Fetch(context.Background(), u)
 			var apiErr *exa.APIError
-			if !errors.As(err, &apiErr) || apiErr.Status != tt.status {
-				t.Fatalf("err = %v, want an APIError %d", err, tt.status)
-			}
-			if page.Spend != tt.wantSpend {
-				t.Errorf("spend = %+v, want %+v", page.Spend, tt.wantSpend)
-			}
-			if got := errors.Is(err, web.ErrAccountUnusable); got != tt.wantUnusable {
-				t.Errorf("unusable = %v, want %v", got, tt.wantUnusable)
-			}
+			must.ErrorAs(err, &apiErr)
+			must.Equal(tt.status, apiErr.Status)
+			must.Equal(tt.wantSpend, page.Spend)
+			must.Equal(tt.wantUnusable, errors.Is(err, web.ErrAccountUnusable))
 		})
 	}
 }
 
-// TestAccountClassificationWithoutEnvelope: a 401 is an authentication
+// TestErrors_ClassifiesStatusWithoutEnvelope: a 401 is an authentication
 // failure whatever its body, so it ends the run; a 402 or 403 without Exa's
 // envelope names no cause and does not.
-func TestAccountClassificationWithoutEnvelope(t *testing.T) {
+func TestErrors_ClassifiesStatusWithoutEnvelope(t *testing.T) {
 	for _, tt := range []struct {
+		name   string
 		status int
 		want   bool
 	}{
-		{401, true},
-		{402, false},
-		{403, false},
+		{"401 without envelope is unusable", 401, true},
+		{"402 without envelope is not unusable", 402, false},
+		{"403 without envelope is not unusable", 403, false},
 	} {
-		fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, "<html>denied</html>"))
-		_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
-		fake.Close()
-		if got := errors.Is(err, web.ErrAccountUnusable); got != tt.want {
-			t.Errorf("HTTP %d without envelope: unusable = %v, want %v", tt.status, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			fake := exatest.NewFakeServer(exatest.WithStatus(tt.status, "<html>denied</html>"))
+			defer fake.Close()
+			_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+			must.Equal(tt.want, errors.Is(err, web.ErrAccountUnusable))
+		})
 	}
 }
 
-// TestFetchErrorRendering: a failed URL names its tag and target status
-// when Exa gives well-formed ones, and nothing more otherwise.
-func TestFetchErrorRendering(t *testing.T) {
+// TestFetch_ErrorRenderingNamesTagAndStatus: a failed URL names its tag and
+// target status when Exa gives well-formed ones, and nothing more otherwise.
+func TestFetch_ErrorRenderingNamesTagAndStatus(t *testing.T) {
 	const u = "https://example.com/a"
 	reply := func(errObj string) string {
 		return `{"results":[],"statuses":[{"id":"` + u + `","status":"error","error":` + errObj + `}],"costDollars":{"total":0}}`
@@ -911,20 +834,22 @@ func TestFetchErrorRendering(t *testing.T) {
 		{"null error", `null`, "exa: could not retrieve " + u},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := exatest.NewFakeServer(exatest.WithRawBody(reply(tt.error)))
 			defer fake.Close()
 			_, err := newClient(t, fake.URL()).Fetch(context.Background(), u)
 			var fe *exa.FetchError
-			if !errors.As(err, &fe) || err.Error() != tt.want {
-				t.Errorf("err = %v, want %q", err, tt.want)
-			}
+			must.ErrorAs(err, &fe)
+			must.Equal(tt.want, err.Error())
 		})
 	}
 }
 
-// TestNewCopiesTheCallerClient: the caller's client is copied, not mutated,
+// TestNew_CopiesCallerClient: the caller's client is copied, not mutated,
 // and its redirect policy is replaced by the refusal.
-func TestNewCopiesTheCallerClient(t *testing.T) {
+func TestNew_CopiesCallerClient(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var followed atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
 	defer target.Close()
@@ -934,37 +859,40 @@ func TestNewCopiesTheCallerClient(t *testing.T) {
 	followAll := func(*http.Request, []*http.Request) error { return nil }
 	caller := &http.Client{CheckRedirect: followAll}
 	c := newClient(t, fake.URL(), func(o *exa.Options) { o.HTTPClient = caller })
-	if _, err := c.Search(context.Background(), web.Query{Text: "q"}); err == nil || followed.Load() {
-		t.Errorf("err = %v, followed = %v; want the redirect refused", err, followed.Load())
-	}
-	if caller.CheckRedirect == nil || caller.Transport != nil || caller.Timeout != 0 {
-		t.Errorf("the caller's client was mutated: %+v", caller)
-	}
+	_, err := c.Search(context.Background(), web.Query{Text: "q"})
+	must.Error(err, "the redirect should be refused")
+	check.False(followed.Load(), "the redirect target was reached")
+	check.NotNil(caller.CheckRedirect, "the caller's redirect policy was cleared")
+	check.Nil(caller.Transport, "the caller's transport was set")
+	check.Zero(caller.Timeout, "the caller's timeout was set")
 }
 
-func TestDefaultUserAgentAndBodyBound(t *testing.T) {
-	fake := exatest.NewFakeServer()
-	defer fake.Close()
-	if _, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"}); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if ua := fake.Requests()[0].UserAgent; ua != "chiron/2 (+https://github.com/rxbynerd/chiron; research-only)" {
-		t.Errorf("User-Agent = %q, want Chiron's default", ua)
-	}
-
-	// A million-character page bound raises the body bound past 6 MB, so a
-	// 2 MiB reply that the 1 MiB default refuses is read.
-	big := exatest.NewFakeServer(exatest.WithOversizedBody(2 << 20))
-	defer big.Close()
-	c := newClient(t, big.URL(), func(o *exa.Options) { o.MaxCharacters = 1_000_000 })
-	if _, err := c.Search(context.Background(), web.Query{Text: "q"}); err != nil {
-		t.Errorf("Search with a large page bound: %v, want the 2 MiB reply read", err)
-	}
+func TestNew_DefaultUserAgentAndBodyBound(t *testing.T) {
+	t.Run("default user agent", func(t *testing.T) {
+		must := require.New(t)
+		fake := exatest.NewFakeServer()
+		defer fake.Close()
+		_, err := newClient(t, fake.URL()).Search(context.Background(), web.Query{Text: "q"})
+		must.NoError(err, "Search")
+		must.Equal("chiron/2 (+https://github.com/rxbynerd/chiron; research-only)", fake.Requests()[0].UserAgent)
+	})
+	t.Run("body bound follows the page bound", func(t *testing.T) {
+		must := require.New(t)
+		// A million-character page bound raises the body bound past 6 MB, so a
+		// 2 MiB reply that the 1 MiB default refuses is read.
+		big := exatest.NewFakeServer(exatest.WithOversizedBody(2 << 20))
+		defer big.Close()
+		c := newClient(t, big.URL(), func(o *exa.Options) { o.MaxCharacters = 1_000_000 })
+		_, err := c.Search(context.Background(), web.Query{Text: "q"})
+		must.NoError(err, "Search with a large page bound should read the 2 MiB reply")
+	})
 }
 
-// TestClientIsSafeForConcurrentUse drives one client from several
+// TestClient_IsSafeForConcurrentUse drives one client from several
 // goroutines in both roles; the race detector checks it.
-func TestClientIsSafeForConcurrentUse(t *testing.T) {
+func TestClient_IsSafeForConcurrentUse(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const u = "https://example.com/a"
 	fake := exatest.NewFakeServer(
 		exatest.WithResults([]web.Result{{Title: "t", URL: u, Snippet: "s"}}),
@@ -992,9 +920,7 @@ func TestClientIsSafeForConcurrentUse(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		t.Error(err)
+		must.NoError(err)
 	}
-	if n := len(fake.Requests()); n != 16 {
-		t.Errorf("requests = %d, want 16", n)
-	}
+	check.Len(fake.Requests(), 16, "requests sent")
 }

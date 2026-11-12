@@ -2,47 +2,44 @@ package fleet
 
 import (
 	"context"
-	"errors"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// TestLiveRoutesHasOnlyExternalWeb: the live table has exactly one row, and
+// TestLiveRoutes_HasOnlyExternalWebRow: the live table has exactly one row, and
 // that row is the in-process worker loop.
-func TestLiveRoutesHasOnlyExternalWeb(t *testing.T) {
+func TestLiveRoutes_HasOnlyExternalWebRow(t *testing.T) {
+	must := require.New(t)
 	routes := liveRoutes()
-	if got := routes.targets(); !slices.Equal(got, []Target{TargetExternalWeb}) {
-		t.Fatalf("live targets = %v, want [%s]", got, TargetExternalWeb)
-	}
+	must.Equal([]Target{TargetExternalWeb}, routes.targets(), "live targets")
 	dispatch, err := routes.route(TargetExternalWeb)
-	if err != nil {
-		t.Fatalf("route(%s): %v", TargetExternalWeb, err)
-	}
-	if reflect.ValueOf(dispatch).Pointer() != reflect.ValueOf(dispatchWorker).Pointer() {
-		t.Error("the external_web row is not dispatchWorker")
-	}
+	must.NoError(err)
+	want := reflect.ValueOf(dispatchWorker).Pointer()
+	must.Equal(want, reflect.ValueOf(dispatch).Pointer(), "the external_web row is not dispatchWorker")
 }
 
-// TestRouteExternalWebRunsWorker: the external_web dispatch runs a real
+// TestRoute_ExternalWebRunsWorker: the external_web dispatch runs a real
 // worker loop against the scripted model and returns its Finding.
-func TestRouteExternalWebRunsWorker(t *testing.T) {
+func TestRoute_ExternalWebRunsWorker(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer(finalReply("routed answer"))
 	defer modelSrv.Close()
 
 	dispatch, err := liveRoutes().route(TargetExternalWeb)
-	if err != nil {
-		t.Fatalf("route: %v", err)
-	}
+	must.NoError(err)
 	finding := dispatch(context.Background(), WorkerDeps{
 		Model:  newModelClient(t, modelSrv),
 		Search: newSearchClient(t, searchSrv),
@@ -50,23 +47,20 @@ func TestRouteExternalWebRunsWorker(t *testing.T) {
 		Caps:   caps(),
 	}, Brief{Objective: "routed objective"}, nil)
 
-	if finding.Status != types.StatusCompleted || finding.Text != "routed answer" {
-		t.Fatalf("finding = %+v, want a completed routed answer", finding)
-	}
-	if n := modelSrv.CallCount(); n != 1 {
-		t.Errorf("model calls = %d, want 1", n)
-	}
+	must.Equal(types.StatusCompleted, finding.Status)
+	must.Equal("routed answer", finding.Text)
+	check.Equal(1, modelSrv.CallCount(), "model calls")
 	reqs := modelSrv.Requests()
-	if len(reqs) == 0 || !strings.Contains(reqs[0].Messages[0].Content, "routed objective") {
-		t.Error("the worker's system prompt lacks the routed brief's objective")
-	}
+	must.NotEmpty(reqs, "the model received no requests")
+	check.Contains(reqs[0].Messages[0].Content, "routed objective",
+		"the worker's system prompt lacks the routed brief's objective")
 }
 
-// TestDispatchWorkerHonoursProgressGate: the external_web row hands its gate
+// TestDispatchWorker_HonoursProgressGate: the external_web row hands its gate
 // to the worker loop, so a released gate or no gate delivers the report, and
 // a held gate drops it at the progress deadline without changing the
 // Finding.
-func TestDispatchWorkerHonoursProgressGate(t *testing.T) {
+func TestDispatchWorker_HonoursProgressGate(t *testing.T) {
 	released := make(chan struct{})
 	close(released)
 	for _, tt := range []struct {
@@ -79,6 +73,7 @@ func TestDispatchWorkerHonoursProgressGate(t *testing.T) {
 		{"no gate", nil, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			searchSrv := searchtest.NewFakeServer(nil)
 			defer searchSrv.Close()
 			modelSrv := modeltest.NewFakeServer(finalReply("gated answer"))
@@ -94,20 +89,17 @@ func TestDispatchWorkerHonoursProgressGate(t *testing.T) {
 				progressTimeoutOverride: 20 * time.Millisecond,
 			}, Brief{Objective: "gated objective"}, tt.gate)
 
-			if finding.Status != types.StatusCompleted || finding.Text != "gated answer" {
-				t.Fatalf("finding = %+v, want the completed answer", finding)
-			}
-			if got := len(log.snapshot()); got != tt.calls {
-				t.Errorf("progress deliveries = %d, want %d", got, tt.calls)
-			}
+			must.Equal(types.StatusCompleted, finding.Status)
+			must.Equal("gated answer", finding.Text)
+			must.Len(log.snapshot(), tt.calls, "progress deliveries")
 		})
 	}
 }
 
-// TestRouteRefusesEveryOtherTarget: anything without a row is refused with
+// TestRoute_RefusesEveryOtherTarget: anything without a row is refused with
 // a typed error, including every name the managed deep-research agent goes
 // by, the other agents, near-misses of external_web, and the empty target.
-func TestRouteRefusesEveryOtherTarget(t *testing.T) {
+func TestRoute_RefusesEveryOtherTarget(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		target Target
@@ -129,50 +121,38 @@ func TestRouteRefusesEveryOtherTarget(t *testing.T) {
 		{"empty", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			dispatch, err := liveRoutes().route(tt.target)
-			if dispatch != nil {
-				t.Error("route returned a dispatch for a refused target")
-			}
-			if !errors.Is(err, ErrUnroutableTarget) {
-				t.Fatalf("err = %v, want ErrUnroutableTarget", err)
-			}
+			must.Nil(dispatch, "route returned a dispatch for a refused target")
+			must.ErrorIs(err, ErrUnroutableTarget)
 			var unroutable *UnroutableTargetError
-			if !errors.As(err, &unroutable) {
-				t.Fatalf("err = %T, want *UnroutableTargetError", err)
-			}
-			if unroutable.Target != tt.target {
-				t.Errorf("error target = %q, want %q", unroutable.Target, tt.target)
-			}
-			if !slices.Equal(unroutable.Routable, []Target{TargetExternalWeb}) {
-				t.Errorf("error routable = %v, want [%s]", unroutable.Routable, TargetExternalWeb)
-			}
-			if !strings.Contains(err.Error(), string(TargetExternalWeb)) {
-				t.Errorf("error %q does not name the routable target", err)
-			}
+			must.ErrorAs(err, &unroutable)
+			must.Equal(tt.target, unroutable.Target, "error target")
+			must.Equal([]Target{TargetExternalWeb}, unroutable.Routable, "error routable")
+			must.ErrorContains(err, string(TargetExternalWeb), "the error does not name the routable target")
 		})
 	}
 }
 
-// TestUnroutableTargetErrorBoundsEcho: a long target is cut in the message
+// TestUnroutableTargetError_BoundsEcho: a long target is cut in the message
 // at a rune boundary.
-func TestUnroutableTargetErrorBoundsEcho(t *testing.T) {
-	long := Target(strings.Repeat("é", 10*maxTargetEchoRunes))
-	_, err := liveRoutes().route(long)
-	if err == nil {
-		t.Fatal("route accepted an unknown target")
-	}
+func TestUnroutableTargetError_BoundsEcho(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+	longTarget := Target(strings.Repeat("é", 10*maxTargetEchoRunes))
+	_, err := liveRoutes().route(longTarget)
+	must.Error(err, "route accepted an unknown target")
 	msg := err.Error()
-	if strings.Contains(msg, strings.Repeat("é", maxTargetEchoRunes+1)) {
-		t.Errorf("the message echoes more than %d runes of the target: %q", maxTargetEchoRunes, msg)
-	}
-	if !utf8.ValidString(msg) {
-		t.Errorf("the message is not valid UTF-8: %q", msg)
-	}
+	check.NotContains(msg, strings.Repeat("é", maxTargetEchoRunes+1),
+		"the message echoes more than %d runes of the target", maxTargetEchoRunes)
+	check.True(utf8.ValidString(msg), "the message is not valid UTF-8")
 }
 
-// TestRouterAcceptsAnAddedRow: a new target is one row in the same table,
+// TestRouter_AcceptsAddedRow: a new target is one row in the same table,
 // routed by the same lookup, with no change to the existing row.
-func TestRouterAcceptsAnAddedRow(t *testing.T) {
+func TestRouter_AcceptsAddedRow(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const internal Target = "internal_source"
 	var called Brief
 	routes := liveRoutes()
@@ -182,17 +162,10 @@ func TestRouterAcceptsAnAddedRow(t *testing.T) {
 	}
 
 	dispatch, err := routes.route(internal)
-	if err != nil {
-		t.Fatalf("route(%s): %v", internal, err)
-	}
+	must.NoError(err)
 	dispatch(context.Background(), WorkerDeps{}, Brief{Objective: "internal"}, nil)
-	if called.Objective != "internal" {
-		t.Errorf("the added row did not receive the brief: %+v", called)
-	}
-	if got := routes.targets(); !slices.Equal(got, []Target{TargetExternalWeb, internal}) {
-		t.Errorf("targets = %v", got)
-	}
-	if _, err := liveRoutes().route(internal); !errors.Is(err, ErrUnroutableTarget) {
-		t.Errorf("a fresh live table routes the added target: %v", err)
-	}
+	check.Equal("internal", called.Objective, "the added row did not receive the brief")
+	check.Equal([]Target{TargetExternalWeb, internal}, routes.targets(), "targets")
+	_, err = liveRoutes().route(internal)
+	check.ErrorIs(err, ErrUnroutableTarget, "a fresh live table routes the added target")
 }

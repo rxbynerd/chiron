@@ -9,10 +9,12 @@ import (
 	"testing"
 	"testing/iotest"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
-func TestReadAllBounded(t *testing.T) {
+func TestReadAllBounded_ReturnsWholeBodyOrBoundError(t *testing.T) {
 	tests := []struct {
 		name    string
 		body    string
@@ -30,50 +32,37 @@ func TestReadAllBounded(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			data, err := httpx.ReadAllBounded(strings.NewReader(tt.body), tt.limit)
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("ReadAllBounded = %v, want success", err)
-				}
-				if string(data) != tt.body {
-					t.Errorf("ReadAllBounded = %q, want %q", data, tt.body)
-				}
+				must.NoError(err)
+				must.Equal(tt.body, string(data))
 				return
 			}
-			if !errors.Is(err, httpx.ErrBodyTooLarge) {
-				t.Fatalf("ReadAllBounded = %v, want ErrBodyTooLarge", err)
-			}
-			if err.Error() != tt.wantErr {
-				t.Errorf("ReadAllBounded error = %q, want %q", err, tt.wantErr)
-			}
-			if data != nil {
-				t.Errorf("ReadAllBounded returned %d bytes alongside its error", len(data))
-			}
+			must.ErrorIs(err, httpx.ErrBodyTooLarge)
+			must.EqualError(err, tt.wantErr)
+			must.Nil(data)
 		})
 	}
 }
 
-func TestReadAllBoundedConsumesAtMostOneByteOverTheBound(t *testing.T) {
-	src := bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20))
-	if _, err := httpx.ReadAllBounded(src, 64); !errors.Is(err, httpx.ErrBodyTooLarge) {
-		t.Fatalf("ReadAllBounded = %v, want ErrBodyTooLarge", err)
-	}
-	if consumed := int64(1<<20) - int64(src.Len()); consumed != 65 {
-		t.Errorf("consumed %d bytes, want 65", consumed)
-	}
+func TestReadAllBounded_ConsumesAtMostOneByteOverBound(t *testing.T) {
+	must := require.New(t)
+	const bound = 64
+	const total = 1 << 20
+	src := bytes.NewReader(bytes.Repeat([]byte("x"), total))
+	_, err := httpx.ReadAllBounded(src, bound)
+	must.ErrorIs(err, httpx.ErrBodyTooLarge)
+	consumed := int64(total) - int64(src.Len())
+	must.Equal(int64(bound+1), consumed)
 }
 
-func TestReadAllBoundedPropagatesReadError(t *testing.T) {
+func TestReadAllBounded_PropagatesReadError(t *testing.T) {
+	must := require.New(t)
 	boom := errors.New("connection reset")
 	r := io.MultiReader(strings.NewReader("partial"), iotest.ErrReader(boom))
 	data, err := httpx.ReadAllBounded(r, 1024)
-	if !errors.Is(err, boom) {
-		t.Fatalf("ReadAllBounded = %v, want the reader's error", err)
-	}
-	if errors.Is(err, httpx.ErrBodyTooLarge) {
-		t.Errorf("a read error must not match ErrBodyTooLarge: %v", err)
-	}
-	if data != nil {
-		t.Errorf("ReadAllBounded returned %d bytes alongside its error", len(data))
-	}
+	must.ErrorIs(err, boom)
+	must.NotErrorIs(err, httpx.ErrBodyTooLarge)
+	must.Nil(data)
 }

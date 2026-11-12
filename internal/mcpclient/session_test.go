@@ -3,7 +3,6 @@ package mcpclient_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,22 +14,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/mcpclient"
 	"github.com/rxbynerd/chiron/internal/mcpclient/mcpclienttest"
 )
 
-// decodeRPC reads and decodes one JSON-RPC request body in full.
+// decodeRPC reads and decodes one JSON-RPC request body in full. It runs on
+// server goroutines, so it reports with assert rather than require.
 func decodeRPC(t *testing.T, r *http.Request) rpcRequest {
 	t.Helper()
+	check := assert.New(t)
 	var req rpcRequest
 	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Errorf("reading request body: %v", err)
+	if !check.NoError(err, "reading request body") {
 		return req
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Errorf("decoding request body: %v", err)
-	}
+	check.NoError(json.Unmarshal(body, &req), "decoding request body")
 	return req
 }
 
@@ -53,10 +54,11 @@ func writeToolText(w http.ResponseWriter, id int, text string) {
 // awaitSignal fails the test if ch is not closed within five seconds.
 func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 	t.Helper()
+	must := require.New(t)
 	select {
 	case <-ch:
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
+		must.Fail("timed out waiting for " + what)
 	}
 }
 
@@ -64,11 +66,12 @@ func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 // within five seconds.
 func awaitErr(t *testing.T, errc <-chan error, what string) error {
 	t.Helper()
+	must := require.New(t)
 	select {
 	case err := <-errc:
 		return err
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for %s", what)
+		must.Fail("timed out waiting for " + what)
 		return nil
 	}
 }
@@ -94,7 +97,7 @@ func (d *deleteLog) sessions() []string {
 	return slices.Clone(d.ids)
 }
 
-func TestCallToolReusesSession(t *testing.T) {
+func TestCallTool_ReusesSession(t *testing.T) {
 	// One handshake serves every call on a Client, and every request id is
 	// new: MCP forbids reusing one within a session.
 	tests := []struct {
@@ -107,50 +110,43 @@ func TestCallToolReusesSession(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := mcpclienttest.NewFakeServer(textResult("ok"), tt.opts...)
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
 			for range 3 {
-				if _, err := call(c); err != nil {
-					t.Fatalf("CallTool: %v", err)
-				}
+				_, err := call(c)
+				must.NoError(err)
 			}
-			if n := fake.InitializeCount(); n != 1 {
-				t.Errorf("initialize count = %d, want 1", n)
-			}
-			if n := fake.ToolCallCount(); n != 3 {
-				t.Errorf("tools/call count = %d, want 3", n)
-			}
-			if n := fake.DeleteCount(); n != 0 {
-				t.Errorf("DELETE count = %d before Close, want 0", n)
-			}
+			must.Equal(1, fake.InitializeCount())
+			must.Equal(3, fake.ToolCallCount())
+			must.Zero(fake.DeleteCount(), "DELETE count before Close")
+
 			reqs := fake.Requests()
-			if len(reqs) != 5 {
-				t.Fatalf("request count = %d, want 5 (initialize, initialized, three tools/call)", len(reqs))
-			}
+			must.Len(reqs, 5, "want initialize, initialized, and three tools/call requests")
 			for i, r := range reqs[1:] {
-				if r.SessionID != tt.session || r.ProtocolVersion != mcpclient.ProtocolVersion {
-					t.Errorf("request[%d] session %q version %q, want %q and %q", i+1, r.SessionID, r.ProtocolVersion, tt.session, mcpclient.ProtocolVersion)
-				}
+				must.Equal(tt.session, r.SessionID, "request[%d] session", i+1)
+				must.Equal(mcpclient.ProtocolVersion, r.ProtocolVersion, "request[%d] protocol version", i+1)
 			}
 			seen := map[int]bool{}
 			for _, r := range reqs {
 				if r.Method == "notifications/initialized" {
 					continue
 				}
-				if r.ID == 0 || seen[r.ID] {
-					t.Errorf("%s request id %d is missing or reused", r.Method, r.ID)
-				}
+				must.NotZero(r.ID, "%s request id", r.Method)
+				must.NotContains(seen, r.ID, "%s request id %d is reused", r.Method, r.ID)
 				seen[r.ID] = true
 			}
 		})
 	}
 }
 
-func TestCallToolConcurrentCallsShareOneHandshake(t *testing.T) {
+func TestCallTool_ConcurrentCallsShareOneHandshake(t *testing.T) {
 	// Callers arriving while the handshake is in flight wait for it rather
 	// than start their own.
+	must := require.New(t)
+	check := assert.New(t)
 	const callers = 8
 	var inits, toolCalls atomic.Int32
 	arrived := make(chan struct{})
@@ -189,37 +185,28 @@ func TestCallToolConcurrentCallsShareOneHandshake(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	releaseOnce()
 	for range callers {
-		if err := <-errs; err != nil {
-			t.Errorf("CallTool: %v", err)
-		}
+		must.NoError(<-errs)
 	}
-	if n := inits.Load(); n != 1 {
-		t.Errorf("initialize count = %d, want 1", n)
-	}
-	if n := toolCalls.Load(); n != callers {
-		t.Errorf("tools/call count = %d, want %d", n, callers)
-	}
+	check.EqualValues(1, inits.Load())
+	check.EqualValues(callers, toolCalls.Load())
 }
 
-func TestCallToolReinitialisesAfterSessionExpiry(t *testing.T) {
+func TestCallTool_ReinitialisesAfterSessionExpiry(t *testing.T) {
 	// A 404 on a request bearing the session id means the server dropped the
 	// session without processing the call: one re-initialisation, one resend,
 	// and no DELETE for the session that is already gone.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-x"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("first CallTool: %v", err)
-	}
+	_, err := call(c)
+	must.NoError(err)
 	fake.ExpireSession()
 	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool after expiry: %v", err)
-	}
-	if mcpclient.FirstText(got.Content) != "ok" {
-		t.Errorf("result = %+v, want the scripted text", got)
-	}
+	must.NoError(err)
+	check.Equal("ok", mcpclient.FirstText(got.Content), "result %+v", got)
 
 	want := []struct{ method, session string }{
 		{"initialize", ""},
@@ -231,37 +218,33 @@ func TestCallToolReinitialisesAfterSessionExpiry(t *testing.T) {
 		{"tools/call", "sess-x-2"},
 	}
 	reqs := fake.Requests()
-	if len(reqs) != len(want) {
-		t.Fatalf("request count = %d, want %d: %+v", len(reqs), len(want), reqs)
-	}
+	must.Len(reqs, len(want), "requests: %+v", reqs)
 	for i, w := range want {
-		if reqs[i].Method != w.method || reqs[i].SessionID != w.session {
-			t.Errorf("request[%d] = %q on %q, want %q on %q", i, reqs[i].Method, reqs[i].SessionID, w.method, w.session)
-		}
+		check.Equal(w.method, reqs[i].Method, "request[%d] method", i)
+		check.Equal(w.session, reqs[i].SessionID, "request[%d] session", i)
 	}
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if n := fake.DeleteCount(); n != 1 {
-		t.Errorf("DELETE count = %d, want 1", n)
-	}
-	if last := fake.Requests()[len(want)]; last.HTTPMethod != http.MethodDelete || last.SessionID != "sess-x-2" {
-		t.Errorf("last request = %s on %q, want a DELETE of the fresh session", last.HTTPMethod, last.SessionID)
-	}
+	must.NoError(c.Close())
+	check.Equal(1, fake.DeleteCount())
+	all := fake.Requests()
+	must.Greater(len(all), len(want), "no DELETE request was recorded")
+	last := all[len(want)]
+	check.Equal(http.MethodDelete, last.HTTPMethod, "last request method")
+	check.Equal("sess-x-2", last.SessionID, "last request session")
 }
 
-func TestCallToolConcurrentCallsReinitialiseOnce(t *testing.T) {
+func TestCallTool_ConcurrentCallsReinitialiseOnce(t *testing.T) {
 	// Callers that all find the session gone share one re-initialisation; a
 	// caller still holding the stale session never discards the fresh one.
+	must := require.New(t)
+	check := assert.New(t)
 	const callers = 8
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-old"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("first CallTool: %v", err)
-	}
+	_, err := call(c)
+	must.NoError(err)
 	fake.ExpireSession()
 
 	var wg sync.WaitGroup
@@ -275,23 +258,21 @@ func TestCallToolConcurrentCallsReinitialiseOnce(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		if err != nil {
-			t.Errorf("CallTool: %v", err)
-		}
+		must.NoError(err)
 	}
-	if n := fake.InitializeCount(); n != 2 {
-		t.Errorf("initialize count = %d, want 2 (the first session and one re-initialisation)", n)
-	}
+	check.Equal(2, fake.InitializeCount(), "the first session and one re-initialisation")
 	// Each caller sends its call once, plus once more if it held the expired
 	// session; at least one did.
-	if n := fake.ToolCallCount(); n < callers+2 || n > 2*callers+1 {
-		t.Errorf("tools/call count = %d, want between %d and %d", n, callers+2, 2*callers+1)
-	}
+	n := fake.ToolCallCount()
+	check.GreaterOrEqual(n, callers+2)
+	check.LessOrEqual(n, 2*callers+1)
 }
 
-func TestCallToolRepeatedSessionExpiryFails(t *testing.T) {
+func TestCallTool_RepeatedSessionExpiryFails(t *testing.T) {
 	// A second 404 in one call fails it rather than looping, and the session
 	// is dropped so the next call starts afresh, under the same bound.
+	must := require.New(t)
+	check := assert.New(t)
 	var inits, toolCalls, deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -315,25 +296,15 @@ func TestCallToolRepeatedSessionExpiryFails(t *testing.T) {
 	c := newClient(t, server.URL)
 	for i := int32(1); i <= 2; i++ {
 		_, err := call(c)
-		if err == nil || !strings.Contains(err.Error(), "tools/call failed: HTTP 404") {
-			t.Fatalf("call %d error = %v, want the tools/call 404", i, err)
-		}
-		if strings.Contains(err.Error(), "sess-gone") {
-			t.Errorf("error carries the session id: %v", err)
-		}
-		if n := inits.Load(); n != 2*i {
-			t.Errorf("after call %d initialize count = %d, want %d", i, n, 2*i)
-		}
-		if n := toolCalls.Load(); n != 2*i {
-			t.Errorf("after call %d tools/call count = %d, want %d", i, n, 2*i)
-		}
+		must.ErrorContains(err, "tools/call failed: HTTP 404", "call %d", i)
+		check.NotContains(err.Error(), "sess-gone", "error carries the session id")
+		check.Equal(2*i, inits.Load(), "after call %d initialize count", i)
+		check.Equal(2*i, toolCalls.Load(), "after call %d tools/call count", i)
 	}
-	if n := deletes.Load(); n != 0 {
-		t.Errorf("DELETE count = %d, want 0 for sessions the server already dropped", n)
-	}
+	check.Zero(deletes.Load(), "DELETE count for sessions the server already dropped")
 }
 
-func TestCallToolFailedReinitialisationAfterSessionExpiry(t *testing.T) {
+func TestCallTool_FailedReinitialisationAfterSessionExpiry(t *testing.T) {
 	// When the handshake after a session 404 fails, CallTool returns that
 	// failure rather than the 404, does not re-send the call, and ends any
 	// session the failed handshake was issued. The next call starts afresh.
@@ -344,7 +315,7 @@ func TestCallToolFailedReinitialisationAfterSessionExpiry(t *testing.T) {
 		wantDeletes []string
 	}{
 		{
-			name:      "HTTP 500",
+			name:      "http 500",
 			retryInit: func(w http.ResponseWriter, _ int) { w.WriteHeader(http.StatusInternalServerError) },
 			wantErr:   "initialize failed: HTTP 500",
 		},
@@ -360,6 +331,7 @@ func TestCallToolFailedReinitialisationAfterSessionExpiry(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var deletes deleteLog
 			var inits, toolCalls atomic.Int32
 			var expired atomic.Bool
@@ -391,32 +363,23 @@ func TestCallToolFailedReinitialisationAfterSessionExpiry(t *testing.T) {
 			defer server.Close()
 
 			c := newClient(t, server.URL)
-			if _, err := call(c); err != nil {
-				t.Fatalf("first CallTool: %v", err)
-			}
-			expired.Store(true)
 			_, err := call(c)
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || strings.Contains(err.Error(), "HTTP 404") {
-				t.Fatalf("CallTool after expiry error = %v, want the re-initialisation's %q", err, tt.wantErr)
-			}
-			if n := toolCalls.Load(); n != 2 {
-				t.Errorf("tools/call count = %d, want 2; the call is not re-sent after a failed re-initialisation", n)
-			}
-			if got := deletes.sessions(); !slices.Equal(got, tt.wantDeletes) {
-				t.Errorf("DELETEs = %q, want %q", got, tt.wantDeletes)
-			}
+			must.NoError(err, "first CallTool")
+			expired.Store(true)
+			_, err = call(c)
+			must.ErrorContains(err, tt.wantErr)
+			must.NotContains(err.Error(), "HTTP 404", "the expired session's 404 must not be reported")
+			must.EqualValues(2, toolCalls.Load(), "the call is not re-sent after a failed re-initialisation")
+			must.Equal(tt.wantDeletes, deletes.sessions())
 
-			if _, err := call(c); err != nil {
-				t.Fatalf("CallTool after the failed re-initialisation: %v", err)
-			}
-			if n := inits.Load(); n != 3 {
-				t.Errorf("initialize count = %d, want 3", n)
-			}
+			_, err = call(c)
+			must.NoError(err, "CallTool after the failed re-initialisation")
+			must.EqualValues(3, inits.Load())
 		})
 	}
 }
 
-func TestCallToolNotFoundWithoutSessionNotRetried(t *testing.T) {
+func TestCallTool_NotFoundWithoutSessionNotRetried(t *testing.T) {
 	// A 404 on a request that carried no session id is an ordinary failure:
 	// nothing expired, so nothing is re-sent.
 	tests := []struct {
@@ -430,6 +393,7 @@ func TestCallToolNotFoundWithoutSessionNotRetried(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var inits, toolCalls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				req := decodeRPC(t, r)
@@ -451,20 +415,14 @@ func TestCallToolNotFoundWithoutSessionNotRetried(t *testing.T) {
 			defer server.Close()
 
 			_, err := call(newClient(t, server.URL))
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error = %v, want %q", err, tt.wantErr)
-			}
-			if n := inits.Load(); n != 1 {
-				t.Errorf("initialize count = %d, want 1", n)
-			}
-			if n := toolCalls.Load(); n != tt.wantToolCalls {
-				t.Errorf("tools/call count = %d, want %d", n, tt.wantToolCalls)
-			}
+			must.ErrorContains(err, tt.wantErr)
+			must.EqualValues(1, inits.Load())
+			must.Equal(tt.wantToolCalls, toolCalls.Load())
 		})
 	}
 }
 
-func TestCallToolFailedHandshakeNotCached(t *testing.T) {
+func TestCallTool_FailedHandshakeNotCached(t *testing.T) {
 	// A failed handshake is not kept: the next call starts a new one. A
 	// session issued by the failed handshake is ended.
 	tests := []struct {
@@ -480,12 +438,12 @@ func TestCallToolFailedHandshakeNotCached(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
 			var inits, notifies, deletes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodDelete {
-					if r.Header.Get("Mcp-Session-Id") != "sess-1" {
-						t.Errorf("DELETE of %q, want the failed handshake's session", r.Header.Get("Mcp-Session-Id"))
-					}
+					check.Equal("sess-1", r.Header.Get("Mcp-Session-Id"), "DELETE of the failed handshake's session")
 					deletes.Add(1)
 					w.WriteHeader(http.StatusNoContent)
 					return
@@ -519,25 +477,21 @@ func TestCallToolFailedHandshakeNotCached(t *testing.T) {
 			defer server.Close()
 
 			c := newClient(t, server.URL)
-			if _, err := call(c); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("first call error = %v, want %q", err, tt.wantErr)
-			}
-			if _, err := call(c); err != nil {
-				t.Fatalf("second call: %v", err)
-			}
-			if n := inits.Load(); n != 2 {
-				t.Errorf("initialize count = %d, want 2", n)
-			}
-			if n := deletes.Load(); n != tt.wantDeletes {
-				t.Errorf("DELETE count = %d, want %d", n, tt.wantDeletes)
-			}
+			_, err := call(c)
+			must.ErrorContains(err, tt.wantErr, "first call")
+			_, err = call(c)
+			must.NoError(err, "second call")
+			must.EqualValues(2, inits.Load())
+			must.Equal(tt.wantDeletes, deletes.Load())
 		})
 	}
 }
 
-func TestCallToolConcurrentCallersShareHandshakeFailure(t *testing.T) {
+func TestCallTool_ConcurrentCallersShareHandshakeFailure(t *testing.T) {
 	// Waiters share the failure of the handshake they joined instead of each
 	// starting another; the failure is not kept for later calls.
+	must := require.New(t)
+	check := assert.New(t)
 	const callers = 6
 	var inits atomic.Int32
 	arrived := make(chan struct{})
@@ -582,9 +536,7 @@ func TestCallToolConcurrentCallersShareHandshakeFailure(t *testing.T) {
 			continue
 		}
 		failed++
-		if !strings.Contains(err.Error(), "initialize failed: HTTP 500") {
-			t.Errorf("CallTool error = %v, want the shared initialize failure", err)
-		}
+		must.ErrorContains(err, "initialize failed: HTTP 500")
 	}
 	// Callers that joined the failing handshake share its error; any that
 	// arrived after it ended started the one further handshake.
@@ -592,24 +544,19 @@ func TestCallToolConcurrentCallersShareHandshakeFailure(t *testing.T) {
 	if failed < callers {
 		wantInits = 2
 	}
-	if failed == 0 {
-		t.Error("no caller saw the failed handshake")
-	}
-	if n := inits.Load(); n != wantInits {
-		t.Errorf("initialize count = %d, want %d with %d of %d callers failed", n, wantInits, failed, callers)
-	}
+	check.NotZero(failed, "no caller saw the failed handshake")
+	check.Equal(wantInits, inits.Load(), "with %d of %d callers failed", failed, callers)
 
-	if _, err := call(c); err != nil {
-		t.Fatalf("a call after the failed handshake: %v", err)
-	}
-	if n := inits.Load(); n != 2 {
-		t.Errorf("initialize count = %d, want 2", n)
-	}
+	_, err := call(c)
+	must.NoError(err, "a call after the failed handshake")
+	check.Equal(int32(2), inits.Load())
 }
 
-func TestCallToolWaiterHonoursOwnContext(t *testing.T) {
+func TestCallTool_WaiterHonoursOwnContext(t *testing.T) {
 	// A caller waiting on another's handshake gives up at its own deadline
 	// and leaves that handshake running.
+	must := require.New(t)
+	check := assert.New(t)
 	var inits atomic.Int32
 	arrived := make(chan struct{})
 	release := make(chan struct{})
@@ -644,25 +591,19 @@ func TestCallToolWaiterHonoursOwnContext(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	_, err := c.CallTool(ctx, "lookup", nil)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("waiter error = %v, want its own deadline", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("waiter took %s; it should give up at its 50ms deadline", elapsed)
-	}
+	must.ErrorIs(err, context.DeadlineExceeded, "the waiter should fail at its own deadline")
+	check.LessOrEqual(time.Since(start), time.Second, "the waiter should give up at its 50ms deadline")
 
 	releaseOnce()
-	if err := <-leaderErr; err != nil {
-		t.Errorf("leader: %v", err)
-	}
-	if n := inits.Load(); n != 1 {
-		t.Errorf("initialize count = %d, want 1", n)
-	}
+	must.NoError(<-leaderErr, "leader")
+	check.EqualValues(1, inits.Load())
 }
 
-func TestCallToolLeaderCancellationDoesNotFailWaiters(t *testing.T) {
+func TestCallTool_LeaderCancellationDoesNotFailWaiters(t *testing.T) {
 	// A handshake that fails only because its leader's deadline passed is not
 	// shared: a waiter with time left runs the handshake itself.
+	must := require.New(t)
+	check := assert.New(t)
 	var inits atomic.Int32
 	arrived := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -696,20 +637,17 @@ func TestCallToolLeaderCancellationDoesNotFailWaiters(t *testing.T) {
 	}()
 	awaitSignal(t, arrived, "the leader's initialize")
 
-	if _, err := call(c); err != nil {
-		t.Fatalf("waiter should run its own handshake after the leader's deadline, got: %v", err)
-	}
-	if err := <-leaderErr; err == nil {
-		t.Error("leader succeeded, want a failure at its deadline")
-	}
-	if n := inits.Load(); n != 2 {
-		t.Errorf("initialize count = %d, want 2", n)
-	}
+	_, err := call(c)
+	must.NoError(err, "waiter should run its own handshake after the leader's deadline")
+	must.Error(<-leaderErr, "leader should fail at its deadline")
+	check.EqualValues(2, inits.Load())
 }
 
-func TestCallToolCancelledHandshakeEndsSession(t *testing.T) {
+func TestCallTool_CancelledHandshakeEndsSession(t *testing.T) {
 	// A handshake cut short by its caller's context after initialize issued a
 	// session still ends that session: the DELETE runs on its own context.
+	must := require.New(t)
+	check := assert.New(t)
 	var deletes deleteLog
 	notifying := make(chan struct{})
 	notifyOnce := sync.OnceFunc(func() { close(notifying) })
@@ -730,7 +668,7 @@ func TestCallToolCancelledHandshakeEndsSession(t *testing.T) {
 			case <-release:
 			}
 		default:
-			t.Errorf("%s sent after the handshake was cancelled", req.Method)
+			check.Failf("unexpected request", "%s sent after the handshake was cancelled", req.Method)
 		}
 	}))
 	defer server.Close()
@@ -749,52 +687,37 @@ func TestCallToolCancelledHandshakeEndsSession(t *testing.T) {
 	cancel()
 
 	err := awaitErr(t, errc, "the cancelled CallTool")
-	if err == nil || !strings.Contains(err.Error(), "context canceled") {
-		t.Fatalf("CallTool error = %v, want the cancellation", err)
-	}
-	if got := deletes.sessions(); !slices.Equal(got, []string{"sess-cut"}) {
-		t.Errorf("DELETEs = %q, want one for the cancelled handshake's session", got)
-	}
+	must.ErrorContains(err, "context canceled")
+	must.Equal([]string{"sess-cut"}, deletes.sessions(), "DELETEs for the cancelled handshake's session")
 }
 
-func TestCloseEndsSessionOnce(t *testing.T) {
+func TestClose_EndsSessionOnce(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-close"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
+	_, err := call(c)
+	must.NoError(err, "CallTool")
 	for i := range 2 {
-		if err := c.Close(); err != nil {
-			t.Errorf("Close #%d: %v", i+1, err)
-		}
+		must.NoError(c.Close(), "Close #%d", i+1)
 	}
-	if n := fake.DeleteCount(); n != 1 {
-		t.Fatalf("DELETE count = %d, want 1", n)
-	}
+	must.Equal(1, fake.DeleteCount(), "DELETE count")
 	end := fake.Requests()[3]
-	if end.HTTPMethod != http.MethodDelete || end.SessionID != "sess-close" {
-		t.Errorf("request[3] = %s on %q, want the session DELETE", end.HTTPMethod, end.SessionID)
-	}
-	if end.Authorization != "Bearer "+testKey || end.ProtocolVersion != mcpclient.ProtocolVersion {
-		t.Errorf("DELETE Authorization %q version %q, want the bearer key and %q", end.Authorization, end.ProtocolVersion, mcpclient.ProtocolVersion)
-	}
+	check.Equal(http.MethodDelete, end.HTTPMethod, "request[3] method")
+	check.Equal("sess-close", end.SessionID, "request[3] session")
+	check.Equal("Bearer "+testKey, end.Authorization, "DELETE authorization")
+	check.Equal(mcpclient.ProtocolVersion, end.ProtocolVersion, "DELETE protocol version")
 
 	before := fake.CallCount()
-	_, err := call(c)
-	if !errors.Is(err, mcpclient.ErrClosed) {
-		t.Errorf("CallTool after Close = %v, want ErrClosed", err)
-	}
-	if err != nil && strings.Contains(err.Error(), "sess-close") {
-		t.Errorf("error carries the session id: %v", err)
-	}
-	if n := fake.CallCount(); n != before {
-		t.Errorf("CallTool after Close sent %d requests, want none", n-before)
-	}
+	_, err = call(c)
+	must.ErrorIs(err, mcpclient.ErrClosed, "CallTool after Close")
+	check.NotContains(err.Error(), "sess-close", "error carries the session id")
+	check.Equal(before, fake.CallCount(), "requests sent after Close")
 }
 
-func TestCloseWithoutSessionSendsNoDelete(t *testing.T) {
+func TestClose_WithoutSessionSendsNoDelete(t *testing.T) {
 	tests := []struct {
 		name  string
 		opts  []mcpclienttest.FakeOption
@@ -805,31 +728,28 @@ func TestCloseWithoutSessionSendsNoDelete(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := mcpclienttest.NewFakeServer(textResult("ok"), tt.opts...)
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
 			for range tt.calls {
-				if _, err := call(c); err != nil {
-					t.Fatalf("CallTool: %v", err)
-				}
+				_, err := call(c)
+				must.NoError(err, "CallTool")
 			}
-			if err := c.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
-			if n := fake.DeleteCount(); n != 0 {
-				t.Errorf("DELETE count = %d, want 0", n)
-			}
-			if _, err := call(c); !errors.Is(err, mcpclient.ErrClosed) {
-				t.Errorf("CallTool after Close = %v, want ErrClosed", err)
-			}
+			must.NoError(c.Close(), "Close")
+			must.Zero(fake.DeleteCount(), "DELETE count after Close")
+			_, err := call(c)
+			must.ErrorIs(err, mcpclient.ErrClosed, "CallTool after Close")
 		})
 	}
 }
 
-func TestCloseBoundedByRequestTimeout(t *testing.T) {
+func TestClose_BoundedByRequestTimeout(t *testing.T) {
 	// Close takes no context, so its DELETE runs on a fresh one bounded by
 	// RequestTimeout: a server that never answers cannot hang shutdown.
+	must := require.New(t)
+	check := assert.New(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			select {
@@ -851,21 +771,18 @@ func TestCloseBoundedByRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	c := newClient(t, server.URL, func(o *mcpclient.Options) { o.RequestTimeout = 200 * time.Millisecond })
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
+	_, err := call(c)
+	must.NoError(err, "CallTool")
 	start := time.Now()
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Errorf("Close took %s; the 200ms RequestTimeout should bound its DELETE", elapsed)
-	}
+	must.NoError(c.Close(), "Close")
+	check.LessOrEqual(time.Since(start), 1500*time.Millisecond, "the 200ms RequestTimeout should bound the DELETE")
 }
 
-func TestCloseConcurrentWithCallTool(t *testing.T) {
+func TestClose_ConcurrentWithCallTool(t *testing.T) {
 	// Close may race any number of calls: each call succeeds or fails with
 	// ErrClosed, and every session established is ended exactly once.
+	must := require.New(t)
+	check := assert.New(t)
 	const callers = 8
 	fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID("sess-race"))
 	defer fake.Close()
@@ -875,30 +792,30 @@ func TestCloseConcurrentWithCallTool(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			for range 5 {
-				if _, err := call(c); err != nil && !errors.Is(err, mcpclient.ErrClosed) {
-					t.Errorf("CallTool = %v, want success or ErrClosed", err)
+				_, err := call(c)
+				if err != nil {
+					check.ErrorIs(err, mcpclient.ErrClosed, "CallTool should succeed or fail with ErrClosed")
 				}
 			}
 		})
 	}
 	wg.Go(func() {
-		if err := c.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
+		check.NoError(c.Close(), "Close")
 	})
 	wg.Wait()
 
-	if _, err := call(c); !errors.Is(err, mcpclient.ErrClosed) {
-		t.Errorf("CallTool after Close = %v, want ErrClosed", err)
-	}
-	if inits, deletes := fake.InitializeCount(), fake.DeleteCount(); inits != deletes || inits > 1 {
-		t.Errorf("initialize count %d, DELETE count %d; want at most one session, ended exactly once", inits, deletes)
-	}
+	_, err := call(c)
+	must.ErrorIs(err, mcpclient.ErrClosed, "CallTool after Close")
+	inits, deletes := fake.InitializeCount(), fake.DeleteCount()
+	check.Equal(inits, deletes, "every session should be ended exactly once")
+	check.LessOrEqual(inits, 1, "at most one session should be initialized")
 }
 
-func TestCloseDuringHandshakeEndsLateSession(t *testing.T) {
+func TestClose_DuringHandshakeEndsLateSession(t *testing.T) {
 	// A handshake that completes after Close has returned yields ErrClosed,
 	// not a tool result, and the session it was issued is ended at once.
+	must := require.New(t)
+	check := assert.New(t)
 	var deletes deleteLog
 	var toolCalls atomic.Int32
 	arrived := make(chan struct{})
@@ -933,26 +850,17 @@ func TestCloseDuringHandshakeEndsLateSession(t *testing.T) {
 		errc <- err
 	}()
 	awaitSignal(t, arrived, "the initialize")
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if got := deletes.sessions(); len(got) != 0 {
-		t.Fatalf("Close sent DELETEs %q before any session was issued, want none", got)
-	}
+	must.NoError(c.Close(), "Close")
+	must.Empty(deletes.sessions(), "DELETEs before any session was issued")
 
 	releaseOnce()
-	if err := awaitErr(t, errc, "the CallTool racing Close"); !errors.Is(err, mcpclient.ErrClosed) {
-		t.Errorf("CallTool = %v, want ErrClosed", err)
-	}
-	if n := toolCalls.Load(); n != 0 {
-		t.Errorf("tools/call count = %d, want 0 after Close", n)
-	}
-	if got := deletes.sessions(); !slices.Equal(got, []string{"sess-late"}) {
-		t.Errorf("DELETEs = %q, want one for the session issued after Close", got)
-	}
+	err := awaitErr(t, errc, "the CallTool racing Close")
+	must.ErrorIs(err, mcpclient.ErrClosed, "CallTool racing Close")
+	check.Zero(toolCalls.Load(), "tools/call count after Close")
+	check.Equal([]string{"sess-late"}, deletes.sessions(), "DELETEs for the session issued after Close")
 }
 
-func TestSessionIDNeverInErrors(t *testing.T) {
+func TestCallTool_SessionIDNeverInErrors(t *testing.T) {
 	// The session id is redacted from any server-supplied text an error or a
 	// tool error carries.
 	const sessionID = "sess-secret-4f2a9c"
@@ -1005,6 +913,7 @@ func TestSessionIDNeverInErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodDelete {
 					w.WriteHeader(http.StatusNoContent)
@@ -1025,16 +934,13 @@ func TestSessionIDNeverInErrors(t *testing.T) {
 			defer server.Close()
 
 			_, err := call(newClient(t, server.URL))
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error = %v, want %q", err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), sessionID) {
-				t.Errorf("error carries the session id: %v", err)
-			}
+			must.ErrorContains(err, tt.wantErr)
+			must.NotContains(err.Error(), sessionID, "error carries the session id")
 		})
 	}
 
 	t.Run("tool error text", func(t *testing.T) {
+		must := require.New(t)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			req := decodeRPC(t, r)
 			switch req.Method {
@@ -1049,16 +955,14 @@ func TestSessionIDNeverInErrors(t *testing.T) {
 		defer server.Close()
 
 		got, err := call(newClient(t, server.URL))
-		if err != nil {
-			t.Fatalf("CallTool: %v", err)
-		}
-		if text := mcpclient.FirstText(got.Content); strings.Contains(text, sessionID) || !strings.Contains(text, "over quota") {
-			t.Errorf("tool error text = %q, want it kept with the session id redacted", text)
-		}
+		must.NoError(err, "CallTool")
+		text := mcpclient.FirstText(got.Content)
+		must.NotContains(text, sessionID, "tool error text should redact the session id")
+		must.Contains(text, "over quota", "tool error text should keep its message")
 	})
 }
 
-func TestCallToolInvalidSessionIDRefused(t *testing.T) {
+func TestCallTool_InvalidSessionIDRefused(t *testing.T) {
 	// A session id must be at most 1024 bytes of visible ASCII. Any other
 	// fails the handshake at initialize, and the id is never echoed: not on a
 	// later request, not in a DELETE, not in the error.
@@ -1073,57 +977,45 @@ func TestCallToolInvalidSessionIDRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID(tt.id))
 			defer fake.Close()
 
 			c := newClient(t, fake.URL())
 			for i := range 2 {
 				_, err := call(c)
-				if err == nil || !strings.Contains(err.Error(), "invalid Mcp-Session-Id") {
-					t.Fatalf("call %d error = %v, want the session id refused", i+1, err)
-				}
-				if strings.Contains(err.Error(), tt.id) {
-					t.Errorf("call %d error carries the session id", i+1)
-				}
+				must.ErrorContains(err, "invalid Mcp-Session-Id", "call %d", i+1)
+				must.NotContains(err.Error(), tt.id, "call %d error carries the session id", i+1)
 			}
-			if err := c.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
+			must.NoError(c.Close(), "Close")
 			for i, r := range fake.Requests() {
-				if r.HTTPMethod != http.MethodPost || r.Method != "initialize" || r.SessionID != "" {
-					t.Errorf("request[%d] = %s %q with session %.32q, want only initialize without a session", i, r.HTTPMethod, r.Method, r.SessionID)
-				}
+				must.Equal(http.MethodPost, r.HTTPMethod, "request[%d] HTTP method", i)
+				must.Equal("initialize", r.Method, "request[%d] method", i)
+				must.Empty(r.SessionID, "request[%d] session", i)
 			}
-			if n := fake.InitializeCount(); n != 2 {
-				t.Errorf("initialize count = %d, want 2", n)
-			}
+			must.Equal(2, fake.InitializeCount(), "initialize count")
 		})
 	}
 
 	t.Run("1024 bytes accepted", func(t *testing.T) {
+		must := require.New(t)
 		id := strings.Repeat("s", 1024)
 		fake := mcpclienttest.NewFakeServer(textResult("ok"), mcpclienttest.WithSessionID(id))
 		defer fake.Close()
 
 		c := newClient(t, fake.URL())
-		if _, err := call(c); err != nil {
-			t.Fatalf("CallTool: %v", err)
-		}
-		if err := c.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
+		_, err := call(c)
+		must.NoError(err, "CallTool")
+		must.NoError(c.Close(), "Close")
 		reqs := fake.Requests()
-		if len(reqs) != 4 {
-			t.Fatalf("request count = %d, want 4 (initialize, initialized, tools/call, DELETE)", len(reqs))
-		}
+		must.Len(reqs, 4, "want initialize, initialized, tools/call, and DELETE requests")
 		for i, r := range reqs[1:] {
-			if r.SessionID != id {
-				t.Errorf("request[%d] (%s %s) did not echo the 1024-byte session id", i+1, r.HTTPMethod, r.Method)
-			}
+			must.Equal(id, r.SessionID, "request[%d] (%s %s) did not echo the 1024-byte session id", i+1, r.HTTPMethod, r.Method)
 		}
 	})
 
 	t.Run("oversized id on a failed initialize", func(t *testing.T) {
+		must := require.New(t)
 		var deletes deleteLog
 		id := strings.Repeat("s", 1025)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1137,11 +1029,7 @@ func TestCallToolInvalidSessionIDRefused(t *testing.T) {
 		defer server.Close()
 
 		_, err := call(newClient(t, server.URL))
-		if err == nil || !strings.Contains(err.Error(), "initialize failed: HTTP 500") {
-			t.Fatalf("error = %v, want the initialize failure", err)
-		}
-		if got := deletes.sessions(); len(got) != 0 {
-			t.Errorf("sent %d DELETEs, want none for a session id that is never echoed", len(got))
-		}
+		must.ErrorContains(err, "initialize failed: HTTP 500")
+		must.Empty(deletes.sessions(), "DELETEs for a session id that is never echoed")
 	})
 }

@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/formatter"
 	"github.com/rxbynerd/chiron/internal/memory"
@@ -56,6 +56,7 @@ The research did not cover installation grants, so this report does not compare 
 // url under title.
 func workerFinal(t *testing.T, answer, url, title string) string {
 	t.Helper()
+	must := require.New(t)
 	b, err := json.Marshal(map[string]any{
 		"action":    "final",
 		"query":     nil,
@@ -63,9 +64,7 @@ func workerFinal(t *testing.T, answer, url, title string) string {
 		"answer":    answer,
 		"citations": []map[string]string{{"url": url, "title": title}},
 	})
-	if err != nil {
-		t.Fatalf("marshal final action: %v", err)
-	}
+	must.NoError(err, "marshal final action")
 	return string(b)
 }
 
@@ -109,10 +108,9 @@ type fleetRun struct {
 // through the pool, then conclude.
 func runFleet(ctx context.Context, t *testing.T, l *lead, p *pool, query string) fleetRun {
 	t.Helper()
+	must := require.New(t)
 	plan, planUsage, err := l.decompose(ctx, query)
-	if err != nil {
-		t.Fatalf("decompose: %v", err)
-	}
+	must.NoError(err, "decompose")
 	pooled := p.run(ctx, plan.Briefs, nil)
 	return fleetRun{plan: plan, planUsage: planUsage, pooled: pooled, outcome: l.conclude(ctx, query, plan, planUsage, pooled)}
 }
@@ -139,12 +137,12 @@ func syntheticFleet(t *testing.T, modelURL string, searchSrv *searchtest.FakeSer
 	return l, p, wd
 }
 
-// TestConcludeStatusRules: a run is Completed only when every brief yields a
+// TestConclude_Status_CompletedOnlyWhenEveryBriefYields: a run is Completed only when every brief yields a
 // completed finding and both lead passes complete; a gap, a partial finding
 // or a degraded pass makes it Incomplete; no finding with text makes it
 // Failed without a call. The detail names each reason, and the body and
 // citations follow the passes that ran.
-func TestConcludeStatusRules(t *testing.T) {
+func TestConclude_Status_CompletedOnlyWhenEveryBriefYields(t *testing.T) {
 	failedCall := modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":{"message":"down"}}`}
 	cutOff := modeltest.FakeReply{Content: "# Report\n\nCut", FinishReason: "length", Usage: synthesisUsage}
 	attributeBoth := citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA, citeURLB}}}.json(t))
@@ -248,6 +246,7 @@ func TestConcludeStatusRules(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.replies...)
 			defer modelSrv.Close()
 			l, store, ns := synthesisLead(t, modelSrv, nil)
@@ -263,48 +262,38 @@ func TestConcludeStatusRules(t *testing.T) {
 			}
 
 			out := l.conclude(context.Background(), testQuery, plan, types.Usage{InputTokens: 400, OutputTokens: 250}, pooled)
-			if out.Status != tt.wantStatus {
-				t.Errorf("status = %s, want %s (detail %q)", out.Status, tt.wantStatus, out.Detail)
-			}
-			if n := modelSrv.CallCount(); n != tt.wantCalls {
-				t.Errorf("model calls = %d, want %d", n, tt.wantCalls)
-			}
-			if tt.wantStatus == types.StatusCompleted && out.Detail != "" {
-				t.Errorf("detail = %q, want none for a completed run", out.Detail)
+			must.Equal(tt.wantStatus, out.Status, "detail %q", out.Detail)
+			must.Equal(tt.wantCalls, modelSrv.CallCount(), "model calls")
+			if tt.wantStatus == types.StatusCompleted {
+				must.Empty(out.Detail, "a completed run has no detail")
 			}
 			for _, want := range tt.wantDetail {
-				if !strings.Contains(out.Detail, want) {
-					t.Errorf("detail = %q, want it to contain %q", out.Detail, want)
-				}
+				must.Contains(out.Detail, want)
 			}
-			if out.Body != tt.wantBody {
-				t.Errorf("body = %q, want %q", out.Body, tt.wantBody)
-			}
-			if !reflect.DeepEqual(out.Citations, tt.wantCites) {
-				t.Errorf("citations = %+v, want %+v", out.Citations, tt.wantCites)
-			}
+			must.Equal(tt.wantBody, out.Body)
+			must.Equal(tt.wantCites, out.Citations)
 
 			in := &types.Interaction{ID: "run-1", Agent: "fleet", Query: testQuery}
 			out.applyTo(in)
-			if in.ID != "run-1" || in.Status != out.Status || in.StatusDetail != out.Detail ||
-				!reflect.DeepEqual(in.Citations, out.Citations) || in.Usage != out.Usage {
-				t.Errorf("interaction = %+v, want the outcome applied to its fields", in)
-			}
-			switch {
-			case out.Body == "" && len(in.Outputs) != 0:
-				t.Errorf("outputs = %+v, want none without a body", in.Outputs)
-			case out.Body != "" && !reflect.DeepEqual(in.Outputs, []types.Output{{Type: types.OutputText, Text: out.Body}}):
-				t.Errorf("outputs = %+v, want the body as the one text output", in.Outputs)
+			must.Equal("run-1", in.ID)
+			must.Equal(out.Status, in.Status)
+			must.Equal(out.Detail, in.StatusDetail)
+			must.Equal(out.Citations, in.Citations)
+			must.Equal(out.Usage, in.Usage)
+			if out.Body == "" {
+				must.Empty(in.Outputs, "outputs without a body")
+			} else {
+				must.Equal([]types.Output{{Type: types.OutputText, Text: out.Body}}, in.Outputs)
 			}
 		})
 	}
 }
 
-// TestConcludeBodyCannotHideTheSources: a synthesised or stitched body that
+// TestConclude_Body_CannotHideSources: a synthesised or stitched body that
 // ends in an unclosed HTML comment is escaped, so once formatted the Sources
 // list still follows as a list rather than inside an HTML block that would
 // run to the end of the document.
-func TestConcludeBodyCannotHideTheSources(t *testing.T) {
+func TestConclude_Body_CannotHideSources(t *testing.T) {
 	const unclosed = "<!-- reviewer note"
 	failedCall := modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: `{"error":{"message":"down"}}`}
 	attributeA := citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t))
@@ -317,6 +306,7 @@ func TestConcludeBodyCannotHideTheSources(t *testing.T) {
 		{"stitched", []modeltest.FakeReply{failedCall}, "Finding 1 text.\n\n" + unclosed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.replies...)
 			defer modelSrv.Close()
 			l, store, ns := synthesisLead(t, modelSrv, nil)
@@ -328,23 +318,19 @@ func TestConcludeBodyCannotHideTheSources(t *testing.T) {
 			in := &types.Interaction{ID: "run-1", Agent: "fleet", Query: testQuery}
 			out.applyTo(in)
 			report, err := formatter.NewMarkdown().Format(context.Background(), in)
-			if err != nil {
-				t.Fatalf("Format: %v", err)
-			}
+			must.NoError(err, "format the report")
 			md := string(report.Markdown)
 
-			if !strings.HasSuffix(md, "\n\\"+unclosed+"\n\n## Sources\n\n1. [Source 1]("+citeURLA+")\n") {
-				t.Errorf("the report does not end in the escaped comment then the Sources list:\n%s", md)
-			}
+			must.True(strings.HasSuffix(md, "\n\\"+unclosed+"\n\n## Sources\n\n1. [Source 1]("+citeURLA+")\n"),
+				"the report does not end in the escaped comment then the Sources list:\n%s", md)
 			// The formatter's provenance comment opens every report; only the
 			// body below it must keep no raw-HTML opener.
 			body := md
 			if strings.HasPrefix(md, "<!-- chiron-version: ") {
 				_, body, _ = strings.Cut(md, "\n")
 			}
-			if unescapedHTMLOpener.MatchString(body) {
-				t.Errorf("the report keeps an unescaped raw-HTML opener, which could hide the Sources list:\n%s", md)
-			}
+			must.NotRegexp(unescapedHTMLOpener, body,
+				"the report keeps an unescaped raw-HTML opener, which could hide the Sources list:\n%s", md)
 		})
 	}
 }
@@ -380,12 +366,12 @@ func (s panickingStore) Get(ctx context.Context, ref memory.Reference) (io.ReadC
 	return s.ContextStore.Get(ctx, ref)
 }
 
-// TestConcludeRecoversALeadPassPanic: a panic in a lead pass does not reach
+// TestConclude_RecoversLeadPassPanic: a panic in a lead pass does not reach
 // the caller. The outcome keeps every finding read back, stitched, with
 // every worker citation, Incomplete, under a fixed detail that never echoes
 // the recovered value, and counts the tokens of each lead call that
 // returned; with no finding read back it is Failed with no body.
-func TestConcludeRecoversALeadPassPanic(t *testing.T) {
+func TestConclude_RecoversLeadPassPanic(t *testing.T) {
 	planUsage := types.Usage{InputTokens: 400, OutputTokens: 250}
 	failed := Finding{Status: types.StatusFailed, Detail: "model turn failed", Turns: 1}
 	for _, tt := range []struct {
@@ -427,6 +413,7 @@ func TestConcludeRecoversALeadPassPanic(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.replies...)
 			defer modelSrv.Close()
 			store, ns := newRecordingStore(t, memory.InMemoryOptions{})
@@ -434,12 +421,9 @@ func TestConcludeRecoversALeadPassPanic(t *testing.T) {
 			plan, pooled := storedRun(t, store, ns, tt.findings...)
 
 			out := l.conclude(context.Background(), testQuery, plan, planUsage, pooled)
-			if out.Status != tt.wantStatus || out.Detail != tt.wantDetail {
-				t.Errorf("outcome = %s %q, want %s %q", out.Status, out.Detail, tt.wantStatus, tt.wantDetail)
-			}
-			if n := modelSrv.CallCount(); n != tt.wantCalls {
-				t.Errorf("model calls = %d, want %d", n, tt.wantCalls)
-			}
+			must.Equal(tt.wantStatus, out.Status, "detail %q", out.Detail)
+			must.Equal(tt.wantDetail, out.Detail)
+			must.Equal(tt.wantCalls, modelSrv.CallCount(), "model calls")
 			collected := []collectedFinding{}
 			for i, f := range tt.findings {
 				if f.Status != types.StatusFailed {
@@ -450,28 +434,23 @@ func TestConcludeRecoversALeadPassPanic(t *testing.T) {
 			if tt.wantBody {
 				wantBody = stitchFindings(collected)
 			}
-			if out.Body != wantBody {
-				t.Errorf("body = %q, want %q", out.Body, wantBody)
-			}
-			if want := workerCitations(collected); !reflect.DeepEqual(out.Citations, want) {
-				t.Errorf("citations = %+v, want every worker citation %+v", out.Citations, want)
-			}
-			if want := pooled.Usage.InputTokens + planUsage.InputTokens + tt.leadTokens; out.Usage.InputTokens != want {
-				t.Errorf("input tokens = %d, want %d from the workers, the plan and each lead call that returned", out.Usage.InputTokens, want)
-			}
-			if strings.Contains(out.Detail, panicValueKey) || strings.Contains(out.Body, panicValueKey) {
-				t.Errorf("the recovered value reached the outcome: %+v", out)
-			}
+			must.Equal(wantBody, out.Body)
+			must.Equal(workerCitations(collected), out.Citations, "every worker citation")
+			wantInput := pooled.Usage.InputTokens + planUsage.InputTokens + tt.leadTokens
+			must.Equal(wantInput, out.Usage.InputTokens, "input tokens from the workers, the plan and each lead call that returned")
+			must.NotContains(out.Detail, panicValueKey, "the recovered value reached the detail")
+			must.NotContains(out.Body, panicValueKey, "the recovered value reached the body")
 		})
 	}
 }
 
-// TestConcludeRecoversAStoreReadPanic: a store that panics reading one
+// TestConclude_RecoversStoreReadPanic: a store that panics reading one
 // brief's finding back makes that brief a gap with a fixed reason; the other
 // findings are still read back and synthesised, and a store that panics on
 // every read leaves a Failed run with no model call.
-func TestConcludeRecoversAStoreReadPanic(t *testing.T) {
+func TestConclude_RecoversStoreReadPanic(t *testing.T) {
 	t.Run("one read", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer(synthesisReply("# Report"), citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t)))
 		defer modelSrv.Close()
 		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
@@ -480,21 +459,16 @@ func TestConcludeRecoversAStoreReadPanic(t *testing.T) {
 		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: faulty, Namespace: ns})
 
 		out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
-		if out.Status != types.StatusIncomplete || out.Body != "# Report" {
-			t.Errorf("outcome = %s %q, want the synthesised body, incomplete", out.Status, out.Body)
-		}
-		if want := "brief-2 produced no finding: the finding could not be read back: the store panicked"; !strings.Contains(out.Detail, want) {
-			t.Errorf("detail = %q, want %q", out.Detail, want)
-		}
-		if strings.Contains(out.Detail, panicValueKey) {
-			t.Errorf("the recovered value reached the detail: %q", out.Detail)
-		}
-		if n := modelSrv.CallCount(); n != 2 {
-			t.Errorf("model calls = %d, want synthesis and the citation pass", n)
-		}
+		must.Equal(types.StatusIncomplete, out.Status, "detail %q", out.Detail)
+		must.Equal("# Report", out.Body, "the synthesised body")
+		want := "brief-2 produced no finding: the finding could not be read back: the store panicked"
+		must.Contains(out.Detail, want)
+		must.NotContains(out.Detail, panicValueKey, "the recovered value reached the detail")
+		must.Equal(2, modelSrv.CallCount(), "synthesis and the citation pass")
 	})
 
 	t.Run("every read", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer()
 		defer modelSrv.Close()
 		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
@@ -506,18 +480,17 @@ func TestConcludeRecoversAStoreReadPanic(t *testing.T) {
 		l := mustLead(t, leadDeps{Model: newModelClient(t, modelSrv), Store: faulty, Namespace: ns})
 
 		out := l.conclude(context.Background(), testQuery, plan, types.Usage{}, pooled)
-		if out.Status != types.StatusFailed || out.Body != "" || out.Citations != nil {
-			t.Errorf("outcome = %+v, want failed with no body or citations", out)
-		}
-		if n := modelSrv.CallCount(); n != 0 {
-			t.Errorf("model calls = %d, want none", n)
-		}
+		must.Equal(types.StatusFailed, out.Status, "outcome %+v", out)
+		must.Empty(out.Body, "a failed run has no body")
+		must.Nil(out.Citations, "a failed run has no citations")
+		must.Zero(modelSrv.CallCount(), "the lead makes no model call")
 	})
 }
 
-// TestConcludeDetailIsScrubbedAndBounded: the run's detail joins every
+// TestConclude_Detail_IsScrubbedAndBounded: the run's detail joins every
 // reason, scrubbed, and never exceeds maxDetailBytes.
-func TestConcludeDetailIsScrubbedAndBounded(t *testing.T) {
+func TestConclude_Detail_IsScrubbedAndBounded(t *testing.T) {
+	must := require.New(t)
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
@@ -532,21 +505,16 @@ func TestConcludeDetailIsScrubbedAndBounded(t *testing.T) {
 	}
 
 	out := l.conclude(context.Background(), testQuery, leadPlan{Briefs: poolBriefs(5)}, types.Usage{}, pooled)
-	if out.Status != types.StatusFailed {
-		t.Errorf("status = %s, want failed", out.Status)
-	}
-	if len(out.Detail) > maxDetailBytes || !strings.HasSuffix(out.Detail, truncatedMarker) {
-		t.Errorf("detail is %d bytes, want it cut to %d", len(out.Detail), maxDetailBytes)
-	}
-	if strings.Contains(out.Detail, key) {
-		t.Errorf("detail carries the credential: %q", out.Detail)
-	}
+	must.Equal(types.StatusFailed, out.Status)
+	must.LessOrEqual(len(out.Detail), maxDetailBytes, "detail is cut to at most maxDetailBytes")
+	must.True(strings.HasSuffix(out.Detail, truncatedMarker), "detail ends with the truncation marker")
+	must.NotContains(out.Detail, key, "detail carries the credential")
 }
 
-// TestRunUsagePricesTheLeadOnce: the run's Usage is the workers' usage plus
+// TestRunUsage_PricesLeadOnce: the run's Usage is the workers' usage plus
 // the lead calls' tokens priced at the lead's rates. An estimate already on
 // a lead call is replaced, not added, and zero prices add no cost.
-func TestRunUsagePricesTheLeadOnce(t *testing.T) {
+func TestRunUsage_PricesLeadOnce(t *testing.T) {
 	workers := types.Usage{InputTokens: 40, OutputTokens: 20, SearchCount: 2, RecallCount: 1, EstimatedCostGBP: 0.5}
 	calls := []types.Usage{
 		{InputTokens: 400, OutputTokens: 250},
@@ -554,22 +522,22 @@ func TestRunUsagePricesTheLeadOnce(t *testing.T) {
 		{InputTokens: 150, OutputTokens: 50},
 	}
 	for _, tt := range []struct {
-		name            string
-		inPrice, outPrc float64
-		wantCost        float64
+		name              string
+		inPrice, outPrice float64
+		wantCost          float64
 	}{
 		{"priced", 2, 8, 0.5 + (850*2+500*8)/1e6},
 		{"unpriced", 0, 0, 0.5},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			l := &lead{deps: leadDeps{InputGBPPerMTok: tt.inPrice, OutputGBPPerMTok: tt.outPrc}}
+			must := require.New(t)
+			l := &lead{deps: leadDeps{InputGBPPerMTok: tt.inPrice, OutputGBPPerMTok: tt.outPrice}}
 			got := l.runUsage(workers, calls...)
 			want := types.Usage{InputTokens: 890, OutputTokens: 520, SearchCount: 2, RecallCount: 1}
 			cost := got.EstimatedCostGBP
 			got.EstimatedCostGBP = 0
-			if got != want || math.Abs(cost-tt.wantCost) > 1e-12 {
-				t.Errorf("runUsage = %+v (cost %v), want %+v (cost %v)", got, cost, want, tt.wantCost)
-			}
+			must.Equal(want, got, "usage without the cost")
+			must.InDelta(tt.wantCost, cost, 1e-12, "estimated cost")
 		})
 	}
 }
@@ -593,13 +561,14 @@ func sumSpans(spans []traceSpan) spanTotals {
 	return s
 }
 
-// TestFleetRunUsageRollsUpSpansOnce: over a synthetic two-worker run under
+// TestFleet_RunUsage_RollsUpSpansOnce: over a synthetic two-worker run under
 // the JSONL tracer, the run's Usage equals the delegate spans' spend plus
 // the decompose, synthesise and cite spans' tokens, priced at the workers'
 // rates, counting no worker span a second time; and nothing in the fleet
 // records a run-level metric, because the run core records them once from
 // this Usage.
-func TestFleetRunUsageRollsUpSpansOnce(t *testing.T) {
+func TestFleet_RunUsage_RollsUpSpansOnce(t *testing.T) {
+	must := require.New(t)
 	const inPrice, outPrice = 1.5, 6
 	modelSrv := httptest.NewServer(syntheticFleetModel(t))
 	defer modelSrv.Close()
@@ -620,9 +589,7 @@ func TestFleetRunUsageRollsUpSpansOnce(t *testing.T) {
 	var leadSpans []traceSpan
 	for _, name := range []string{trace.SpanDecompose, trace.SpanSynthesise, trace.SpanCite} {
 		spans := spansNamed(t, lines, name)
-		if len(spans) != 1 {
-			t.Fatalf("%s spans = %d, want 1", name, len(spans))
-		}
+		must.Len(spans, 1, "%s spans", name)
 		leadSpans = append(leadSpans, spans...)
 	}
 	leadTotals := sumSpans(leadSpans)
@@ -634,44 +601,43 @@ func TestFleetRunUsageRollsUpSpansOnce(t *testing.T) {
 		RecallCount:      int(delegates.recall),
 		EstimatedCostGBP: delegates.cost + costGBP(int(leadTotals.input), int(leadTotals.output), inPrice, outPrice),
 	}
-	if usage.InputTokens != want.InputTokens || usage.OutputTokens != want.OutputTokens ||
-		usage.SearchCount != want.SearchCount || usage.RecallCount != want.RecallCount ||
-		math.Abs(usage.EstimatedCostGBP-want.EstimatedCostGBP) > 1e-12 {
-		t.Errorf("usage = %+v, want the spans' rollup %+v", usage, want)
-	}
+	must.Equal(want.InputTokens, usage.InputTokens, "input tokens from the spans")
+	must.Equal(want.OutputTokens, usage.OutputTokens, "output tokens from the spans")
+	must.Equal(want.SearchCount, usage.SearchCount, "searches from the spans")
+	must.Equal(want.RecallCount, usage.RecallCount, "recalls from the spans")
+	must.InDelta(want.EstimatedCostGBP, usage.EstimatedCostGBP, 1e-12, "cost from the spans")
 	// Two workers of two turns at 10/5 tokens, decompose 400/250, synthesis
 	// 300/200 and citation 150/50: the spans are the run, not a subset.
-	if usage.InputTokens != 890 || usage.OutputTokens != 520 || usage.SearchCount != 2 {
-		t.Errorf("usage = %+v, want 890/520 tokens and 2 searches", usage)
-	}
+	must.Equal(890, usage.InputTokens)
+	must.Equal(520, usage.OutputTokens)
+	must.Equal(2, usage.SearchCount)
 	// Each worker's spend is on both its delegate and its worker span; the
 	// rollup above counts the delegates alone.
-	if workers != delegates || workers.input == 0 {
-		t.Errorf("worker spans %+v and delegate spans %+v, want the same spend on each", workers, delegates)
-	}
-	if usage.InputTokens != run.pooled.Usage.InputTokens+run.planUsage.InputTokens+synthesisUsage.InputTokens+citeUsage.InputTokens {
-		t.Errorf("usage %+v is not the pool's %+v plus the lead's calls", usage, run.pooled.Usage)
-	}
+	must.Equal(delegates, workers, "worker spans should carry the same spend as delegate spans")
+	must.NotZero(workers.input, "worker spans should carry input tokens")
+	wantInput := run.pooled.Usage.InputTokens + run.planUsage.InputTokens + synthesisUsage.InputTokens + citeUsage.InputTokens
+	must.Equal(wantInput, usage.InputTokens, "input tokens should be the pool's plus the lead's calls")
 
+	var metrics []string
 	for _, line := range strings.Split(strings.TrimSpace(lines), "\n") {
 		var rec struct {
 			Type string `json:"type"`
 			Name string `json:"name"`
 		}
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("decode trace line: %v", err)
-		}
+		must.NoError(json.Unmarshal([]byte(line), &rec), "decode trace line")
 		if rec.Type == "metric" {
-			t.Errorf("the fleet recorded the metric %q; the run core records run-level metrics once", rec.Name)
+			metrics = append(metrics, rec.Name)
 		}
 	}
+	must.Empty(metrics, "the run core records run-level metrics once, so the fleet should record none")
 }
 
-// TestFleetRunSpanTopology: over a synthetic two-worker run, the decompose,
+// TestFleet_Run_SpanTopology: over a synthetic two-worker run, the decompose,
 // delegate, synthesise and cite spans are all children of the caller's run
 // span; each delegate whose worker ran has exactly one worker span beneath
 // it, and the brief past the two-worker cap has a delegate with none.
-func TestFleetRunSpanTopology(t *testing.T) {
+func TestFleet_Run_SpanTopology(t *testing.T) {
+	must := require.New(t)
 	modelSrv := httptest.NewServer(syntheticFleetModel(t))
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(syntheticSearchResults)
@@ -686,47 +652,49 @@ func TestFleetRunSpanTopology(t *testing.T) {
 	lines := out.String()
 
 	research := spansNamed(t, lines, trace.SpanResearch)
-	if len(research) != 1 {
-		t.Fatalf("research spans = %d, want 1", len(research))
-	}
+	must.Len(research, 1)
 	rootID := research[0].SpanID
-	for name, want := range map[string]int{trace.SpanDecompose: 1, trace.SpanDelegate: 3, trace.SpanSynthesise: 1, trace.SpanCite: 1} {
-		spans := spansNamed(t, lines, name)
-		if len(spans) != want {
-			t.Errorf("%s spans = %d, want %d:\n%s", name, len(spans), want, lines)
-		}
-		for _, s := range spans {
-			if s.ParentID != rootID {
-				t.Errorf("a %s span's parent is %q, want the run span %q", name, s.ParentID, rootID)
+
+	for _, tt := range []struct {
+		name string
+		want int
+	}{
+		{trace.SpanDecompose, 1},
+		{trace.SpanDelegate, 3},
+		{trace.SpanSynthesise, 1},
+		{trace.SpanCite, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			spans := spansNamed(t, lines, tt.name)
+			must.Len(spans, tt.want, "trace:\n%s", lines)
+			for _, s := range spans {
+				must.Equal(rootID, s.ParentID)
 			}
-		}
+		})
 	}
 
 	workers := spansNamed(t, lines, trace.SpanWorker)
-	if len(workers) != 2 {
-		t.Fatalf("worker spans = %d, want 2", len(workers))
-	}
+	must.Len(workers, 2)
 	ran := 0
 	for _, d := range spansNamed(t, lines, trace.SpanDelegate) {
-		children := 0
-		for _, w := range workers {
-			if w.ParentID == d.SpanID {
-				children++
+		t.Run(fmt.Sprint(d.Attrs[trace.AttrBriefID]), func(t *testing.T) {
+			must := require.New(t)
+			children := 0
+			for _, w := range workers {
+				if w.ParentID == d.SpanID {
+					children++
+				}
 			}
-		}
-		switch d.Attrs["disposition"] {
-		case string(dispositionRan):
-			ran++
-			if children != 1 {
-				t.Errorf("delegate %v has %d worker spans, want 1", d.Attrs[trace.AttrBriefID], children)
+			switch d.Attrs["disposition"] {
+			case string(dispositionRan):
+				ran++
+				must.Equal(1, children, "worker spans beneath a delegate whose worker ran")
+			default:
+				must.Equal("brief-3", d.Attrs[trace.AttrBriefID], "only brief-3 is dropped past the two-worker cap")
+				must.Zero(children, "worker spans beneath a dropped delegate")
 			}
-		default:
-			if children != 0 || d.Attrs[trace.AttrBriefID] != "brief-3" {
-				t.Errorf("delegate %v (%v) has %d worker spans, want the dropped brief-3 with none", d.Attrs[trace.AttrBriefID], d.Attrs["disposition"], children)
-			}
-		}
+		})
 	}
-	if ran != 2 {
-		t.Errorf("delegates whose worker ran = %d, want 2", ran)
-	}
+	must.Equal(2, ran, "delegates whose worker ran")
 }

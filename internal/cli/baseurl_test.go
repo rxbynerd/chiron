@@ -5,9 +5,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// TestBaseURLOverrideRejectedBeforeAnyRequest pins C1-SEC-1: a hostile
+// TestBaseURLOverrideRejectedBeforeAnyRequest: a hostile
 // CHIRON_GEMINI_BASE_URL fails validation before any client is built,
 // so the API key cannot be delivered to an attacker-controlled or
 // internal endpoint.
@@ -25,20 +27,19 @@ func TestBaseURLOverrideRejectedBeforeAnyRequest(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			t.Setenv("CHIRON_GEMINI_BASE_URL", tt.url)
 			t.Setenv("GEMINI_API_KEY", "test-key")
 			_, _, err := execute(t, "research", "--query", "q", "-o", "none")
-			if err == nil || !strings.Contains(err.Error(), "must be an absolute https:// URL") {
-				t.Errorf("err = %v, want the base-URL validation error", err)
-			}
+			must.ErrorContains(err, "must be an absolute https:// URL")
 		})
 	}
 }
 
-// TestBaseURLOverrideRefusesCredentialCarriers: userinfo, a query and a
+// TestBaseURLOverride_RefusesCredentialCarriers: userinfo, a query and a
 // fragment are refused like any other unsafe override, and the error names
 // the value by scheme and host only.
-func TestBaseURLOverrideRefusesCredentialCarriers(t *testing.T) {
+func TestBaseURLOverride_RefusesCredentialCarriers(t *testing.T) {
 	const secret = "Winter2026-credential"
 	cases := []struct {
 		name    string
@@ -53,45 +54,46 @@ func TestBaseURLOverrideRefusesCredentialCarriers(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			t.Setenv("CHIRON_GEMINI_BASE_URL", tt.url)
 			_, err := geminiBaseURL()
-			if err == nil || !strings.HasPrefix(err.Error(), "CHIRON_GEMINI_BASE_URL ") || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("geminiBaseURL = %v, want a CHIRON_GEMINI_BASE_URL error containing %q", err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), tt.url) {
-				t.Errorf("error echoed the value: %v", err)
-			}
+			must.ErrorContains(err, tt.wantErr)
+			must.True(strings.HasPrefix(err.Error(), "CHIRON_GEMINI_BASE_URL "), "error should name CHIRON_GEMINI_BASE_URL first: %v", err)
+			must.NotContains(err.Error(), secret)
+			must.NotContains(err.Error(), tt.url)
 		})
 	}
 }
 
 // TestBaseURLOverrideAccepted: https anywhere and http on loopback are
-// admitted — the loopback exemption is what lets the smoke tests run
+// admitted. The loopback exemption is what lets the smoke tests run
 // against httptest servers.
 func TestBaseURLOverrideAccepted(t *testing.T) {
-	for _, raw := range []string{
-		"https://gemini-proxy.internal.example",
-		"http://127.0.0.1:9999",
-		"http://localhost:9999",
-		"http://[::1]:9999",
-	} {
-		t.Run(raw, func(t *testing.T) {
-			t.Setenv("CHIRON_GEMINI_BASE_URL", raw)
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"https host", "https://gemini-proxy.internal.example"},
+		{"ipv4 loopback", "http://127.0.0.1:9999"},
+		{"localhost", "http://localhost:9999"},
+		{"ipv6 loopback", "http://[::1]:9999"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			t.Setenv("CHIRON_GEMINI_BASE_URL", tt.url)
 			got, err := geminiBaseURL()
-			if err != nil {
-				t.Fatalf("geminiBaseURL(%q): %v", raw, err)
-			}
-			if got != raw {
-				t.Errorf("geminiBaseURL(%q) = %q, want it passed through unchanged", raw, got)
-			}
+			must.NoError(err)
+			must.Equal(tt.url, got)
 		})
 	}
 }
 
 // TestBaseURLOverrideUsed: a valid loopback override is not just
-// accepted but actually routes the run's requests (the full e2e suite
-// rides on this too).
+// accepted but actually routes the run's requests. The end-to-end tests
+// depend on this too.
 func TestBaseURLOverrideUsed(t *testing.T) {
+	must := require.New(t)
 	var hits int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -109,10 +111,7 @@ func TestBaseURLOverrideUsed(t *testing.T) {
 	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
 	t.Setenv("GEMINI_API_KEY", "test-key")
 
-	if _, _, err := execute(t, "research", "--query", "q", "-o", "none"); err != nil {
-		t.Fatalf("research against the override: %v", err)
-	}
-	if hits == 0 {
-		t.Error("the override URL received no requests")
-	}
+	_, _, err := execute(t, "research", "--query", "q", "-o", "none")
+	must.NoError(err, "research against the override")
+	must.Positive(hits, "the override URL received no requests")
 }

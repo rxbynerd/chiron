@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/memory/alexandria"
 	"github.com/rxbynerd/chiron/internal/memory/alexandria/alexandriatest"
 	"github.com/rxbynerd/chiron/internal/memory/billet/billettest"
@@ -14,11 +17,14 @@ import (
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
 )
 
-// TestWorkerRecallSearchFetchFinalThroughCLI drives a worker that recalls
+// TestWorker_RecallSearchFetchFinal_CitesPageAndMemory drives a worker that recalls
 // from Billet, searches, fetches and cites both a page and a memory: the
 // recall reaches Billet as search_memory, its content reaches the model
 // inside the fence, and the report lists the memory beside the web source.
-func TestWorkerRecallSearchFetchFinalThroughCLI(t *testing.T) {
+func TestWorker_RecallSearchFetchFinal_CitesPageAndMemory(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html><body><p>Rayleigh scattering.</p></body></html>"))
@@ -50,46 +56,36 @@ func TestWorkerRecallSearchFetchFinalThroughCLI(t *testing.T) {
 		"--fleet-knowledge-endpoint", kbSrv.URL(),
 		"--fleet-knowledge-limit", "3",
 	)...)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
-	if got := modelSrv.CallCount(); got != 4 {
-		t.Errorf("model call count = %d, want 4", got)
-	}
-	if got := kbSrv.ToolCallCount(); got != 1 {
-		t.Errorf("billet tool calls = %d, want 1 (a recall, no save-back)", got)
-	}
+	must.NoError(err, "research --agent worker, stderr: %s", stderr)
+
+	check.Equal(4, modelSrv.CallCount(), "model call count")
+	check.Equal(1, kbSrv.ToolCallCount(), "Billet calls: one recall, no save-back")
 	var sawRecall bool
 	for _, req := range kbSrv.Requests() {
 		if req.ToolName != "search_memory" {
 			continue
 		}
 		sawRecall = true
-		if req.Arguments["query"] != "sky colour" || req.Arguments["limit"] != float64(3) {
-			t.Errorf("search_memory arguments = %v, want query and the configured limit", req.Arguments)
-		}
+		check.Equal("sky colour", req.Arguments["query"], "search_memory arguments: %v", req.Arguments)
+		check.InDelta(3, req.Arguments["limit"], 0, "search_memory arguments: %v", req.Arguments)
 	}
-	if !sawRecall {
-		t.Error("Billet never received search_memory")
-	}
-	if !strings.Contains(stdout, "[Sky article]("+page.URL+")") {
-		t.Errorf("report lacks the fetched source:\n%s", stdout)
-	}
+	check.True(sawRecall, "Billet never received search_memory")
+	check.Contains(stdout, "[Sky article]("+page.URL+")", "report lacks the fetched source")
 	// The recall's own title (the memory's first line) wins over the title
 	// the model attached to its citation.
-	if !strings.Contains(stdout, "Prior finding: the team settled on Rayleigh scattering as the accepted explanation. `billet://memory/mem-0a1b`") {
-		t.Errorf("report lacks the recalled memory as an unlinked source:\n%s", stdout)
-	}
-	if strings.Contains(stdout, "(billet://") {
-		t.Errorf("a billet locator was rendered as a link:\n%s", stdout)
-	}
+	check.Contains(stdout, "Prior finding: the team settled on Rayleigh scattering as the accepted explanation. `billet://memory/mem-0a1b`",
+		"report lacks the recalled memory as an unlinked source")
+	check.NotContains(stdout, "(billet://", "a billet locator was rendered as a link")
 }
 
-// TestWorkerKnowledgeRememberThroughCLI: with knowledge_remember, a completed
+// TestWorker_Remember_SavesCompletedFindingOnce: with knowledge_remember, a completed
 // finding is saved back to Billet once, carrying the provenance header, the
 // objective, the answer and the sources, and the interaction lists the
 // remember tool.
-func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
+func TestWorker_Remember_SavesCompletedFindingOnce(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	kbSrv := billettest.NewFakeServer(nil)
@@ -105,36 +101,34 @@ func TestWorkerKnowledgeRememberThroughCLI(t *testing.T) {
 		"--fleet-knowledge-endpoint", kbSrv.URL(),
 		"--fleet-knowledge-remember",
 	)...)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "research --agent worker, stderr: %s", stderr)
+
 	saved := kbSrv.SavedContents()
-	if len(saved) != 1 {
-		t.Fatalf("saved contents = %d, want exactly one save-back", len(saved))
+	must.Len(saved, 1, "expected exactly one save-back")
+	check.True(strings.HasPrefix(saved[0], "why is the sky blue\n(Chiron worker finding; interaction wkr_"),
+		"saved content lacks the objective line and the provenance line:\n%s", saved[0])
+	for _, tt := range []struct{ name, want string }{
+		{name: "objective", want: "why is the sky blue"},
+		{name: "answer", want: "Rayleigh scattering"},
+	} {
+		t.Run("saved content has "+tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Contains(saved[0], tt.want)
+		})
 	}
-	if !strings.HasPrefix(saved[0], "why is the sky blue\n(Chiron worker finding; interaction wkr_") {
-		t.Errorf("saved content lacks the objective line and the provenance line:\n%s", saved[0])
-	}
-	for _, want := range []string{"why is the sky blue", "Rayleigh scattering"} {
-		if !strings.Contains(saved[0], want) {
-			t.Errorf("saved content lacks %q:\n%s", want, saved[0])
-		}
-	}
-	if strings.Contains(saved[0], "test-model-key") {
-		t.Error("the model key reached the knowledge store")
-	}
-	if !strings.Contains(stdout, "tools: [web_search, web_fetch, knowledge_recall, knowledge_remember]") {
-		t.Errorf("front matter lacks the knowledge tools:\n%s", stdout)
-	}
-	if !strings.Contains(stderr, "saved the finding to the knowledge store") {
-		t.Errorf("stderr lacks the save-back log line:\n%s", stderr)
-	}
+	check.NotContains(saved[0], "test-model-key", "the model key reached the knowledge store")
+	check.Contains(stdout, "tools: [web_search, web_fetch, knowledge_recall, knowledge_remember]",
+		"front matter lacks the knowledge tools")
+	check.Contains(stderr, "saved the finding to the knowledge store", "stderr lacks the save-back log line")
 }
 
-// TestWorkerRecallAlexandriaThroughCLI: the Alexandria provider recalls over
+// TestWorker_RecallAlexandria_CitesFragmentLocator: the Alexandria provider recalls over
 // REST with the bearer and the configured space, and a fragment hit is
 // citable by its web locator.
-func TestWorkerRecallAlexandriaThroughCLI(t *testing.T) {
+func TestWorker_RecallAlexandria_CitesFragmentLocator(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	kbSrv := alexandriatest.NewFakeServer(alexandria.SearchResponse{Results: []alexandria.SearchResult{{
@@ -163,20 +157,13 @@ func TestWorkerRecallAlexandriaThroughCLI(t *testing.T) {
 		"--fleet-knowledge-key-ref", "secret://KB_KEY",
 		"--fleet-knowledge-space", "notes",
 	)...)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "research --agent worker, stderr: %s", stderr)
+
 	reqs := kbSrv.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("alexandria requests = %d, want 1", len(reqs))
-	}
-	if reqs[0].Authorization != "Bearer alx_test-token" || reqs[0].Query.Get("space") != "notes" || reqs[0].Query.Get("q") != "sky colour" {
-		t.Errorf("recall request = %+v, want the bearer, the space and the query", reqs[0])
-	}
-	if !strings.Contains(stdout, "[Sky colour decision]("+locator+")") {
-		t.Errorf("report lacks the fragment locator as a source:\n%s", stdout)
-	}
-	if strings.Contains(stdout+stderr, "alx_test-token") {
-		t.Error("the knowledge token leaked into the output")
-	}
+	must.Len(reqs, 1, "alexandria requests")
+	check.Equal("Bearer alx_test-token", reqs[0].Authorization, "recall bearer")
+	check.Equal("notes", reqs[0].Query.Get("space"), "recall space")
+	check.Equal("sky colour", reqs[0].Query.Get("q"), "recall query")
+	check.Contains(stdout, "[Sky colour decision]("+locator+")", "report lacks the fragment locator as a source")
+	check.NotContains(stdout+stderr, "alx_test-token", "the knowledge token leaked into the output")
 }

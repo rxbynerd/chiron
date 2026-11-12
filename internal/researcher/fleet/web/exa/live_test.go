@@ -2,12 +2,15 @@ package exa_test
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa"
@@ -17,6 +20,9 @@ import (
 // fake. It runs only when CHIRON_EXA_LIVE_KEY holds an Exa API key, spends
 // about one cent, and never prints the key.
 func TestLiveExa(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	key := os.Getenv("CHIRON_EXA_LIVE_KEY")
 	if key == "" {
 		t.Skip("set CHIRON_EXA_LIVE_KEY to an Exa API key to run the live Exa test")
@@ -29,9 +35,7 @@ func TestLiveExa(t *testing.T) {
 		MaxCharacters:  400,
 		SendObjective:  true,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err, "exa.New")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -39,47 +43,32 @@ func TestLiveExa(t *testing.T) {
 		Text:      "Go net/http SSRF guard dial-time pinning",
 		Objective: "Find explanations of preventing SSRF in Go HTTP clients.",
 	})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
+	must.NoError(err, "Search")
+	must.NotEmpty(res.Results, "search returned no results")
+	must.LessOrEqual(len(res.Results), 3, "search returned more results than requested")
+	for i, r := range res.Results {
+		t.Run(fmt.Sprintf("result %d", i), func(t *testing.T) {
+			must := require.New(t)
+			must.True(strings.HasPrefix(r.URL, "http") && r.Title != "" && r.Snippet != "",
+				"result missing a field: %+v", r)
+			must.True(utf8.ValidString(r.Snippet), "snippet is not valid UTF-8: %q", r.Snippet)
+		})
 	}
-	if len(res.Results) == 0 || len(res.Results) > 3 {
-		t.Fatalf("Search returned %d results, want 1..3", len(res.Results))
-	}
-	for _, r := range res.Results {
-		if !strings.HasPrefix(r.URL, "http") || r.Title == "" || r.Snippet == "" {
-			t.Errorf("result missing a field: %+v", r)
-		}
-		if !utf8.ValidString(r.Snippet) {
-			t.Errorf("snippet is not valid UTF-8: %q", r.Snippet)
-		}
-	}
-	if res.Spend.Unknown || res.Spend.USD <= 0 {
-		t.Errorf("search spend = %+v, want a known positive amount", res.Spend)
-	}
+	check.False(res.Spend.Unknown, "search spend = %+v, want a known amount", res.Spend)
+	check.Positive(res.Spend.USD, "search spend = %+v, want a positive amount", res.Spend)
 
 	page, err := client.Fetch(ctx, "https://go.dev/doc/")
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if page.URL != "https://go.dev/doc/" {
-		t.Errorf("page URL = %q, want the requested URL", page.URL)
-	}
-	if n := utf8.RuneCountInString(string(page.Content)); n == 0 || n > 400 {
-		t.Errorf("page text is %d runes, want 1..400", n)
-	}
-	if !page.Truncated {
-		t.Error("a 400-rune cap on a long page should report truncation")
-	}
-	if page.Spend.Unknown || page.Spend.USD <= 0 {
-		t.Errorf("fetch spend = %+v, want a known positive amount", page.Spend)
-	}
+	must.NoError(err, "Fetch")
+	check.Equal("https://go.dev/doc/", page.URL, "page URL should be the requested URL")
+	n := utf8.RuneCountInString(string(page.Content))
+	check.Positive(n, "page text should not be empty")
+	check.LessOrEqual(n, 400, "page text is %d runes, want at most 400", n)
+	check.True(page.Truncated, "a 400-rune cap on a long page should report truncation")
+	check.False(page.Spend.Unknown, "fetch spend = %+v, want a known amount", page.Spend)
+	check.Positive(page.Spend.USD, "fetch spend = %+v, want a positive amount", page.Spend)
 
 	_, err = client.Fetch(ctx, "https://go.dev/this-page-does-not-exist-chiron-live-test")
 	var fe *exa.FetchError
-	if !errors.As(err, &fe) {
-		t.Fatalf("Fetch of a missing page: err = %v, want *exa.FetchError", err)
-	}
-	if fe.Tag != "CRAWL_NOT_FOUND" {
-		t.Errorf("missing page tag = %q, want CRAWL_NOT_FOUND", fe.Tag)
-	}
+	must.ErrorAs(err, &fe, "fetch of a missing page: want *exa.FetchError, got %v", err)
+	check.Equal("CRAWL_NOT_FOUND", fe.Tag, "missing page tag")
 }

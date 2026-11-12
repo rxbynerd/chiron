@@ -3,7 +3,6 @@ package gemini
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/researcher"
@@ -32,14 +34,17 @@ func streamOpts(thoughts *[]string, mu *sync.Mutex) func(*Options) {
 	}
 }
 
-// sseHandler writes one SSE response from the given frames and returns.
+// sseWrite writes one SSE response from the given frames. It runs on HTTP
+// handler goroutines, so it reports through check rather than stopping the test.
 func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	t.Helper()
+	check := assert.New(t)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	for _, f := range frames {
 		if _, err := fmt.Fprint(w, f); err != nil {
-			t.Errorf("writing SSE frame: %v", err)
+			check.Failf("writing SSE frame", "%v", err)
+			return
 		}
 	}
 	if fl, ok := w.(http.Flusher); ok {
@@ -47,7 +52,9 @@ func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	}
 }
 
-func TestAwaitStreamsToCompletion(t *testing.T) {
+func TestAwait_Stream_CompletesWithoutReconnect(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var (
 		mu          sync.Mutex
 		thoughts    []string
@@ -79,38 +86,24 @@ func TestAwaitStreamsToCompletion(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(&thoughts, &mu))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id))
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(thoughts) != 2 || thoughts[0] != "reading sources" || thoughts[1] != "drafting" {
-		t.Errorf("thoughts = %v, want both summaries in order", thoughts)
-	}
-	if streamGets.Load() != 1 {
-		t.Errorf("stream attaches = %d, want 1 — no reconnect on a clean completion", streamGets.Load())
-	}
-	if got := gotLastID.Load(); got != "" {
-		t.Errorf("first attach sent last_event_id=%q, want empty", got)
-	}
+	check.Equal([]string{"reading sources", "drafting"}, thoughts, "thought summaries arrive in order")
+	check.EqualValues(1, streamGets.Load(), "stream attaches: no reconnect on a clean completion")
+	check.Empty(gotLastID.Load(), "first attach must not send last_event_id")
 
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Usage.ReconnectCount != 0 {
-		t.Errorf("reconnect count = %d, want 0", in.Usage.ReconnectCount)
-	}
-	if in.Usage.PollCount != 0 {
-		t.Errorf("poll count = %d, want 0 — the await streamed", in.Usage.PollCount)
-	}
+	must.NoError(err)
+	check.Zero(in.Usage.ReconnectCount, "reconnect count")
+	check.Zero(in.Usage.PollCount, "poll count: the await streamed")
 }
 
 func TestAwaitReconnectsWithLastEventID(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var (
 		attaches atomic.Int64
 		lastIDs  []string
@@ -144,35 +137,23 @@ func TestAwaitReconnectsWithLastEventID(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id))
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(lastIDs) != 2 {
-		t.Fatalf("stream attaches = %v, want initial + one reconnect", lastIDs)
-	}
-	if lastIDs[0] != "" {
-		t.Errorf("initial attach sent last_event_id=%q, want empty", lastIDs[0])
-	}
-	if lastIDs[1] != "e7" {
-		t.Errorf("reconnect sent last_event_id=%q, want e7 — resume is via the query parameter", lastIDs[1])
-	}
+	must.Len(lastIDs, 2, "want the initial attach plus one reconnect")
+	check.Empty(lastIDs[0], "initial attach must not send last_event_id")
+	check.Equal("e7", lastIDs[1], "reconnect resumes via the last_event_id query parameter")
 
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Usage.ReconnectCount != 1 {
-		t.Errorf("reconnect count = %d, want 1", in.Usage.ReconnectCount)
-	}
+	must.NoError(err)
+	check.Equal(1, in.Usage.ReconnectCount, "reconnect count")
 }
 
 func TestAwaitFallsBackToPollingWhenStreamingRepeatedlyFails(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var (
 		streamGets atomic.Int64
 		plainGets  atomic.Int64
@@ -195,33 +176,20 @@ func TestAwaitFallsBackToPollingWhenStreamingRepeatedlyFails(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await must fall back to polling, got %v", err)
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id), "Await must fall back to polling")
 
-	if got := streamGets.Load(); got != maxStreamFailures {
-		t.Errorf("stream attempts = %d, want the %d-failure budget spent", got, maxStreamFailures)
-	}
-	if plainGets.Load() == 0 {
-		t.Error("the poll fallback never polled")
-	}
+	check.EqualValues(maxStreamFailures, streamGets.Load(), "stream attempts spend the whole failure budget")
+	check.Positive(plainGets.Load(), "the poll fallback must poll")
 
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Usage.PollCount == 0 {
-		t.Error("poll count must record the fallback polling")
-	}
-	if in.Usage.ReconnectCount != maxStreamFailures-1 {
-		t.Errorf("reconnect count = %d, want %d re-dials", in.Usage.ReconnectCount, maxStreamFailures-1)
-	}
+	must.NoError(err)
+	check.Positive(in.Usage.PollCount, "poll count must record the fallback polling")
+	check.Equal(maxStreamFailures-1, in.Usage.ReconnectCount, "reconnect count: re-dials after the first attach")
 }
 
 func TestAwaitStreamRequiresActionDoesNotFallBack(t *testing.T) {
+	must := require.New(t)
 	var plainGets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -241,19 +209,14 @@ func TestAwaitStreamRequiresActionDoesNotFallBack(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	err = r.Await(ctx, id)
-	if !errors.Is(err, interactions.ErrRequiresAction) {
-		t.Fatalf("error = %v, want ErrRequiresAction — a research outcome, not a stream failure", err)
-	}
-	if plainGets.Load() != 0 {
-		t.Error("requires_action must not trigger the poll fallback")
-	}
+	must.NoError(err)
+	must.ErrorIs(r.Await(ctx, id), interactions.ErrRequiresAction, "a research outcome, not a stream failure")
+	must.Zero(plainGets.Load(), "requires_action must not trigger the poll fallback")
 }
 
 func TestAwaitStreamErrorEventsSpendTheFailureBudget(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var (
 		streamGets atomic.Int64
 		plainGets  atomic.Int64
@@ -282,21 +245,14 @@ func TestAwaitStreamErrorEventsSpendTheFailureBudget(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await must conclude via the poll fallback, got %v", err)
-	}
-	if got := streamGets.Load(); got != maxStreamFailures {
-		t.Errorf("stream attempts = %d, want %d — repeated error events must not hold the await captive", got, maxStreamFailures)
-	}
-	if plainGets.Load() == 0 {
-		t.Error("the poll fallback never ran")
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id), "Await must conclude via the poll fallback")
+	check.EqualValues(maxStreamFailures, streamGets.Load(), "repeated error events must not hold the await captive")
+	check.Positive(plainGets.Load(), "the poll fallback must run")
 }
 
-func TestQuietPathNeverStreams(t *testing.T) {
+func TestAwait_QuietPath_NeverStreams(t *testing.T) {
+	must := require.New(t)
 	var streamGets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -315,15 +271,9 @@ func TestQuietPathNeverStreams(t *testing.T) {
 	r := newResearcher(t, server)
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
-	if streamGets.Load() != 0 {
-		t.Errorf("quiet await attached %d streams, want none", streamGets.Load())
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id))
+	must.Zero(streamGets.Load(), "quiet await must not attach a stream")
 }
 
 func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
@@ -336,6 +286,7 @@ func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
 		{"quiet", false, "none"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var body struct {
 				AgentConfig struct {
 					ThinkingSummaries string `json:"thinking_summaries"`
@@ -352,17 +303,15 @@ func TestThinkingSummariesFollowsStreamOption(t *testing.T) {
 			defer server.Close()
 
 			r := newResearcher(t, server, func(o *Options) { o.ThinkingSummaries = tt.summaries })
-			if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if body.AgentConfig.ThinkingSummaries != tt.want {
-				t.Errorf("thinking_summaries = %q, want %q", body.AgentConfig.ThinkingSummaries, tt.want)
-			}
+			_, err := r.Start(context.Background(), researcher.Task{Query: "q"})
+			must.NoError(err)
+			must.Equal(tt.want, body.AgentConfig.ThinkingSummaries, "thinking_summaries")
 		})
 	}
 }
 
 func TestStartResetsReconnectCount(t *testing.T) {
+	must := require.New(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Write([]byte(`{"id":"v1_rst","status":"in_progress"}`))
@@ -376,31 +325,23 @@ func TestStartResetsReconnectCount(t *testing.T) {
 	r.reconnectCount.Store(7) // residue from a previous run
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err)
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Usage.ReconnectCount != 0 {
-		t.Errorf("reconnect count = %d, want 0 after a fresh Start", in.Usage.ReconnectCount)
-	}
+	must.NoError(err)
+	must.Zero(in.Usage.ReconnectCount, "reconnect count after a fresh Start")
 }
 
-// decodeJSONBody decodes a request body, failing the test on error.
+// decodeJSONBody decodes a request body into into. It runs on HTTP handler
+// goroutines, so a decode error is reported through check without stopping the test.
 func decodeJSONBody(t *testing.T, r *http.Request, into any) {
 	t.Helper()
-	if err := json.NewDecoder(r.Body).Decode(into); err != nil {
-		t.Fatalf("decoding request body: %v", err)
-	}
+	check := assert.New(t)
+	check.NoError(json.NewDecoder(r.Body).Decode(into), "decoding request body")
 }
 
-// TestAwaitStreamInteractionCompletedEvent pins C2-TEST-1 (1/3): an
-// interaction.completed event concludes the streaming await, whether
-// the resource travels nested under "interaction" or the completion
-// frame omits content entirely (the API may send either —
-// docs/INTERACTIONS-API.md §5). The poll fallback is never reached.
+// An interaction.completed event concludes the streaming await, whether the
+// resource arrives nested under "interaction" or the frame omits it
+// (docs/INTERACTIONS-API.md). The poll fallback is never reached.
 func TestAwaitStreamInteractionCompletedEvent(t *testing.T) {
 	cases := []struct {
 		name string
@@ -411,6 +352,7 @@ func TestAwaitStreamInteractionCompletedEvent(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var plainGets atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
@@ -428,33 +370,22 @@ func TestAwaitStreamInteractionCompletedEvent(t *testing.T) {
 			r := newResearcher(t, server, streamOpts(nil, nil))
 			ctx := context.Background()
 			id, err := r.Start(ctx, researcher.Task{Query: "q"})
-			if err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			if err := r.Await(ctx, id); err != nil {
-				t.Fatalf("Await: a completed event concludes the await, got %v", err)
-			}
-			if plainGets.Load() != 0 {
-				t.Error("the poll fallback ran for a cleanly completed stream")
-			}
+			must.NoError(err)
+			must.NoError(r.Await(ctx, id), "a completed event concludes the await")
+			must.Zero(plainGets.Load(), "the poll fallback must not run for a cleanly completed stream")
 
 			in, err := r.Result(ctx, id)
-			if err != nil {
-				t.Fatalf("Result: %v", err)
-			}
-			if in.Usage.ReconnectCount != 0 || in.Usage.PollCount != 0 {
-				t.Errorf("reconnects/polls = %d/%d, want 0/0", in.Usage.ReconnectCount, in.Usage.PollCount)
-			}
+			must.NoError(err)
+			must.Zero(in.Usage.ReconnectCount, "reconnect count")
+			must.Zero(in.Usage.PollCount, "poll count")
 		})
 	}
 }
 
-// TestAwaitStreamRequiresActionViaCompletedEvent pins C2-TEST-1 (2/3):
-// a requires_action status carried on an interaction.completed event
-// must propagate as the typed error — were eventStatus broken, the run
-// would proceed as if the interaction completed, with the wrong exit
-// code and no diagnostic.
+// A requires_action status carried on an interaction.completed event surfaces
+// as interactions.ErrRequiresAction rather than as a completed interaction.
 func TestAwaitStreamRequiresActionViaCompletedEvent(t *testing.T) {
+	must := require.New(t)
 	var plainGets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -472,22 +403,15 @@ func TestAwaitStreamRequiresActionViaCompletedEvent(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); !errors.Is(err, interactions.ErrRequiresAction) {
-		t.Fatalf("Await = %v, want ErrRequiresAction through the completed-event path", err)
-	}
-	if plainGets.Load() != 0 {
-		t.Error("requires_action via a completed event must not trigger the poll fallback")
-	}
+	must.NoError(err)
+	must.ErrorIs(r.Await(ctx, id), interactions.ErrRequiresAction, "requires_action via the completed-event path")
+	must.Zero(plainGets.Load(), "requires_action via a completed event must not trigger the poll fallback")
 }
 
-// TestAwaitStreamInteractionCreatedAlreadyTerminal pins C2-TEST-1
-// (3/3): re-attaching past the end of a finished interaction delivers
-// interaction.created carrying a terminal status as the first event;
-// the await concludes immediately without the poll fallback.
+// Re-attaching to a finished interaction delivers interaction.created with a
+// terminal status as the first event. The await concludes immediately.
 func TestAwaitStreamInteractionCreatedAlreadyTerminal(t *testing.T) {
+	must := require.New(t)
 	var plainGets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -505,22 +429,16 @@ func TestAwaitStreamInteractionCreatedAlreadyTerminal(t *testing.T) {
 	r := newResearcher(t, server, streamOpts(nil, nil))
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: an already-terminal created event concludes the await, got %v", err)
-	}
-	if plainGets.Load() != 0 {
-		t.Error("the poll fallback ran for an already-terminal re-attach")
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id), "an already-terminal created event concludes the await")
+	must.Zero(plainGets.Load(), "the poll fallback must not run for an already-terminal re-attach")
 }
 
-// TestAwaitStreamCancelledDuringBackoff pins C2-TEST-6: cancellation
-// while the await sleeps between reconnect attempts propagates as
-// context.Canceled — never the poll fallback, whose answer would not
-// change ("context cancellation never falls back", DECISIONS.md).
+// Cancellation while the await sleeps between reconnect attempts returns
+// context.Canceled. Context cancellation never falls back to polling
+// (docs/DECISIONS.md).
 func TestAwaitStreamCancelledDuringBackoff(t *testing.T) {
+	must := require.New(t)
 	dialled := make(chan struct{})
 	var (
 		once      sync.Once
@@ -552,9 +470,7 @@ func TestAwaitStreamCancelledDuringBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err)
 
 	done := make(chan error, 1)
 	go func() { done <- r.Await(ctx, id) }()
@@ -562,19 +478,15 @@ func TestAwaitStreamCancelledDuringBackoff(t *testing.T) {
 	time.Sleep(20 * time.Millisecond) // let the failed dial reach the backoff sleep
 	cancel()
 
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Await = %v, want context.Canceled", err)
-	}
-	if plainGets.Load() != 0 {
-		t.Error("cancellation fell back to polling — the answer would not change")
-	}
+	must.ErrorIs(<-done, context.Canceled)
+	must.Zero(plainGets.Load(), "cancellation must not fall back to polling")
 }
 
-// TestAwaitSignalsStreamDegradation pins C2-CODE-4: exhausting the
-// streaming failure budget invokes the OnStreamDegraded observer
-// exactly once, before the poll fallback — the in-flight signal an
-// operator watching the event stream needs.
-func TestAwaitSignalsStreamDegradation(t *testing.T) {
+// Exhausting the streaming failure budget calls OnStreamDegraded exactly once,
+// before the poll fallback. An operator watching the event stream relies on
+// this in-flight signal.
+func TestAwait_Stream_SignalsDegradationOnce(t *testing.T) {
+	must := require.New(t)
 	var degraded atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -593,13 +505,7 @@ func TestAwaitSignalsStreamDegradation(t *testing.T) {
 	})
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await must conclude via the poll fallback, got %v", err)
-	}
-	if got := degraded.Load(); got != 1 {
-		t.Errorf("OnStreamDegraded called %d time(s), want exactly 1", got)
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id), "Await must conclude via the poll fallback")
+	must.EqualValues(1, degraded.Load(), "OnStreamDegraded calls")
 }

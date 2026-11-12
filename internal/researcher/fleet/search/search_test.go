@@ -2,12 +2,14 @@ package search_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/mcpclient"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -21,14 +23,13 @@ const testKey = "sk-search-0123456789abcdefABCDEF"
 // on a construction error.
 func newClient(t *testing.T, endpoint string, mutate ...func(*search.Options)) *search.Client {
 	t.Helper()
+	must := require.New(t)
 	opts := search.Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := search.New(opts)
-	if err != nil {
-		t.Fatalf("search.New: %v", err)
-	}
+	must.NoError(err)
 	return c
 }
 
@@ -38,7 +39,9 @@ func searchText(c *search.Client, text string) ([]search.Result, error) {
 	return resp.Results, err
 }
 
-func TestSearchHappyPath(t *testing.T) {
+func TestSearch_HappyPath_ReturnsResultsAndCallFlow(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	want := []search.Result{
 		{Title: "Rayleigh scattering", URL: "https://example.com/rayleigh", Snippet: "why the sky is blue"},
 		{Title: "Atmospheric optics", URL: "https://example.com/optics", Snippet: "scattering of sunlight"},
@@ -48,65 +51,50 @@ func TestSearchHappyPath(t *testing.T) {
 
 	c := newClient(t, fake.URL())
 	got, err := searchText(c, "why is the sky blue")
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d results, want %d: %+v", len(got), len(want), got)
-	}
+	must.NoError(err)
+	must.Len(got, len(want), "results: %+v", got)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("result[%d] = %+v, want %+v", i, got[i], want[i])
-		}
+		check.Equal(want[i], got[i], "result[%d]", i)
 	}
 
 	// The flow is initialize -> notifications/initialized -> tools/call, in
 	// order, with no DELETE for a stateless server, and the key rides only the
 	// Authorization header.
 	reqs := fake.Requests()
-	if len(reqs) != 3 {
-		t.Fatalf("request count = %d, want 3 (initialize, initialized, tools/call)", len(reqs))
-	}
+	must.Len(reqs, 3, "initialize, initialized, tools/call")
 	wantMethods := []string{"initialize", "notifications/initialized", "tools/call"}
 	for i, m := range wantMethods {
-		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].Method != m {
-			t.Errorf("request[%d] = %s %q, want POST %q", i, reqs[i].HTTPMethod, reqs[i].Method, m)
-		}
-		if reqs[i].Authorization != "Bearer "+testKey {
-			t.Errorf("request[%d].Authorization = %q, want the bearer key header", i, reqs[i].Authorization)
-		}
+		check.Equal(http.MethodPost, reqs[i].HTTPMethod, "request[%d]", i)
+		check.Equal(m, reqs[i].Method, "request[%d]", i)
+		check.Equal("Bearer "+testKey, reqs[i].Authorization, "request[%d]", i)
 	}
 	// tools/call carried the configured tool name and query argument.
 	call := reqs[2]
-	if call.ToolName != "search" {
-		t.Errorf("tool name = %q, want search", call.ToolName)
-	}
-	if call.Arguments["query"] != "why is the sky blue" {
-		t.Errorf("arguments = %+v, want query set", call.Arguments)
-	}
+	check.Equal("search", call.ToolName)
+	check.Equal("why is the sky blue", call.Arguments["query"], "arguments: %+v", call.Arguments)
 }
 
-// TestSearchNeverSendsObjective: the tool takes one query argument, so the
+// TestSearch_NeverSendsObjective: the tool takes one query argument, so the
 // objective stays local, and an MCP search reports no notes and no spend.
-func TestSearchNeverSendsObjective(t *testing.T) {
+func TestSearch_NeverSendsObjective(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	resp, err := c.Search(context.Background(), web.Query{Text: "hello", Objective: "the whole research question"})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	must.NoError(err)
 	call := fake.Requests()[2]
-	if len(call.Arguments) != 1 || call.Arguments["query"] != "hello" {
-		t.Errorf("arguments = %+v, want only the query", call.Arguments)
-	}
-	if resp.Notes != nil || resp.Spend != (web.Spend{}) {
-		t.Errorf("notes = %v, spend = %+v, want none", resp.Notes, resp.Spend)
-	}
+	check.Len(call.Arguments, 1, "arguments: %+v", call.Arguments)
+	check.Equal("hello", call.Arguments["query"])
+	check.Nil(resp.Notes)
+	check.Equal(web.Spend{}, resp.Spend)
 }
 
-func TestSearchCustomToolAndArgKey(t *testing.T) {
+func TestSearch_CustomToolAndQueryArgKey(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
 
@@ -114,40 +102,34 @@ func TestSearchCustomToolAndArgKey(t *testing.T) {
 		o.ToolName = "web_search"
 		o.QueryArgKey = "q"
 	})
-	if _, err := searchText(c, "hello"); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := searchText(c, "hello")
+	must.NoError(err)
 	call := fake.Requests()[2]
-	if call.ToolName != "web_search" {
-		t.Errorf("tool name = %q, want web_search", call.ToolName)
-	}
-	if call.Arguments["q"] != "hello" {
-		t.Errorf("arguments = %+v, want q set", call.Arguments)
-	}
+	check.Equal("web_search", call.ToolName)
+	check.Equal("hello", call.Arguments["q"], "arguments: %+v", call.Arguments)
 }
 
-func TestSearchWrongQueryArgKeyIsToolError(t *testing.T) {
+func TestSearch_WrongQueryArgKey_IsToolError(t *testing.T) {
 	// A server that recognises the tool name but not the query argument key
 	// fails as a tool-level error, distinct from an unknown-tool JSON-RPC
 	// error: the fake's tool-name check passes ("search" matches the
 	// client's default) but its argument-key check does not.
+	must := require.New(t)
 	fake := searchtest.NewFakeServer(nil, searchtest.WithExpectedTool("search", "notquery"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	_, err := searchText(c, "q")
-	if err == nil {
-		t.Fatal("Search should fail when the tool rejects the query argument key")
-	}
-	if !strings.Contains(err.Error(), `missing required argument "notquery"`) {
-		t.Errorf("error = %v, want the tool's missing-argument text surfaced", err)
-	}
+	must.Error(err, "Search should fail when the tool rejects the query argument key")
+	must.ErrorContains(err, `missing required argument "notquery"`)
 }
 
-func TestSearchSessionReused(t *testing.T) {
+func TestSearch_SessionReusedAcrossSearches(t *testing.T) {
 	// A stateful server assigns a session on initialize and requires it on
 	// tools/call; the client echoes it on every later request and reuses it
 	// for the next search, whether or not the previous one failed.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer(nil,
 		searchtest.WithSessionID("sess-abc-123"),
 		searchtest.WithRawToolResult(`{"content":[{"type":"text","text":"upstream quota exceeded"}],"isError":true}`),
@@ -156,28 +138,24 @@ func TestSearchSessionReused(t *testing.T) {
 
 	c := newClient(t, fake.URL())
 	for range 2 {
-		if _, err := searchText(c, "q"); err == nil {
-			t.Fatal("Search should fail when the tool reports isError")
-		}
+		_, err := searchText(c, "q")
+		must.Error(err, "Search should fail when the tool reports isError")
 	}
 	reqs := fake.Requests()
-	if len(reqs) != 4 {
-		t.Fatalf("request count = %d, want 4 (initialize, initialized, two tools/call)", len(reqs))
-	}
+	must.Len(reqs, 4, "initialize, initialized, two tools/call")
 	// initialize is sent without a session; every later request carries the
 	// assigned one.
-	if reqs[0].SessionID != "" {
-		t.Errorf("initialize carried a session header %q, want none", reqs[0].SessionID)
-	}
+	check.Empty(reqs[0].SessionID, "initialize session header")
 	for i := 1; i < len(reqs); i++ {
-		if reqs[i].HTTPMethod != http.MethodPost || reqs[i].SessionID != "sess-abc-123" {
-			t.Errorf("request[%d] = %s session %q, want a POST echoing the assigned session", i, reqs[i].HTTPMethod, reqs[i].SessionID)
-		}
+		check.Equal(http.MethodPost, reqs[i].HTTPMethod, "request[%d]", i)
+		check.Equal("sess-abc-123", reqs[i].SessionID, "request[%d] session", i)
 	}
 }
 
-func TestSearchProtocolVersionHeader(t *testing.T) {
+func TestSearch_ProtocolVersionHeaderAfterInitialize(t *testing.T) {
 	// Every request after initialize carries the revision the server chose.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer(
 		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
 		searchtest.WithProtocolVersion("2025-03-26"),
@@ -185,90 +163,70 @@ func TestSearchProtocolVersionHeader(t *testing.T) {
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := searchText(c, "q"); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := searchText(c, "q")
+	must.NoError(err)
 	reqs := fake.Requests()
-	if reqs[0].ProtocolVersion != "" {
-		t.Errorf("initialize carried MCP-Protocol-Version %q, want none", reqs[0].ProtocolVersion)
-	}
+	check.Empty(reqs[0].ProtocolVersion, "initialize MCP-Protocol-Version header")
 	for i := 1; i < len(reqs); i++ {
-		if reqs[i].ProtocolVersion != "2025-03-26" {
-			t.Errorf("request[%d] (%s) MCP-Protocol-Version = %q, want the negotiated 2025-03-26", i, reqs[i].Method, reqs[i].ProtocolVersion)
-		}
+		check.Equal("2025-03-26", reqs[i].ProtocolVersion, "request[%d] (%s) MCP-Protocol-Version", i, reqs[i].Method)
 	}
 }
 
-func TestSearchReinitialisesAfterSessionExpiry(t *testing.T) {
+func TestSearch_SessionExpiry_Reinitialises(t *testing.T) {
 	// One session serves every search; when the server drops it, the next
 	// search re-initialises once and re-sends its call once.
+	must := require.New(t)
+	check := assert.New(t)
 	want := []search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}}
 	fake := searchtest.NewFakeServer(want, searchtest.WithSessionID("sess-s"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	for range 2 {
-		if _, err := searchText(c, "q"); err != nil {
-			t.Fatalf("Search: %v", err)
-		}
+		_, err := searchText(c, "q")
+		must.NoError(err)
 	}
-	if n := fake.InitializeCount(); n != 1 {
-		t.Fatalf("initialize count = %d after two searches, want 1", n)
-	}
+	must.Equal(1, fake.InitializeCount(), "initialize count after two searches")
 	fake.ExpireSession()
 	got, err := searchText(c, "q")
-	if err != nil {
-		t.Fatalf("Search after the session expired: %v", err)
-	}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Errorf("results = %+v, want %+v", got, want)
-	}
+	must.NoError(err, "Search after the session expired")
+	check.Equal(want, got, "results")
 	// initialize, initialized, two tools/call; the expired tools/call;
 	// initialize, initialized and the re-sent tools/call.
-	if n := fake.CallCount(); n != 8 {
-		t.Errorf("request count = %d, want 8", n)
-	}
-	if n := fake.InitializeCount(); n != 2 {
-		t.Errorf("initialize count = %d, want 2", n)
-	}
-	if n := fake.ToolCallCount(); n != 4 {
-		t.Errorf("tools/call count = %d, want 4", n)
-	}
+	check.Equal(8, fake.CallCount(), "request count")
+	check.Equal(2, fake.InitializeCount(), "initialize count")
+	check.Equal(4, fake.ToolCallCount(), "tools/call count")
 }
 
-func TestSearchClose(t *testing.T) {
+func TestSearch_Close_DeletesSessionAndRefusesSearch(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer(nil, searchtest.WithSessionID("sess-end"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := searchText(c, "q"); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := searchText(c, "q")
+	must.NoError(err)
 	for range 2 {
-		if err := c.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
+		must.NoError(c.Close())
 	}
-	if n := fake.DeleteCount(); n != 1 {
-		t.Fatalf("DELETE count = %d, want 1", n)
-	}
+	must.Equal(1, fake.DeleteCount(), "DELETE count")
 	reqs := fake.Requests()
 	end := reqs[len(reqs)-1]
-	if end.HTTPMethod != http.MethodDelete || end.SessionID != "sess-end" {
-		t.Errorf("last request = %s on %q, want the session DELETE", end.HTTPMethod, end.SessionID)
-	}
-	if end.Authorization != "Bearer "+testKey || end.ProtocolVersion != mcpclient.ProtocolVersion {
-		t.Errorf("DELETE Authorization %q version %q, want the bearer key and %q", end.Authorization, end.ProtocolVersion, mcpclient.ProtocolVersion)
-	}
-	_, err := searchText(c, "q")
-	if !errors.Is(err, mcpclient.ErrClosed) || !strings.HasPrefix(err.Error(), "search: ") {
-		t.Errorf("Search after Close = %v, want ErrClosed under the search: prefix", err)
-	}
+	check.Equal(http.MethodDelete, end.HTTPMethod, "last request method")
+	check.Equal("sess-end", end.SessionID, "last request session")
+	check.Equal("Bearer "+testKey, end.Authorization, "DELETE authorization")
+	check.Equal(mcpclient.ProtocolVersion, end.ProtocolVersion, "DELETE protocol version")
+	_, err = searchText(c, "q")
+	must.ErrorIs(err, mcpclient.ErrClosed)
+	check.True(strings.HasPrefix(err.Error(), "search: "), "error = %v, want the search: prefix", err)
 }
 
-func TestSearchUnsupportedProtocolVersion(t *testing.T) {
+func TestSearch_UnsupportedProtocolVersion_RefusesBeforeToolCall(t *testing.T) {
 	// A server choosing a revision the client does not implement fails the
 	// search before any billable tools/call.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer(
 		[]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}},
 		searchtest.WithProtocolVersion("2024-11-05"),
@@ -277,122 +235,101 @@ func TestSearchUnsupportedProtocolVersion(t *testing.T) {
 
 	c := newClient(t, fake.URL())
 	_, err := searchText(c, "q")
-	if !errors.Is(err, mcpclient.ErrUnsupportedProtocolVersion) {
-		t.Fatalf("error = %v, want ErrUnsupportedProtocolVersion", err)
-	}
-	if !strings.HasPrefix(err.Error(), "search: ") || !strings.Contains(err.Error(), `"2024-11-05"`) {
-		t.Errorf("error = %v, want the refused version under the search: prefix", err)
-	}
-	if n := fake.ToolCallCount(); n != 0 {
-		t.Errorf("tools/call count = %d, want 0", n)
-	}
+	must.ErrorIs(err, mcpclient.ErrUnsupportedProtocolVersion)
+	check.True(strings.HasPrefix(err.Error(), "search: "), "error = %v, want the search: prefix", err)
+	must.ErrorContains(err, `"2024-11-05"`)
+	check.Equal(0, fake.ToolCallCount(), "tools/call count")
 }
 
-func TestSearchOverSSE(t *testing.T) {
+func TestSearch_OverSSE_ReturnsResults(t *testing.T) {
 	// The tools/call reply may be a text/event-stream frame carrying the
 	// JSON-RPC response; the client reads it under the same bound.
+	must := require.New(t)
 	want := []search.Result{{Title: "SSE result", URL: "https://e.com/sse", Snippet: "streamed"}}
 	fake := searchtest.NewFakeServer(want, searchtest.WithSSE())
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	got, err := searchText(c, "q")
-	if err != nil {
-		t.Fatalf("Search over SSE: %v", err)
-	}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
+	must.NoError(err)
+	must.Equal(want, got)
 }
 
-func TestSearchStructuredContent(t *testing.T) {
+func TestSearch_StructuredContent_IsParsed(t *testing.T) {
 	// The results document may arrive as structuredContent rather than inside
 	// a text block; the client prefers it.
+	must := require.New(t)
 	raw := `{"content":[],"structuredContent":{"results":[{"title":"S","url":"https://e.com/s","snippet":"struct"}]},"isError":false}`
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	got, err := searchText(c, "q")
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(got) != 1 || got[0].URL != "https://e.com/s" || got[0].Snippet != "struct" {
-		t.Fatalf("structuredContent not parsed: %+v", got)
-	}
+	must.NoError(err)
+	must.Len(got, 1, "structuredContent not parsed: %+v", got)
+	must.Equal("https://e.com/s", got[0].URL)
+	must.Equal("struct", got[0].Snippet)
 }
 
-func TestSearchGracefulDegradationOnUnexpectedShape(t *testing.T) {
+func TestSearch_UnexpectedShape_DegradesToSnippet(t *testing.T) {
 	// A tool result that carries prose but not the expected results document
 	// degrades to a single snippet rather than erroring.
+	must := require.New(t)
+	check := assert.New(t)
 	raw := `{"content":[{"type":"text","text":"I could not find structured results but here is a summary."}],"isError":false}`
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	got, err := searchText(c, "q")
-	if err != nil {
-		t.Fatalf("Search should degrade gracefully, got error: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("got %d results, want 1 degraded snippet: %+v", len(got), got)
-	}
-	if got[0].Snippet != "I could not find structured results but here is a summary." {
-		t.Errorf("degraded snippet = %q, want the text content surfaced", got[0].Snippet)
-	}
-	if got[0].URL != "" {
-		t.Errorf("degraded result URL = %q, want empty", got[0].URL)
-	}
+	must.NoError(err, "Search should degrade gracefully")
+	must.Len(got, 1, "want 1 degraded snippet: %+v", got)
+	check.Equal("I could not find structured results but here is a summary.", got[0].Snippet, "degraded snippet")
+	check.Empty(got[0].URL, "degraded result URL")
 }
 
-func TestSearchEmptyResultsIsSuccess(t *testing.T) {
+func TestSearch_EmptyResultsDocument_IsSuccess(t *testing.T) {
 	// A results document with an empty array is a valid zero-hit success, not
 	// a degradation to a text snippet.
+	must := require.New(t)
 	raw := `{"content":[{"type":"text","text":"{\"results\":[]}"}],"isError":false}`
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	got, err := searchText(c, "q")
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("got %d results, want 0 for an empty results document: %+v", len(got), got)
-	}
+	must.NoError(err)
+	must.Empty(got, "want no results for an empty results document: %+v", got)
 }
 
-func TestSearchToolError(t *testing.T) {
+func TestSearch_ToolError_IsSurfaced(t *testing.T) {
 	// isError:true is a tool-level failure the client surfaces as an error.
+	must := require.New(t)
 	raw := `{"content":[{"type":"text","text":"upstream search quota exceeded"}],"isError":true}`
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	_, err := searchText(c, "q")
-	if err == nil {
-		t.Fatal("Search should fail when the tool reports isError")
-	}
-	if !strings.Contains(err.Error(), "quota") {
-		t.Errorf("error = %v, want the tool error surfaced", err)
-	}
+	must.Error(err, "Search should fail when the tool reports isError")
+	must.ErrorContains(err, "quota")
 }
 
 func TestSearchToolCallNotRetried(t *testing.T) {
 	// tools/call may invoke a billable upstream search; it is single-attempt.
 	// A tools/call reply that cannot be decoded must not be retried.
+	must := require.New(t)
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult("this is not json"))
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
 	_, _ = searchText(c, "q")
-	if n := fake.ToolCallCount(); n != 1 {
-		t.Errorf("tools/call count = %d, want exactly 1 — the billable call must not be retried", n)
-	}
+	must.Equal(1, fake.ToolCallCount(), "the billable tools/call must not be retried")
 }
 
-func TestSearchOversizedBodyBounded(t *testing.T) {
+func TestSearch_OversizedBody_IsBounded(t *testing.T) {
 	// A tools/call result over the bound is an error, not a truncation.
+	must := require.New(t)
 	big := strings.Repeat("x", 4096)
 	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw))
@@ -400,16 +337,14 @@ func TestSearchOversizedBodyBounded(t *testing.T) {
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
 	_, err := searchText(c, "q")
-	if err == nil {
-		t.Fatal("Search should fail when the response exceeds MaxBodyBytes")
-	}
-	if !strings.Contains(err.Error(), "exceed") && !strings.Contains(err.Error(), "bound") {
-		t.Errorf("error = %v, want a body-bound error", err)
-	}
+	must.Error(err, "Search should fail when the response exceeds MaxBodyBytes")
+	msg := err.Error()
+	must.True(strings.Contains(msg, "exceed") || strings.Contains(msg, "bound"), "error = %v, want a body-bound error", err)
 }
 
-func TestSearchOversizedSSEBounded(t *testing.T) {
+func TestSearch_OversizedSSE_IsBounded(t *testing.T) {
 	// The SSE read path is bounded too: a large streamed frame is rejected.
+	must := require.New(t)
 	big := strings.Repeat("y", 4096)
 	raw := fmt.Sprintf(`{"content":[{"type":"text","text":%q}],"isError":false}`, big)
 	fake := searchtest.NewFakeServer(nil, searchtest.WithRawToolResult(raw), searchtest.WithSSE())
@@ -417,15 +352,12 @@ func TestSearchOversizedSSEBounded(t *testing.T) {
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.MaxBodyBytes = 512 })
 	_, err := searchText(c, "q")
-	if err == nil {
-		t.Fatal("Search over SSE should fail when the stream exceeds MaxBodyBytes")
-	}
-	if !strings.Contains(err.Error(), "exceed") && !strings.Contains(err.Error(), "bound") {
-		t.Errorf("error = %v, want a body-bound error", err)
-	}
+	must.Error(err, "Search over SSE should fail when the stream exceeds MaxBodyBytes")
+	msg := err.Error()
+	must.True(strings.Contains(msg, "exceed") || strings.Contains(msg, "bound"), "error = %v, want a body-bound error", err)
 }
 
-func TestSearchEndpointValidation(t *testing.T) {
+func TestSearch_EndpointValidation(t *testing.T) {
 	tests := []struct {
 		name     string
 		endpoint string
@@ -445,15 +377,15 @@ func TestSearchEndpointValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := search.New(search.Options{Endpoint: tt.endpoint, APIKey: testKey})
-			if tt.wantErr && err == nil {
-				t.Errorf("search.New(%q) succeeded, want an error", tt.endpoint)
+			if tt.wantErr {
+				must.Error(err, "search.New(%q) should fail", tt.endpoint)
+			} else {
+				must.NoError(err, "search.New(%q)", tt.endpoint)
 			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("search.New(%q) = %v, want success", tt.endpoint, err)
-			}
-			if err != nil && !strings.HasPrefix(err.Error(), "search: ") {
-				t.Errorf("error = %v, want the search: prefix", err)
+			if err != nil {
+				must.True(strings.HasPrefix(err.Error(), "search: "), "error = %v, want the search: prefix", err)
 			}
 		})
 	}
@@ -462,6 +394,8 @@ func TestSearchEndpointValidation(t *testing.T) {
 func TestSearchErrorNeverLeaksKey(t *testing.T) {
 	// A failing request must not surface the API key anywhere in the error,
 	// even when the server echoes request context in its error body.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"invalid key ` + testKey + `"}`))
@@ -470,42 +404,34 @@ func TestSearchErrorNeverLeaksKey(t *testing.T) {
 
 	c := newClient(t, fake.URL)
 	_, err := searchText(c, "q")
-	if err == nil {
-		t.Fatal("Search should fail on a 401")
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Fatalf("error leaked the API key: %v", err)
-	}
-	if !strings.HasPrefix(err.Error(), "search: ") || !strings.Contains(err.Error(), "HTTP 401") {
-		t.Errorf("error = %v, want the transport failure under the search: prefix", err)
-	}
+	must.Error(err, "Search should fail on a 401")
+	must.NotContains(err.Error(), testKey, "error leaked the API key")
+	check.True(strings.HasPrefix(err.Error(), "search: "), "error = %v, want the search: prefix", err)
+	check.ErrorContains(err, "HTTP 401")
 }
 
-func TestSearchEmptyQueryRejected(t *testing.T) {
+func TestSearch_EmptyQuery_IsRejectedBeforeRequest(t *testing.T) {
+	must := require.New(t)
 	fake := searchtest.NewFakeServer(nil)
 	defer fake.Close()
 
 	c := newClient(t, fake.URL())
-	if _, err := searchText(c, ""); err == nil {
-		t.Fatal("Search with an empty query should fail")
-	}
-	if fake.CallCount() != 0 {
-		t.Errorf("call count = %d, want 0 — validation must precede any request", fake.CallCount())
-	}
+	_, err := searchText(c, "")
+	must.Error(err, "Search with an empty query should fail")
+	must.Equal(0, fake.CallCount(), "validation must precede any request")
 }
 
-func TestSearchKeylessServer(t *testing.T) {
+func TestSearch_KeylessServer_SendsNoAuthorization(t *testing.T) {
 	// A server needing no key: no Authorization header is sent.
+	must := require.New(t)
+	check := assert.New(t)
 	fake := searchtest.NewFakeServer([]search.Result{{Title: "t", URL: "https://e.com", Snippet: "s"}})
 	defer fake.Close()
 
 	c := newClient(t, fake.URL(), func(o *search.Options) { o.APIKey = "" })
-	if _, err := searchText(c, "q"); err != nil {
-		t.Fatalf("Search: %v", err)
-	}
+	_, err := searchText(c, "q")
+	must.NoError(err)
 	for i, req := range fake.Requests() {
-		if req.Authorization != "" {
-			t.Errorf("request[%d] carried Authorization %q on a keyless client", i, req.Authorization)
-		}
+		check.Empty(req.Authorization, "request[%d] authorization on a keyless client", i)
 	}
 }

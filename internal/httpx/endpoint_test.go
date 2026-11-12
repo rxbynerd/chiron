@@ -1,14 +1,15 @@
 package httpx_test
 
 import (
-	"errors"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/httpx"
 )
 
-func TestParseEndpoint(t *testing.T) {
+func TestParseEndpoint_AcceptsAndRejects(t *testing.T) {
 	const (
 		absolute = "must be an absolute https:// URL"
 		userinfo = "userinfo"
@@ -24,7 +25,7 @@ func TestParseEndpoint(t *testing.T) {
 		{"https host with trailing slash", "https://api.example.com/v1/", ""},
 		{"https host with port", "https://api.example.com:8443/v1", ""},
 		{"https on a private address", "https://10.0.0.1/v1", ""},
-		{"https on an IPv6 literal", "https://[2001:db8::1]/v1", ""},
+		{"https on an ipv6 literal", "https://[2001:db8::1]/v1", ""},
 		{"encoded question mark in path", "https://api.example.com/a%3Fb", ""},
 		{"http on 127.0.0.1", "http://127.0.0.1:8080/v1", ""},
 		{"http elsewhere in 127.0.0.0/8", "http://127.1.2.3/v1", ""},
@@ -44,12 +45,12 @@ func TestParseEndpoint(t *testing.T) {
 		{"http non-loopback", "http://api.example.com/v1", absolute},
 		{"http metadata service", "http://169.254.169.254", absolute},
 		{"http private address", "http://10.0.0.1", absolute},
-		{"http unspecified IPv4", "http://0.0.0.0:8080", absolute},
-		{"http unspecified IPv6", "http://[::]:8080", absolute},
+		{"http unspecified ipv4", "http://0.0.0.0:8080", absolute},
+		{"http unspecified ipv6", "http://[::]:8080", absolute},
 		{"http loopback lookalike name", "http://127.0.0.1.nip.io", absolute},
 		{"http localhost suffix", "http://localhost.evil.com", absolute},
 		{"http upper-case localhost", "http://LOCALHOST:8080", absolute},
-		{"http IPv4-mapped non-loopback", "http://[::ffff:10.0.0.1]", absolute},
+		{"http ipv4-mapped non-loopback", "http://[::ffff:10.0.0.1]", absolute},
 		{"ftp scheme", "ftp://api.example.com", absolute},
 		{"file scheme", "file:///etc/passwd", absolute},
 		{"ws scheme on loopback", "ws://localhost:8080", absolute},
@@ -62,7 +63,7 @@ func TestParseEndpoint(t *testing.T) {
 		{"port without hostname", "https://:443/v1", absolute},
 		{"unparseable", "://not a url", absolute},
 		{"invalid port", "https://api.example.com:port/", absolute},
-		{"unterminated IPv6 literal", "http://[::1", absolute},
+		{"unterminated ipv6 literal", "http://[::1", absolute},
 		{"control character", "https://api.example.com/\n", absolute},
 
 		{"query", "https://api.example.com/v1?api_key=x", queryish},
@@ -74,43 +75,35 @@ func TestParseEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			u, err := httpx.ParseEndpoint(tt.raw)
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("ParseEndpoint(%q) = %v, want success", tt.raw, err)
-				}
-				if u == nil || u.Hostname() == "" {
-					t.Fatalf("ParseEndpoint(%q) returned %v, want a parsed URL with a host", tt.raw, u)
-				}
+				must.NoError(err, "ParseEndpoint(%q)", tt.raw)
+				must.NotNil(u, "ParseEndpoint(%q)", tt.raw)
+				must.NotEmpty(u.Hostname(), "ParseEndpoint(%q)", tt.raw)
 				return
 			}
-			if err == nil {
-				t.Fatalf("ParseEndpoint(%q) succeeded, want an error containing %q", tt.raw, tt.wantErr)
-			}
-			if u != nil {
-				t.Errorf("ParseEndpoint(%q) returned a URL alongside its error", tt.raw)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("ParseEndpoint(%q) = %v, want an error containing %q", tt.raw, err, tt.wantErr)
-			}
-			if !errors.Is(err, httpx.ErrInvalidEndpoint) {
-				t.Errorf("ParseEndpoint(%q) = %v, want it to match ErrInvalidEndpoint", tt.raw, err)
-			}
+			must.Error(err, "ParseEndpoint(%q)", tt.raw)
+			must.Nil(u, "ParseEndpoint(%q) returned a URL alongside its error", tt.raw)
+			must.ErrorContains(err, tt.wantErr)
+			must.ErrorIs(err, httpx.ErrInvalidEndpoint)
 		})
 	}
 }
 
-func TestParseEndpointReturnsParsedURL(t *testing.T) {
+func TestParseEndpoint_ReturnsParsedURL(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	u, err := httpx.ParseEndpoint("https://api.example.com:8443/v1/")
-	if err != nil {
-		t.Fatalf("ParseEndpoint: %v", err)
-	}
-	if u.Scheme != "https" || u.Host != "api.example.com:8443" || u.Path != "/v1/" {
-		t.Errorf("ParseEndpoint = scheme %q host %q path %q", u.Scheme, u.Host, u.Path)
-	}
+	must.NoError(err)
+
+	check.Equal("https", u.Scheme)
+	check.Equal("api.example.com:8443", u.Host)
+	check.Equal("/v1/", u.Path)
 }
 
-func TestParseEndpointErrorsNeverEchoRawValue(t *testing.T) {
+func TestParseEndpoint_ErrorsNeverEchoRawValue(t *testing.T) {
 	const secret = "sk-Zq8TopSecretCredential"
 	tests := []struct {
 		name string
@@ -131,57 +124,58 @@ func TestParseEndpointErrorsNeverEchoRawValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := httpx.ParseEndpoint(tt.raw)
-			if err == nil {
-				t.Fatalf("ParseEndpoint(%q) succeeded, want an error", tt.raw)
-			}
-			if msg := err.Error(); strings.Contains(msg, secret) || strings.Contains(msg, tt.raw) {
-				t.Errorf("error echoed the raw value: %v", err)
-			}
+			must.Error(err)
+
+			msg := err.Error()
+			must.NotContains(msg, secret)
+			must.NotContains(msg, tt.raw)
 		})
 	}
 }
 
-func TestLoopbackHost(t *testing.T) {
+func TestLoopbackHost_ClassifiesHosts(t *testing.T) {
 	tests := []struct {
+		name string
 		host string
 		want bool
 	}{
-		{"localhost", true},
-		{"127.0.0.1", true},
-		{"127.1.2.3", true},
-		{"127.255.255.255", true},
-		{"::1", true},
-		{"0:0:0:0:0:0:0:1", true},
-		{"::ffff:127.0.0.1", true},
+		{"localhost", "localhost", true},
+		{"ipv4 loopback", "127.0.0.1", true},
+		{"ipv4 loopback range", "127.1.2.3", true},
+		{"ipv4 loopback range end", "127.255.255.255", true},
+		{"ipv6 loopback", "::1", true},
+		{"ipv6 loopback expanded", "0:0:0:0:0:0:0:1", true},
+		{"ipv4-mapped ipv6 loopback", "::ffff:127.0.0.1", true},
 
-		{"", false},
-		{"LOCALHOST", false},
-		{"Localhost", false},
-		{"localhost.", false},
-		{"localhost.evil.com", false},
-		{"evil-localhost", false},
-		{"127.0.0.1.nip.io", false},
-		{"[::1]", false},
-		{"127.0.0.1:8080", false},
-		{"::1%lo0", false},
-		{"0.0.0.0", false},
-		{"::", false},
-		{"::ffff:10.0.0.1", false},
-		{"126.255.255.255", false},
-		{"128.0.0.1", false},
-		{"10.0.0.1", false},
-		{"169.254.169.254", false},
-		{"127.1", false},
-		{"0x7f000001", false},
-		{"2130706433", false},
-		{"127.000.000.001", false},
+		{"empty host", "", false},
+		{"upper-case localhost", "LOCALHOST", false},
+		{"mixed-case localhost", "Localhost", false},
+		{"localhost with trailing dot", "localhost.", false},
+		{"localhost subdomain", "localhost.evil.com", false},
+		{"localhost as name suffix", "evil-localhost", false},
+		{"loopback address as subdomain", "127.0.0.1.nip.io", false},
+		{"bracketed ipv6 loopback", "[::1]", false},
+		{"loopback with port", "127.0.0.1:8080", false},
+		{"ipv6 loopback with zone", "::1%lo0", false},
+		{"ipv4 unspecified", "0.0.0.0", false},
+		{"ipv6 unspecified", "::", false},
+		{"ipv4-mapped private address", "::ffff:10.0.0.1", false},
+		{"address below loopback range", "126.255.255.255", false},
+		{"address above loopback range", "128.0.0.1", false},
+		{"private ipv4 address", "10.0.0.1", false},
+		{"metadata service address", "169.254.169.254", false},
+		{"short ipv4 loopback form", "127.1", false},
+		{"hex ipv4 loopback", "0x7f000001", false},
+		{"decimal ipv4 loopback", "2130706433", false},
+		{"zero-padded ipv4 loopback", "127.000.000.001", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.host, func(t *testing.T) {
-			if got := httpx.LoopbackHost(tt.host); got != tt.want {
-				t.Errorf("LoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
-			}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got := httpx.LoopbackHost(tt.host)
+			must.Equal(tt.want, got, "LoopbackHost(%q)", tt.host)
 		})
 	}
 }

@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const testKey = "sk-mcp-0123456789abcdefABCDEF"
@@ -21,14 +24,13 @@ const testKey = "sk-mcp-0123456789abcdefABCDEF"
 // construction error.
 func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client {
 	t.Helper()
+	must := require.New(t)
 	opts := Options{Endpoint: endpoint, APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := New(opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err, "New")
 	return c
 }
 
@@ -51,14 +53,13 @@ func deref(id *int) int {
 // answered; the caller answers anything else (tools/call).
 func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcRequest, bool) {
 	t.Helper()
+	check := assert.New(t)
 	var req rpcRequest
 	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Errorf("reading request body: %v", err)
+	if !check.NoError(err, "reading request body") {
 		return req, true
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Errorf("decoding request body: %v", err)
+	if !check.NoError(json.Unmarshal(body, &req), "decoding request body") {
 		return req, true
 	}
 	switch req.Method {
@@ -76,11 +77,12 @@ func answerHandshake(t *testing.T, w http.ResponseWriter, r *http.Request) (rpcR
 // sseWrite writes frames as a text/event-stream reply and flushes them.
 func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	t.Helper()
+	check := assert.New(t)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	for _, f := range frames {
 		if _, err := fmt.Fprint(w, f); err != nil {
-			t.Errorf("writing SSE frame: %v", err)
+			check.Fail("writing SSE frame", err.Error())
 		}
 	}
 	if fl, ok := w.(http.Flusher); ok {
@@ -88,7 +90,7 @@ func sseWrite(t *testing.T, w http.ResponseWriter, frames ...string) {
 	}
 }
 
-func TestCallToolHeadersAndClientInfo(t *testing.T) {
+func TestCallTool_Headers_AcceptsBothFramingsAndSendsClientInfo(t *testing.T) {
 	// Every POST names both reply framings in Accept, which strict servers
 	// require; initialize advertises the configured clientInfo.
 	tests := []struct {
@@ -102,6 +104,8 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
 			var mu sync.Mutex
 			var accepts, contentTypes []string
 			var info clientInfo
@@ -134,27 +138,23 @@ func TestCallToolHeadersAndClientInfo(t *testing.T) {
 			defer server.Close()
 
 			c := newClient(t, server.URL, tt.mutate)
-			if _, err := call(c); err != nil {
-				t.Fatalf("CallTool: %v", err)
-			}
+			_, err := call(c)
+			must.NoError(err, "CallTool")
 			mu.Lock()
 			defer mu.Unlock()
 			for i := range accepts {
-				if accepts[i] != "application/json, text/event-stream" {
-					t.Errorf("request[%d] Accept = %q, want both framings", i, accepts[i])
-				}
-				if contentTypes[i] != "application/json" {
-					t.Errorf("request[%d] Content-Type = %q, want application/json", i, contentTypes[i])
-				}
+				check.Equal("application/json, text/event-stream", accepts[i], "request %d Accept", i)
+				check.Equal("application/json", contentTypes[i], "request %d Content-Type", i)
 			}
-			if info.Name != tt.wantName || info.Version != tt.wantVersion {
-				t.Errorf("clientInfo = %+v, want %s/%s", info, tt.wantName, tt.wantVersion)
-			}
+			must.Equal(tt.wantName, info.Name, "clientInfo name")
+			must.Equal(tt.wantVersion, info.Version, "clientInfo version")
 		})
 	}
 }
 
-func TestCloseIgnoresFailedSessionDelete(t *testing.T) {
+func TestClose_IgnoresFailedSessionDelete(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var deletes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
@@ -174,21 +174,13 @@ func TestCloseIgnoresFailedSessionDelete(t *testing.T) {
 
 	c := newClient(t, server.URL)
 	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if FirstText(got.Content) != "done" {
-		t.Errorf("result = %+v, want the scripted text", got)
-	}
-	if err := c.Close(); err != nil {
-		t.Errorf("Close should ignore a failed session DELETE, got: %v", err)
-	}
-	if n := deletes.Load(); n != 1 {
-		t.Errorf("DELETE count = %d, want 1", n)
-	}
+	must.NoError(err, "CallTool")
+	check.Equal("done", FirstText(got.Content), "result = %+v", got)
+	must.NoError(c.Close(), "Close should ignore a failed session DELETE")
+	check.EqualValues(1, deletes.Load(), "DELETE count")
 }
 
-func TestCallToolRPCError(t *testing.T) {
+func TestCallTool_RPCError_IsScrubbedAndNotRetried(t *testing.T) {
 	// A JSON-RPC error on tools/call is surfaced, scrubbed, and not retried.
 	// A null id is how JSON-RPC reports an error it could not attribute.
 	tests := []struct {
@@ -201,6 +193,7 @@ func TestCallToolRPCError(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			var toolCalls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, answered := answerHandshake(t, w, r); answered {
@@ -214,23 +207,16 @@ func TestCallToolRPCError(t *testing.T) {
 
 			c := newClient(t, server.URL)
 			_, err := call(c)
-			if err == nil {
-				t.Fatal("CallTool should fail on a JSON-RPC error reply")
-			}
-			if !strings.HasPrefix(err.Error(), "mcp: tools/call rejected") || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error = %v, want an mcp tools/call rejection containing %q", err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), testKey) {
-				t.Errorf("error leaked the API key: %v", err)
-			}
-			if n := toolCalls.Load(); n != 1 {
-				t.Errorf("tools/call count = %d, want exactly 1", n)
-			}
+			must.Error(err, "CallTool should fail on a JSON-RPC error reply")
+			must.True(strings.HasPrefix(err.Error(), "mcp: tools/call rejected"), "error = %v", err)
+			must.ErrorContains(err, tt.wantErr)
+			must.NotContains(err.Error(), testKey, "error leaked the API key")
+			must.EqualValues(1, toolCalls.Load(), "tools/call count")
 		})
 	}
 }
 
-func TestCallToolMismatchedResponseID(t *testing.T) {
+func TestCallTool_MismatchedResponseID_IsRejected(t *testing.T) {
 	const result = `"result":{"content":[]}`
 	tests := []struct {
 		name  string
@@ -244,6 +230,7 @@ func TestCallToolMismatchedResponseID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, answered := answerHandshake(t, w, r); answered {
 					return
@@ -259,17 +246,14 @@ func TestCallToolMismatchedResponseID(t *testing.T) {
 
 			c := newClient(t, server.URL)
 			_, err := call(c)
-			if err == nil {
-				t.Fatal("CallTool should reject a reply with a mismatched id")
-			}
-			if !strings.Contains(err.Error(), "does not answer request id 2") {
-				t.Errorf("error = %v, want an id-mismatch error", err)
-			}
+			must.Error(err, "CallTool should reject a reply with a mismatched id")
+			must.ErrorContains(err, "does not answer request id 2")
 		})
 	}
 }
 
-func TestCallToolSSEMultiLineData(t *testing.T) {
+func TestCallTool_SSE_RejoinsMultiLineData(t *testing.T) {
+	must := require.New(t)
 	// One JSON-RPC message split across several data: lines is rejoined with
 	// newlines before decoding; event: and id: fields are ignored.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,15 +273,13 @@ func TestCallToolSSEMultiLineData(t *testing.T) {
 
 	c := newClient(t, server.URL)
 	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool over multi-line SSE data: %v", err)
-	}
-	if FirstText(got.Content) != "multi" {
-		t.Fatalf("result = %+v, want the text from the rejoined message", got)
-	}
+	must.NoError(err, "CallTool over multi-line SSE data")
+	must.Equal("multi", FirstText(got.Content), "result = %+v", got)
 }
 
-func TestCallToolSSESkipsServerMessagesBeforeReply(t *testing.T) {
+func TestCallTool_SSE_SkipsServerMessagesBeforeReply(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// A keep-alive comment, a notification and a server request with its own
 	// id may precede the reply. They are skipped, and the reply is returned
 	// without waiting for the server to end the stream.
@@ -321,18 +303,15 @@ func TestCallToolSSESkipsServerMessagesBeforeReply(t *testing.T) {
 	c := newClient(t, server.URL)
 	start := time.Now()
 	got, err := call(c)
-	if err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("CallTool took %s; it should return on the reply frame, not at end of stream", elapsed)
-	}
-	if FirstText(got.Content) != "after" {
-		t.Fatalf("result = %+v, want the reply after the server messages", got)
-	}
+	elapsed := time.Since(start)
+	must.NoError(err, "CallTool")
+	check.LessOrEqual(elapsed, time.Second, "CallTool took %s; it should return on the reply frame, not at end of stream", elapsed)
+	must.Equal("after", FirstText(got.Content), "result = %+v", got)
 }
 
-func TestCallToolSSEStreamBounded(t *testing.T) {
+func TestCallTool_SSE_StreamBoundedInAggregate(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// Many frames each under the bound still count against it in aggregate.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, answered := answerHandshake(t, w, r); answered {
@@ -349,15 +328,11 @@ func TestCallToolSSEStreamBounded(t *testing.T) {
 
 	c := newClient(t, server.URL, func(o *Options) { o.MaxBodyBytes = 512 })
 	_, err := call(c)
-	if err == nil {
-		t.Fatal("CallTool should fail when the SSE stream exceeds MaxBodyBytes")
-	}
-	if !strings.Contains(err.Error(), "mcp: SSE stream exceeds 512-byte bound") {
-		t.Errorf("error = %v, want the aggregate stream bound", err)
-	}
+	must.Error(err, "CallTool should fail when the SSE stream exceeds MaxBodyBytes")
+	check.ErrorContains(err, "mcp: SSE stream exceeds 512-byte bound")
 }
 
-func TestCallToolMalformedReply(t *testing.T) {
+func TestCallTool_MalformedReply_Fails(t *testing.T) {
 	// A tools/call reply body that is not JSON, or an event stream that is
 	// malformed, has a line past the bound, or ends without a response, fails
 	// the call.
@@ -377,6 +352,7 @@ func TestCallToolMalformedReply(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, answered := answerHandshake(t, w, r); answered {
 					return
@@ -389,16 +365,17 @@ func TestCallToolMalformedReply(t *testing.T) {
 
 			c := newClient(t, server.URL, func(o *Options) { o.MaxBodyBytes = tt.maxBodyBytes })
 			_, err := call(c)
-			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
-				t.Errorf("error = %.200v, want %q", err, tt.wantErr)
-			}
+			must.Error(err, "CallTool should fail on a malformed reply")
+			must.True(strings.HasPrefix(err.Error(), tt.wantErr), "error = %.200v, want prefix %q", err, tt.wantErr)
 		})
 	}
 }
 
-func TestCallToolCrossHostRedirectRefused(t *testing.T) {
+func TestCallTool_Redirect_CrossHostRefused(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("redirect target was called; the key would have leaked to %s", r.Host)
+		check.Fail("redirect target was called", "the key would have leaked to %s", r.Host)
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
 	}))
 	defer elsewhere.Close()
@@ -410,15 +387,13 @@ func TestCallToolCrossHostRedirectRefused(t *testing.T) {
 
 	c := newClient(t, redirector.URL)
 	_, err := call(c)
-	if err == nil {
-		t.Fatal("CallTool should fail rather than follow a cross-host redirect")
-	}
-	if !strings.Contains(err.Error(), "cross-origin") {
-		t.Errorf("error = %v, want a cross-host redirect refusal", err)
-	}
+	must.Error(err, "CallTool should fail rather than follow a cross-host redirect")
+	must.ErrorContains(err, "cross-origin")
 }
 
-func TestCallToolCallerCheckRedirectOverridden(t *testing.T) {
+func TestCallTool_Redirect_CallerPolicyOverridden(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// New must impose its own redirect policy even when the caller's
 	// http.Client already carries a permissive one.
 	var targetHits atomic.Int32
@@ -438,21 +413,15 @@ func TestCallToolCallerCheckRedirectOverridden(t *testing.T) {
 	permissive := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }}
 	c := newClient(t, origin.URL, func(o *Options) { o.HTTPClient = permissive })
 	_, err := call(c)
-	if err == nil {
-		t.Fatal("CallTool should refuse the redirect even though the caller's client permits it")
-	}
-	if !strings.Contains(err.Error(), "cross-origin") {
-		t.Errorf("error = %v, want a cross-host redirect refusal", err)
-	}
-	if got := originHits.Load(); got != 1 {
-		t.Errorf("origin hits = %d, want 1", got)
-	}
-	if got := targetHits.Load(); got != 0 {
-		t.Errorf("target hits = %d, want 0", got)
-	}
+	must.Error(err, "CallTool should refuse the redirect even though the caller's client permits it")
+	must.ErrorContains(err, "cross-origin")
+	check.EqualValues(1, originHits.Load(), "origin hits")
+	check.EqualValues(0, targetHits.Load(), "target hits")
 }
 
-func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
+func TestCallTool_Redirect_HTTPSDowngradeRefused(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// net/http re-sends Authorization to the same hostname on any scheme, so
 	// an https endpoint redirecting to http on the same host must be refused
 	// before a second connection is opened.
@@ -471,25 +440,19 @@ func TestCallToolHTTPSDowngradeRedirectRefused(t *testing.T) {
 
 	c := newClient(t, server.URL, func(o *Options) { o.HTTPClient = server.Client() })
 	_, err := call(c)
-	if err == nil {
-		t.Fatal("CallTool should fail rather than follow an https-to-http redirect")
-	}
-	if !strings.Contains(err.Error(), "downgrade") {
-		t.Errorf("error = %v, want a downgrade refusal", err)
-	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("handler hits = %d, want 1", got)
-	}
-	if got := conns.Load(); got != 1 {
-		t.Errorf("connections = %d, want 1; the cleartext redirect target must never be dialled", got)
-	}
+	must.Error(err, "CallTool should fail rather than follow an https-to-http redirect")
+	must.ErrorContains(err, "downgrade")
+	check.EqualValues(1, hits.Load(), "handler hits")
+	check.EqualValues(1, conns.Load(), "connections; the cleartext redirect target must never be dialled")
 }
 
-func TestCloseCrossHostRedirectRefused(t *testing.T) {
+func TestClose_Redirect_CrossHostRefused(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// Close's session DELETE carries the key and the session id, so it
 	// refuses a cross-host redirect exactly as a POST does.
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("redirect target was called with %s; the session DELETE followed a cross-host redirect", r.Method)
+		check.Fail("the session DELETE followed a cross-host redirect", "redirect target was called with %s", r.Method)
 	}))
 	defer elsewhere.Close()
 
@@ -511,26 +474,20 @@ func TestCloseCrossHostRedirectRefused(t *testing.T) {
 	defer origin.Close()
 
 	c := newClient(t, origin.URL)
-	if _, err := call(c); err != nil {
-		t.Fatalf("CallTool: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-	if n := deletes.Load(); n != 1 {
-		t.Errorf("origin DELETE count = %d, want 1", n)
-	}
+	_, err := call(c)
+	must.NoError(err, "CallTool")
+	check.NoError(c.Close(), "Close")
+	check.EqualValues(1, deletes.Load(), "origin DELETE count")
 }
 
-func TestCallerHTTPClientNotMutated(t *testing.T) {
+func TestNew_CallerHTTPClientNotMutated(t *testing.T) {
+	must := require.New(t)
 	hc := &http.Client{}
 	_ = newClient(t, "https://mcp.example.com/", func(o *Options) { o.HTTPClient = hc })
-	if hc.CheckRedirect != nil {
-		t.Error("New set CheckRedirect on the caller's client; it must work on a copy")
-	}
+	must.Nil(hc.CheckRedirect, "New set CheckRedirect on the caller's client; it must work on a copy")
 }
 
-func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
+func TestNew_EndpointCredentialsRejectedWithoutEcho(t *testing.T) {
 	// An endpoint carrying credentials is rejected, and the error never
 	// repeats them, even when a typo stops url.Parse recognising userinfo.
 	const (
@@ -552,21 +509,17 @@ func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := New(Options{Endpoint: tt.endpoint, APIKey: testKey})
-			if err == nil {
-				t.Fatalf("New(%q) succeeded, want an error", tt.endpoint)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), username) {
-				t.Errorf("error echoed the credentials: %v", err)
-			}
+			must.Error(err, "New(%q) should fail", tt.endpoint)
+			must.ErrorContains(err, tt.wantErr)
+			must.NotContains(err.Error(), password, "error echoed the credentials")
+			must.NotContains(err.Error(), username, "error echoed the credentials")
 		})
 	}
 }
 
-func TestEndpointValidation(t *testing.T) {
+func TestNew_EndpointValidation(t *testing.T) {
 	tests := []struct {
 		name     string
 		endpoint string
@@ -589,21 +542,21 @@ func TestEndpointValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := New(Options{Endpoint: tt.endpoint, APIKey: testKey})
-			if tt.wantErr && err == nil {
-				t.Errorf("New(%q) succeeded, want an error", tt.endpoint)
+			if !tt.wantErr {
+				must.NoError(err, "New(%q)", tt.endpoint)
+				return
 			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("New(%q) = %v, want success", tt.endpoint, err)
-			}
-			if err != nil && !strings.HasPrefix(err.Error(), "mcp: ") {
-				t.Errorf("error = %v, want the mcp: prefix", err)
-			}
+			must.Error(err, "New(%q) should fail", tt.endpoint)
+			must.True(strings.HasPrefix(err.Error(), "mcp: "), "error = %v, want the mcp: prefix", err)
 		})
 	}
 }
 
-func TestCallToolErrorNeverLeaksKey(t *testing.T) {
+func TestCallTool_HTTPErrorNeverLeaksKey(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// A failing request must not surface the API key anywhere in the error,
 	// even when the server echoes request context in its error body.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -614,18 +567,12 @@ func TestCallToolErrorNeverLeaksKey(t *testing.T) {
 
 	c := newClient(t, server.URL)
 	_, err := call(c)
-	if err == nil {
-		t.Fatal("CallTool should fail on a 401")
-	}
-	if strings.Contains(err.Error(), testKey) {
-		t.Fatalf("error leaked the API key: %v", err)
-	}
-	if !strings.Contains(err.Error(), "mcp: initialize failed: HTTP 401") {
-		t.Errorf("error = %v, want the initialize status surfaced", err)
-	}
+	must.Error(err, "CallTool should fail on a 401")
+	must.NotContains(err.Error(), testKey, "error leaked the API key")
+	check.ErrorContains(err, "mcp: initialize failed: HTTP 401")
 }
 
-func TestCallToolKeylessErrorTextIntact(t *testing.T) {
+func TestCallTool_KeylessErrorTextIntact(t *testing.T) {
 	// A keyless client has no key to redact, so server text reaches an error
 	// or a tool error unaltered, not interleaved with redaction markers.
 	tests := []struct {
@@ -641,6 +588,7 @@ func TestCallToolKeylessErrorTextIntact(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if _, answered := answerHandshake(t, w, r); answered {
 					return
@@ -653,22 +601,19 @@ func TestCallToolKeylessErrorTextIntact(t *testing.T) {
 
 			got, err := call(newClient(t, server.URL, func(o *Options) { o.APIKey = "" }))
 			if tt.wantErr != "" {
-				if err == nil || err.Error() != tt.wantErr {
-					t.Errorf("error = %v, want exactly %q", err, tt.wantErr)
-				}
+				must.EqualError(err, tt.wantErr)
 				return
 			}
-			if err != nil {
-				t.Fatalf("CallTool: %v", err)
-			}
-			if text := FirstText(got.Content); !got.IsError || text != tt.wantText {
-				t.Errorf("tool error text = %q (IsError %v), want exactly %q", text, got.IsError, tt.wantText)
-			}
+			must.NoError(err, "CallTool")
+			must.True(got.IsError, "tool result should be flagged as an error")
+			must.Equal(tt.wantText, FirstText(got.Content), "tool error text")
 		})
 	}
 }
 
-func TestCallToolCallerContextDeadlineWins(t *testing.T) {
+func TestCallTool_Deadline_CallerDeadlineBeatsRequestTimeout(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// The caller's tighter deadline must beat the generous RequestTimeout. The
 	// handler drains the body because net/http only cancels r.Context() on
 	// client disconnect once it is read; the 2s backstop keeps Close unblocked.
@@ -689,34 +634,29 @@ func TestCallToolCallerContextDeadlineWins(t *testing.T) {
 
 	start := time.Now()
 	_, err := c.CallTool(ctx, "lookup", nil)
-	if err == nil {
-		t.Fatal("CallTool should fail when the caller deadline fires")
-	}
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Errorf("CallTool took %s; the caller's 100ms deadline should have won over the 10s RequestTimeout", elapsed)
-	}
+	must.Error(err, "CallTool should fail when the caller deadline fires")
+	check.LessOrEqual(time.Since(start), 1500*time.Millisecond, "the caller's 100ms deadline should win over the 10s RequestTimeout")
 	select {
 	case <-aborted:
 	case <-time.After(time.Second):
-		t.Error("the server never observed the request being aborted")
+		check.Fail("the server never observed the request being aborted")
 	}
 }
 
-func TestFirstText(t *testing.T) {
+func TestFirstText_ReturnsFirstNonEmptyText(t *testing.T) {
 	tests := []struct {
 		name   string
 		blocks []ContentBlock
 		want   string
 	}{
-		{"none", nil, ""},
+		{"no blocks", nil, ""},
 		{"skips non-text and empty", []ContentBlock{{Type: "image"}, {Type: "text"}, {Type: "text", Text: "b"}}, "b"},
 		{"first wins", []ContentBlock{{Type: "text", Text: "a"}, {Type: "text", Text: "b"}}, "a"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := FirstText(tt.blocks); got != tt.want {
-				t.Errorf("FirstText = %q, want %q", got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, FirstText(tt.blocks))
 		})
 	}
 }

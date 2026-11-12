@@ -3,16 +3,17 @@ package gemini
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/interactions"
 	"github.com/rxbynerd/chiron/internal/researcher"
@@ -29,24 +30,25 @@ func fastPoll(o *Options) {
 
 func newResearcher(t *testing.T, server *httptest.Server, mutate ...func(*Options)) *Researcher {
 	t.Helper()
+	must := require.New(t)
 	opts := Options{APIKey: testKey, BaseURL: server.URL}
 	fastPoll(&opts)
 	for _, m := range mutate {
 		m(&opts)
 	}
 	r, err := New(opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err)
 	return r
 }
 
 func TestStartBuildsCreateRequest(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.Method != http.MethodPost || req.URL.Path != "/v1beta/interactions" {
-			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
-		}
+		check.True(req.Method == http.MethodPost && req.URL.Path == "/v1beta/interactions",
+			"unexpected request: %s %s", req.Method, req.URL.Path)
 		decodeJSONBody(t, req, &body)
 		w.Write([]byte(`{"id":"v1_new","status":"in_progress"}`))
 	}))
@@ -58,73 +60,47 @@ func TestStartBuildsCreateRequest(t *testing.T) {
 		o.FileSearch = []string{"fileSearchStores/corpus-1"}
 	})
 	id, err := r.Start(context.Background(), researcher.Task{Query: "Why is the sky blue?"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if id != "v1_new" {
-		t.Errorf("id = %q, want v1_new", id)
-	}
+	must.NoError(err)
+	check.Equal("v1_new", id)
 
-	if got := body["agent"]; got != interactions.AgentDeepResearch {
-		t.Errorf("agent = %v, want the deep-research wire id", got)
-	}
-	if got, want := body["background"], true; got != want {
-		t.Errorf("background = %v, want true", got)
-	}
-	if got, want := body["store"], true; got != want {
-		t.Errorf("store = %v, want true — background requires it", got)
-	}
-	if got, want := body["stream"], false; got != want {
-		t.Errorf("stream = %v, want false in polling mode", got)
-	}
+	check.Equal(interactions.AgentDeepResearch, body["agent"], "agent is the deep-research wire id")
+	check.Equal(true, body["background"])
+	check.Equal(true, body["store"], "background requires store")
+	check.Equal(false, body["stream"], "polling mode is non-streaming")
 
 	cfg, _ := body["agent_config"].(map[string]any)
-	if cfg == nil {
-		t.Fatal("agent_config missing")
-	}
-	if cfg["type"] != "deep-research" {
-		t.Errorf("agent_config.type = %v", cfg["type"])
-	}
-	if cfg["thinking_summaries"] != "none" {
-		t.Errorf("thinking_summaries = %v, want none for a polling run", cfg["thinking_summaries"])
-	}
-	if cfg["visualization"] != "auto" {
-		t.Errorf("visualization = %v, want auto with --visualise", cfg["visualization"])
-	}
-	if cfg["collaborative_planning"] != false {
-		t.Errorf("collaborative_planning = %v, want false (M4 owns planning)", cfg["collaborative_planning"])
-	}
+	must.NotNil(cfg, "agent_config missing")
+	check.Equal("deep-research", cfg["type"])
+	check.Equal("none", cfg["thinking_summaries"], "a polling run takes no thinking summaries")
+	check.Equal("auto", cfg["visualization"], "visualisation is auto with --visualise")
+	check.Equal(false, cfg["collaborative_planning"])
 
-	// Default tool trio, then MCP, then file_search — explicit and ordered.
+	// The default tool trio comes first, then MCP, then file_search.
 	tools, _ := body["tools"].([]any)
-	if len(tools) != 5 {
-		t.Fatalf("tools = %v, want 5 entries", tools)
-	}
-	for i, want := range []string{"google_search", "url_context", "code_execution", "mcp_server", "file_search"} {
-		entry := tools[i].(map[string]any)
-		if entry["type"] != want {
-			t.Errorf("tools[%d].type = %v, want %s", i, entry["type"], want)
-		}
+	must.Len(tools, 5, "tools = %v", tools)
+	wantTypes := []string{"google_search", "url_context", "code_execution", "mcp_server", "file_search"}
+	for i, want := range wantTypes {
+		t.Run(want, func(t *testing.T) {
+			must := require.New(t)
+			entry := tools[i].(map[string]any)
+			must.Equal(want, entry["type"])
+		})
 	}
 	mcp := tools[3].(map[string]any)
-	if mcp["name"] != "docs" || mcp["url"] != "https://mcp.example/docs" {
-		t.Errorf("mcp tool = %v", mcp)
-	}
+	check.Equal("docs", mcp["name"])
+	check.Equal("https://mcp.example/docs", mcp["url"])
 
 	// The prompt is templated and carries the query plus the visualise nudge.
 	prompt, _ := body["input"].(string)
-	if !strings.Contains(prompt, "Why is the sky blue?") {
-		t.Errorf("input does not contain the query: %q", prompt)
-	}
-	if !strings.Contains(prompt, "## Conclusion") {
-		t.Errorf("input does not show the built-in template's steering: %q", prompt)
-	}
-	if !strings.Contains(prompt, "visualisations") {
-		t.Errorf("input lacks the --visualise nudge: %q", prompt)
-	}
+	check.Contains(prompt, "Why is the sky blue?", "input must carry the query")
+	check.Contains(prompt, "## Conclusion", "input must carry the built-in template's steering")
+	check.Contains(prompt, "visualisations", "input must carry the --visualise nudge")
 }
 
 func TestEndToEndCompletedMapsWireToDomain(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	var gets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
@@ -171,86 +147,56 @@ func TestEndToEndCompletedMapsWireToDomain(t *testing.T) {
 	r := newResearcher(t, server)
 	ctx := context.Background()
 	id, err := r.Start(ctx, researcher.Task{Query: "q"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if err := r.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(err)
+	must.NoError(r.Await(ctx, id))
 	in, err := r.Result(ctx, id)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
+	must.NoError(err)
 
-	if in.ID != "v1_e2e" || in.Status != types.StatusCompleted {
-		t.Errorf("interaction = %s/%s, want completed v1_e2e", in.ID, in.Status)
-	}
-	if in.Agent != "deep-research-preview-04-2026" {
-		t.Errorf("agent = %q", in.Agent)
-	}
-	if in.Query != "q" {
-		t.Errorf("query = %q, want the raw query recorded at Start", in.Query)
-	}
-	if in.StatusDetail != "" {
-		t.Errorf("status detail = %q, want empty for completed", in.StatusDetail)
-	}
-	if in.CreatedAt.IsZero() || in.CompletedAt.Hour() != 12 || in.CompletedAt.Minute() != 30 {
-		t.Errorf("timestamps = %v / %v", in.CreatedAt, in.CompletedAt)
-	}
+	check.Equal("v1_e2e", in.ID)
+	check.Equal(types.StatusCompleted, in.Status)
+	check.Equal("deep-research-preview-04-2026", in.Agent)
+	check.Equal("q", in.Query, "the query recorded at Start")
+	check.Empty(in.StatusDetail, "a completed interaction has no status detail")
+	check.False(in.CreatedAt.IsZero())
+	check.Equal(12, in.CompletedAt.Hour())
+	check.Equal(30, in.CompletedAt.Minute())
 
-	wantTools := []string{"google_search", "url_context", "code_execution"}
-	if !reflect.DeepEqual(in.Tools, wantTools) {
-		t.Errorf("tools = %v, want %v", in.Tools, wantTools)
-	}
+	check.Equal([]string{"google_search", "url_context", "code_execution"}, in.Tools)
 
-	// Outputs: thought summaries first, then the decoded chart image,
-	// then the final text.
-	if len(in.Outputs) != 3 {
-		t.Fatalf("outputs = %+v, want thought + image + final text", in.Outputs)
-	}
-	if in.Outputs[0].Type != types.OutputThoughtSummary || in.Outputs[0].Text != "thinking..." {
-		t.Errorf("thought output = %+v, want the wire thought part mapped", in.Outputs[0])
-	}
-	if in.Outputs[1].Type != types.OutputImage || string(in.Outputs[1].Data) != "chart-bytes" {
-		t.Errorf("image output = %+v, want decoded chart bytes", in.Outputs[1])
-	}
-	if in.Outputs[2].Type != types.OutputText || in.Outputs[2].Text != "# Report body" {
-		t.Errorf("text output = %+v", in.Outputs[2])
-	}
+	// Outputs: thought summaries first, then the decoded chart image, then the final text.
+	must.Len(in.Outputs, 3, "outputs = %+v, want thought + image + final text", in.Outputs)
+	check.Equal(types.OutputThoughtSummary, in.Outputs[0].Type)
+	check.Equal("thinking...", in.Outputs[0].Text)
+	check.Equal(types.OutputImage, in.Outputs[1].Type)
+	check.Equal("chart-bytes", string(in.Outputs[1].Data), "image data is decoded from base64")
+	check.Equal(types.OutputText, in.Outputs[2].Type)
+	check.Equal("# Report body", in.Outputs[2].Text)
 
-	// Citations deduplicated by URI in first-seen order.
-	wantCites := []types.Citation{
+	// Citations are deduplicated by URI in first-seen order.
+	check.Equal([]types.Citation{
 		{URI: "https://example.org/a", Title: "Source A"},
 		{URI: "https://example.org/b", Title: "Source B"},
-	}
-	if !reflect.DeepEqual(in.Citations, wantCites) {
-		t.Errorf("citations = %+v, want %+v", in.Citations, wantCites)
-	}
+	}, in.Citations)
 
 	// Usage: token totals, google_search count only, poll count, estimate.
 	u := in.Usage
-	if u.InputTokens != 250000 || u.CachedTokens != 150000 || u.OutputTokens != 60000 ||
-		u.ToolUseTokens != 1000 || u.ThoughtTokens != 9000 {
-		t.Errorf("token usage = %+v", u)
-	}
-	if u.SearchCount != 80 {
-		t.Errorf("search count = %d, want 80 (google_search only, not url_context)", u.SearchCount)
-	}
-	if u.PollCount != 2 {
-		t.Errorf("poll count = %d, want 2", u.PollCount)
-	}
-	if want := 2.00 * 0.79; u.EstimatedCostGBP != want {
-		t.Errorf("estimated cost = %v, want %v", u.EstimatedCostGBP, want)
-	}
+	check.Equal(250000, u.InputTokens)
+	check.Equal(150000, u.CachedTokens)
+	check.Equal(60000, u.OutputTokens)
+	check.Equal(1000, u.ToolUseTokens)
+	check.Equal(9000, u.ThoughtTokens)
+	check.Equal(80, u.SearchCount, "google_search only, not url_context")
+	check.Equal(2, u.PollCount)
+	check.InDelta(2.00*0.79, u.EstimatedCostGBP, 0)
 }
 
 func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
-	// chiron get resumes an interaction this adapter never started: the
-	// query and tool set of the original create are unknowable (the API
-	// does not echo them), so the domain model must not claim them —
-	// the recorded set must be the used set. The estimate falls back to
-	// the wire agent id, here the max tier despite the adapter being
-	// configured for the default tier.
+	// The API does not echo the query or tool set of an interaction this adapter
+	// never started (chiron get), so neither is recorded. The estimate is derived
+	// from the wire agent id instead.
+	must := require.New(t)
+	check := assert.New(t)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Write([]byte(`{
 			"id": "v1_resumed",
@@ -263,39 +209,33 @@ func TestResultWithoutStartRecordsNoToolsAndDerivesEstimate(t *testing.T) {
 
 	r := newResearcher(t, server)
 	in, err := r.Result(context.Background(), "v1_resumed")
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Tools != nil {
-		t.Errorf("tools = %v, want none recorded for a resumed interaction", in.Tools)
-	}
-	if in.Query != "" {
-		t.Errorf("query = %q, want empty for a resumed interaction", in.Query)
-	}
-	if want := estimatedCostGBP(TierDeepResearchMax); in.Usage.EstimatedCostGBP != want {
-		t.Errorf("estimate = %v, want %v derived from the wire agent id", in.Usage.EstimatedCostGBP, want)
-	}
+	must.NoError(err)
+	check.Nil(in.Tools, "no tools recorded for a resumed interaction")
+	check.Empty(in.Query, "no query recorded for a resumed interaction")
+	check.InDelta(estimatedCostGBP(TierDeepResearchMax), in.Usage.EstimatedCostGBP, 0,
+		"estimate derived from the max-tier wire agent id")
 }
 
 func TestFailedInteractionCarriesDetail(t *testing.T) {
-	// C2-TEST-2: every failure variant's detail string lands in the
-	// status_detail front matter of its placeholder report, so each is
-	// pinned to status-specific text — a transposition between the
-	// detail strings must fail loudly, not just a missing one.
+	// Each failure status has its own detail text in the status_detail front
+	// matter of its placeholder report. Pinning every text makes a transposition
+	// fail, not only a missing detail.
 	cases := []struct {
+		name           string
 		status         string
 		domain         types.Status
 		wantDetail     string
 		requiresAction bool
 	}{
-		{"failed", types.StatusFailed, "failed server-side", false},
-		{"cancelled", types.StatusCancelled, "was cancelled", false},
-		{"incomplete", types.StatusIncomplete, "ended incomplete", false},
-		{"budget_exceeded", types.StatusBudgetExceeded, "budget was exceeded", false},
-		{"requires_action", types.StatusRequiresAction, "requires client action", true},
+		{"failed", "failed", types.StatusFailed, "failed server-side", false},
+		{"cancelled", "cancelled", types.StatusCancelled, "was cancelled", false},
+		{"incomplete", "incomplete", types.StatusIncomplete, "ended incomplete", false},
+		{"budget exceeded", "budget_exceeded", types.StatusBudgetExceeded, "budget was exceeded", false},
+		{"requires action", "requires_action", types.StatusRequiresAction, "requires client action", true},
 	}
 	for _, tt := range cases {
-		t.Run(tt.status, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				w.Write([]byte(`{"id":"v1_fail","status":"` + tt.status + `","created":"2026-06-07T12:00:00Z","updated":"2026-06-07T12:05:00Z"}`))
 			}))
@@ -307,49 +247,42 @@ func TestFailedInteractionCarriesDetail(t *testing.T) {
 			if tt.requiresAction {
 				// requires_action concludes the await with the typed
 				// error; the Result fetch still maps the detail.
-				if !errors.Is(err, interactions.ErrRequiresAction) {
-					t.Fatalf("Await: %v, want ErrRequiresAction", err)
-				}
-			} else if err != nil {
-				t.Fatalf("Await: %s is terminal, not an await error: %v", tt.status, err)
+				must.ErrorIs(err, interactions.ErrRequiresAction)
+			} else {
+				must.NoError(err, "%s is terminal, not an await error", tt.status)
 			}
 
 			in, err := r.Result(ctx, "v1_fail")
-			if err != nil {
-				t.Fatalf("Result: %v", err)
+			must.NoError(err)
+			must.Equal(tt.domain, in.Status)
+			must.Contains(in.StatusDetail, tt.wantDetail)
+			if tt.status != "failed" {
+				must.NotContains(in.StatusDetail, "failed server-side",
+					"detail carries the failed wording, so details are transposed")
 			}
-			if in.Status != tt.domain {
-				t.Errorf("status = %s, want %s", in.Status, tt.domain)
-			}
-			if !strings.Contains(in.StatusDetail, tt.wantDetail) {
-				t.Errorf("detail = %q, want it to contain %q", in.StatusDetail, tt.wantDetail)
-			}
-			if tt.status != "failed" && strings.Contains(in.StatusDetail, "failed server-side") {
-				t.Errorf("detail = %q carries the failed wording for %s — details transposed", in.StatusDetail, tt.status)
-			}
-			if in.Status.Terminal() && in.CompletedAt.IsZero() {
-				t.Error("a terminal interaction must carry its completion stamp")
+			if in.Status.Terminal() {
+				must.False(in.CompletedAt.IsZero(), "a terminal interaction must carry its completion stamp")
 			}
 		})
 	}
 }
 
-func TestRequiresActionSurfacesTypedError(t *testing.T) {
+func TestAwait_RequiresAction_ReturnsTypedError(t *testing.T) {
+	must := require.New(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Write([]byte(`{"id":"v1_ra","status":"requires_action"}`))
 	}))
 	defer server.Close()
 
 	err := newResearcher(t, server).Await(context.Background(), "v1_ra")
-	if !errors.Is(err, interactions.ErrRequiresAction) {
-		t.Errorf("error = %v, want interactions.ErrRequiresAction", err)
-	}
+	must.ErrorIs(err, interactions.ErrRequiresAction)
 }
 
 func TestCreateIsNeverRetried(t *testing.T) {
 	// A 5xx on create is ambiguous: the server may have accepted — and
 	// started paying for — the task. The create client must surface the
 	// failure after exactly one attempt.
+	must := require.New(t)
 	var creates atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		creates.Add(1)
@@ -358,16 +291,13 @@ func TestCreateIsNeverRetried(t *testing.T) {
 	defer server.Close()
 
 	_, err := newResearcher(t, server).Start(context.Background(), researcher.Task{Query: "q"})
-	if err == nil {
-		t.Fatal("Start must fail on a 5xx create")
-	}
-	if got := creates.Load(); got != 1 {
-		t.Errorf("create attempts = %d, want exactly 1 — a retry risks duplicate spend", got)
-	}
+	must.Error(err, "Start must fail on a 5xx create")
+	must.EqualValues(1, creates.Load(), "a retry risks duplicate spend")
 }
 
-func TestGetIsRetried(t *testing.T) {
+func TestResult_RetriesTransientFailure(t *testing.T) {
 	// GET is idempotent: transient failures retry within the client.
+	must := require.New(t)
 	var gets atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if gets.Add(1) == 1 {
@@ -379,20 +309,18 @@ func TestGetIsRetried(t *testing.T) {
 	defer server.Close()
 
 	in, err := newResearcher(t, server).Result(context.Background(), "v1_retry")
-	if err != nil {
-		t.Fatalf("Result: %v", err)
-	}
-	if in.Status != types.StatusCompleted || gets.Load() != 2 {
-		t.Errorf("status %s after %d attempts, want completed after a retried 503", in.Status, gets.Load())
-	}
+	must.NoError(err)
+	must.Equal(types.StatusCompleted, in.Status, "after a retried 503")
+	must.EqualValues(2, gets.Load(), "one 503, then one successful GET")
 }
 
 func TestMultimodalInputParts(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	dir := t.TempDir()
 	imgPath := filepath.Join(dir, "photo.png")
-	if err := os.WriteFile(imgPath, []byte("png-data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(imgPath, []byte("png-data"), 0o644))
 
 	var body struct {
 		Input []interactions.Content `json:"input"`
@@ -406,32 +334,31 @@ func TestMultimodalInputParts(t *testing.T) {
 	r := newResearcher(t, server, func(o *Options) {
 		o.Inputs = []string{imgPath, "https://example.org/spec.pdf"}
 	})
-	if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	_, err := r.Start(context.Background(), researcher.Task{Query: "q"})
+	must.NoError(err)
 
-	if len(body.Input) != 3 {
-		t.Fatalf("input parts = %+v, want prompt + 2 grounding parts", body.Input)
-	}
-	if body.Input[0].Type != interactions.ContentText || !strings.Contains(body.Input[0].Text, "q") {
-		t.Errorf("first part = %+v, want the prompt text", body.Input[0])
-	}
+	must.Len(body.Input, 3, "input parts = %+v, want prompt + 2 grounding parts", body.Input)
+	check.Equal(interactions.ContentText, body.Input[0].Type)
+	check.Contains(body.Input[0].Text, "q", "first part is the prompt text")
+
 	img := body.Input[1]
-	if img.Type != interactions.ContentImage || img.MIMEType != "image/png" || string(img.Data) != "png-data" || img.URI != "" {
-		t.Errorf("local file part = %+v, want base64 image data", img)
-	}
+	check.Equal(interactions.ContentImage, img.Type)
+	check.Equal("image/png", img.MIMEType)
+	check.Equal("png-data", string(img.Data), "a local file is sent as image data")
+	check.Empty(img.URI)
+
 	doc := body.Input[2]
-	if doc.Type != interactions.ContentDocument || doc.MIMEType != "application/pdf" || doc.URI != "https://example.org/spec.pdf" || doc.Data != nil {
-		t.Errorf("url part = %+v, want a document uri reference", doc)
-	}
+	check.Equal(interactions.ContentDocument, doc.Type)
+	check.Equal("application/pdf", doc.MIMEType)
+	check.Equal("https://example.org/spec.pdf", doc.URI, "a URL is sent as a document reference")
+	check.Nil(doc.Data)
 }
 
 func TestCustomTemplate(t *testing.T) {
+	must := require.New(t)
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "tmpl.md")
-	if err := os.WriteFile(tmplPath, []byte("Custom steering.\n\nQ: {{.Query}}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(tmplPath, []byte("Custom steering.\n\nQ: {{.Query}}\n"), 0o644))
 
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -441,28 +368,23 @@ func TestCustomTemplate(t *testing.T) {
 	defer server.Close()
 
 	r := newResearcher(t, server, func(o *Options) { o.TemplatePath = tmplPath })
-	if _, err := r.Start(context.Background(), researcher.Task{Query: "the question"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	_, err := r.Start(context.Background(), researcher.Task{Query: "the question"})
+	must.NoError(err)
 	prompt, _ := body["input"].(string)
-	if !strings.HasPrefix(prompt, "Custom steering.") || !strings.Contains(prompt, "Q: the question") {
-		t.Errorf("prompt = %q, want the custom template applied", prompt)
-	}
+	must.True(strings.HasPrefix(prompt, "Custom steering."), "prompt = %q, want the custom template applied", prompt)
+	must.Contains(prompt, "Q: the question")
 }
 
-func TestTemplateWithoutQueryRejected(t *testing.T) {
+func TestStart_TemplateWithoutQuery_Rejected(t *testing.T) {
+	must := require.New(t)
 	dir := t.TempDir()
 	tmplPath := filepath.Join(dir, "bad.md")
-	if err := os.WriteFile(tmplPath, []byte("No query placeholder here.\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(tmplPath, []byte("No query placeholder here.\n"), 0o644))
+
 	r, err := New(Options{APIKey: testKey, TemplatePath: tmplPath})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err == nil {
-		t.Error("a template that drops the query must be rejected before money is spent")
-	}
+	must.NoError(err)
+	_, err = r.Start(context.Background(), researcher.Task{Query: "q"})
+	must.Error(err, "a template that drops the query must be rejected before money is spent")
 }
 
 func TestConstructionValidation(t *testing.T) {
@@ -478,14 +400,15 @@ func TestConstructionValidation(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := New(tt.opts); err == nil {
-				t.Error("New must reject the configuration before any request is built")
-			}
+			must := require.New(t)
+			_, err := New(tt.opts)
+			must.Error(err, "New must reject the configuration before any request is built")
 		})
 	}
 }
 
 func TestTierMapping(t *testing.T) {
+	must := require.New(t)
 	var body map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		decodeJSONBody(t, req, &body)
@@ -494,23 +417,16 @@ func TestTierMapping(t *testing.T) {
 	defer server.Close()
 
 	r := newResearcher(t, server, func(o *Options) { o.Tier = TierDeepResearchMax })
-	if _, err := r.Start(context.Background(), researcher.Task{Query: "q"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if body["agent"] != interactions.AgentDeepResearchMax {
-		t.Errorf("agent = %v, want the max-tier wire id", body["agent"])
-	}
-	if r.estimate != 5.00*0.79 {
-		t.Errorf("estimate = %v, want the max-tier planning figure", r.estimate)
-	}
+	_, err := r.Start(context.Background(), researcher.Task{Query: "q"})
+	must.NoError(err)
+	must.Equal(interactions.AgentDeepResearchMax, body["agent"], "max tier maps to its wire id")
+	must.InDelta(5.00*0.79, r.estimate, 0, "max tier uses its planning figure")
 }
 
-func TestEmptyQueryRejected(t *testing.T) {
+func TestStart_EmptyQuery_Rejected(t *testing.T) {
+	must := require.New(t)
 	r, err := New(Options{APIKey: testKey})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := r.Start(context.Background(), researcher.Task{}); err == nil {
-		t.Error("an empty query must be rejected locally")
-	}
+	must.NoError(err)
+	_, err = r.Start(context.Background(), researcher.Task{})
+	must.Error(err, "an empty query must be rejected locally")
 }

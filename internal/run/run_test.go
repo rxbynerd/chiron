@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/sink"
@@ -140,27 +142,21 @@ func happyDeps() (Deps, *fakeResearcher, *recordingSink, *recordingTransport) {
 	return deps, r, s, tr
 }
 
-func TestRunHappyPath(t *testing.T) {
+func TestRun_HappyPath(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, _, snk, tr := happyDeps()
 	result, err := Run(context.Background(), deps, Params{Query: "q", Agent: "deep-research"})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if result.InteractionID != "v1_run" || result.Status != types.StatusCompleted {
-		t.Errorf("result = %+v, want completed v1_run", result)
-	}
-	if result.Report == nil || string(result.Report.Markdown) != "# Report\n" {
-		t.Errorf("report = %+v, want the formatter's document", result.Report)
-	}
-	if result.Usage.SearchCount != 80 {
-		t.Errorf("usage not carried through: %+v", result.Usage)
-	}
-	if result.Duration <= 0 {
-		t.Errorf("duration = %v, want > 0", result.Duration)
-	}
-	if snk.result != result {
-		t.Error("the sink must receive the same RunResult the caller gets")
-	}
+	must.NoError(err)
+
+	check.Equal("v1_run", result.InteractionID)
+	check.Equal(types.StatusCompleted, result.Status)
+	must.NotNil(result.Report, "the run must carry the formatter's report")
+	check.Equal("# Report\n", string(result.Report.Markdown))
+	check.Equal(80, result.Usage.SearchCount, "usage must carry through to the result")
+	check.Greater(result.Duration, time.Duration(0))
+	check.Same(result, snk.result, "the sink must receive the same RunResult the caller gets")
 
 	want := []string{
 		transport.KindRunStarted,
@@ -169,62 +165,40 @@ func TestRunHappyPath(t *testing.T) {
 		transport.KindRunCompleted,
 		transport.KindCostSummary,
 	}
-	got := tr.kinds()
-	if len(got) != len(want) {
-		t.Fatalf("event kinds = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("event kinds = %v, want %v", got, want)
-		}
-	}
+	must.Equal(want, tr.kinds())
 
 	// The resume handle must be in the interaction_created payload.
 	var created interactionCreatedPayload
-	if err := json.Unmarshal(tr.events[1].Payload, &created); err != nil {
-		t.Fatalf("interaction_created payload: %v", err)
-	}
-	if created.InteractionID != "v1_run" {
-		t.Errorf("interaction_created carries %q, want the interaction id", created.InteractionID)
-	}
+	must.NoError(json.Unmarshal(tr.events[1].Payload, &created), "interaction_created payload")
+	check.Equal("v1_run", created.InteractionID, "interaction_created must carry the interaction id")
 
 	var cost costSummaryPayload
-	if err := json.Unmarshal(tr.events[4].Payload, &cost); err != nil {
-		t.Fatalf("cost_summary payload: %v", err)
-	}
-	if cost.Usage.EstimatedCostGBP != 1.58 || cost.Usage.SearchCount != 80 {
-		t.Errorf("cost_summary usage = %+v, want the run's cost signals", cost.Usage)
-	}
+	must.NoError(json.Unmarshal(tr.events[4].Payload, &cost), "cost_summary payload")
+	check.InDelta(1.58, cost.Usage.EstimatedCostGBP, 0, "cost_summary must carry the run's cost signals")
+	check.Equal(80, cost.Usage.SearchCount, "cost_summary must carry the run's cost signals")
 }
 
-func TestRunPassesPreviousInteractionID(t *testing.T) {
+func TestRun_PassesPreviousInteractionIDToStart(t *testing.T) {
 	// Plan approval and follow-up Q&A both chain to a stored
 	// interaction; the core must hand the id through to Start verbatim.
+	must := require.New(t)
 	deps, r, _, _ := happyDeps()
 	_, err := Run(context.Background(), deps, Params{Query: "q", PreviousInteractionID: "v1_plan"})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if r.lastTask.PreviousInteractionID != "v1_plan" {
-		t.Errorf("Start task = %+v, want previous interaction v1_plan", r.lastTask)
-	}
+	must.NoError(err)
+	must.Equal("v1_plan", r.lastTask.PreviousInteractionID)
 }
 
 func TestResumeHappyPath(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, r, snk, tr := happyDeps()
 	result, err := Resume(context.Background(), deps, "v1_run")
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	if r.started {
-		t.Error("Resume must never start a new interaction — no new spend")
-	}
-	if result.InteractionID != "v1_run" || result.Status != types.StatusCompleted {
-		t.Errorf("result = %+v, want completed v1_run", result)
-	}
-	if snk.result != result {
-		t.Error("the sink must receive the resumed RunResult")
-	}
+	must.NoError(err)
+	check.False(r.started, "Resume must never start a new interaction; that would spend money")
+	check.Equal("v1_run", result.InteractionID)
+	check.Equal(types.StatusCompleted, result.Status)
+	check.Same(result, snk.result, "the sink must receive the resumed RunResult")
 
 	// No run_started (there is no query to announce) and no new start
 	// phase: the lifecycle is id, status, completion, cost.
@@ -234,19 +208,20 @@ func TestResumeHappyPath(t *testing.T) {
 		transport.KindRunCompleted,
 		transport.KindCostSummary,
 	}
-	if got := tr.kinds(); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("event kinds = %v, want %v", got, want)
-	}
+	must.Equal(want, tr.kinds())
 }
 
 func TestResumeRequiresID(t *testing.T) {
+	must := require.New(t)
 	deps, _, _, _ := happyDeps()
-	if _, err := Resume(context.Background(), deps, ""); err == nil {
-		t.Error("Resume with an empty id must fail before touching any seam")
-	}
+	_, err := Resume(context.Background(), deps, "")
+	must.Error(err, "Resume with an empty id must fail before touching any seam")
 }
 
-func TestRunFailedStatusStillConcludes(t *testing.T) {
+func TestRun_FailureStatusStillConcludes(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, r, snk, _ := happyDeps()
 	r.result = &types.Interaction{
 		ID:           "v1_run",
@@ -254,115 +229,106 @@ func TestRunFailedStatusStillConcludes(t *testing.T) {
 		StatusDetail: "the server-side budget was exceeded",
 	}
 	result, err := Run(context.Background(), deps, Params{Query: "q"})
-	if err != nil {
-		t.Fatalf("Run: a failure-variant status is a concluded run, got error %v", err)
-	}
-	if result.Status != types.StatusBudgetExceeded {
-		t.Errorf("status = %s, want budget_exceeded", result.Status)
-	}
-	if snk.result == nil {
-		t.Error("failure variants still emit a (placeholder) report")
-	}
+	must.NoError(err, "a failure-variant status is a concluded run, not an error")
+	check.Equal(types.StatusBudgetExceeded, result.Status)
+	check.NotNil(snk.result, "failure variants still emit a (placeholder) report")
 }
 
-func TestRunStartError(t *testing.T) {
+func TestRun_StartErrorStopsBeforeSink(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	boom := errors.New("create rejected")
 	deps, r, snk, tr := happyDeps()
 	r.startErr = boom
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); !errors.Is(err, boom) {
-		t.Fatalf("error = %v, want the researcher's start failure", err)
-	}
-	if snk.result != nil {
-		t.Error("nothing must reach the sink when start fails")
-	}
-	got := tr.kinds()
-	if len(got) != 1 || got[0] != transport.KindRunStarted {
-		t.Errorf("events = %v, want run_started only — no interaction id exists to emit", got)
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.ErrorIs(err, boom)
+	check.Nil(snk.result, "nothing must reach the sink when start fails")
+	must.Equal([]string{transport.KindRunStarted}, tr.kinds(),
+		"no interaction id exists to emit, so run_started is the only event")
 }
 
-func TestRunAwaitError(t *testing.T) {
+func TestRun_AwaitErrorEmitsResumeHandle(t *testing.T) {
+	must := require.New(t)
+
 	boom := errors.New("requires action")
 	deps, r, _, tr := happyDeps()
 	r.awaitErr = boom
 	_, err := Run(context.Background(), deps, Params{Query: "q"})
-	if !errors.Is(err, boom) {
-		t.Fatalf("error = %v, want the await failure", err)
-	}
-	if !strings.Contains(err.Error(), "v1_run") {
-		t.Errorf("error %q must name the interaction id — the resume handle", err)
-	}
+	must.ErrorIs(err, boom)
+	must.ErrorContains(err, "v1_run", "the error must name the interaction id, the resume handle")
+
 	got := tr.kinds()
-	if len(got) != 2 || got[1] != transport.KindInteractionCreated {
-		t.Errorf("events = %v, want the resume handle emitted before the failure", got)
-	}
+	must.Len(got, 2, "events %v, want the resume handle emitted before the failure", got)
+	must.Equal(transport.KindInteractionCreated, got[1])
 }
 
-func TestRunTimeout(t *testing.T) {
+func TestRun_TimeoutReturnsDeadlineAndResumeHandle(t *testing.T) {
+	must := require.New(t)
+
 	deps, r, _, tr := happyDeps()
 	r.awaitBlocks = true
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err := Run(ctx, deps, Params{Query: "q"})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
-	}
+	must.ErrorIs(err, context.DeadlineExceeded)
+
 	got := tr.kinds()
-	if len(got) != 2 || got[1] != transport.KindInteractionCreated {
-		t.Errorf("events = %v, want the resume handle emitted before the timeout", got)
-	}
+	must.Len(got, 2, "events %v, want the resume handle emitted before the timeout", got)
+	must.Equal(transport.KindInteractionCreated, got[1])
 }
 
-func TestRunFormatterError(t *testing.T) {
+func TestRun_FormatterErrorSkipsSink(t *testing.T) {
+	must := require.New(t)
+
 	boom := errors.New("bad front matter")
 	deps, _, snk, _ := happyDeps()
 	deps.Formatter = &fakeFormatter{err: boom}
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); !errors.Is(err, boom) {
-		t.Fatalf("error = %v, want the formatter failure", err)
-	}
-	if snk.result != nil {
-		t.Error("nothing must reach the sink when formatting fails")
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.ErrorIs(err, boom)
+	must.Nil(snk.result, "nothing must reach the sink when formatting fails")
 }
 
 func TestRunSinkError(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	boom := errors.New("disk full")
 	deps, _, _, tr := happyDeps()
 	deps.Sink = &recordingSink{err: boom}
 	counter := &countingTracer{}
 	deps.Tracer = counter
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); !errors.Is(err, boom) {
-		t.Fatalf("error = %v, want the sink failure", err)
-	}
-	for _, kind := range tr.kinds() {
-		if kind == transport.KindRunCompleted {
-			t.Error("run_completed must not be emitted when the report failed to land")
-		}
-	}
-	// C1-CODE-6: one failed run, one failure metric — the deferred
-	// emission must not double-count with recordMetrics' own.
-	if n := counter.metrics[trace.MetricFailures]; n != 1 {
-		t.Errorf("MetricFailures emitted %d time(s) on a sink failure, want exactly 1", n)
-	}
+
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.ErrorIs(err, boom)
+	check.NotContains(tr.kinds(), transport.KindRunCompleted,
+		"run_completed must not be emitted when the report failed to land")
+
+	// A failed run emits exactly one failure metric. The deferred emission
+	// must not double-count the one recordMetrics already emits.
+	must.Equal(1, counter.metrics[trace.MetricFailures],
+		"one failed run must emit exactly one failure metric")
 }
 
-func TestRunTransportFailureDoesNotAbort(t *testing.T) {
+func TestRun_TransportFailureDoesNotAbort(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, _, snk, _ := happyDeps()
 	deps.Transport = &recordingTransport{err: errors.New("stderr closed")}
 	result, err := Run(context.Background(), deps, Params{Query: "q"})
-	if err != nil {
-		t.Fatalf("Run: a broken event stream must not abort a paid run, got %v", err)
-	}
-	if result == nil || snk.result == nil {
-		t.Error("the report must still land when events cannot be emitted")
-	}
+	must.NoError(err, "a broken event stream must not abort a paid run")
+	check.NotNil(result)
+	check.NotNil(snk.result, "the report must still land when events cannot be emitted")
 }
 
-func TestRunValidatesDeps(t *testing.T) {
+func TestRun_RejectsNilDepsAndEmptyQuery(t *testing.T) {
+	must := require.New(t)
+
 	deps, _, _, _ := happyDeps()
 	cases := []struct {
-		name  string
-		mutil func(*Deps)
+		name   string
+		mutate func(*Deps)
 	}{
 		{"researcher", func(d *Deps) { d.Researcher = nil }},
 		{"formatter", func(d *Deps) { d.Formatter = nil }},
@@ -370,52 +336,54 @@ func TestRunValidatesDeps(t *testing.T) {
 		{"transport", func(d *Deps) { d.Transport = nil }},
 		{"tracer", func(d *Deps) { d.Tracer = nil }},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			d := deps
-			tc.mutil(&d)
-			if _, err := Run(context.Background(), d, Params{Query: "q"}); err == nil {
-				t.Errorf("nil %s must be rejected before any seam is called", tc.name)
-			}
+			tt.mutate(&d)
+			_, err := Run(context.Background(), d, Params{Query: "q"})
+			must.Error(err, "a nil dependency must be rejected before any seam is called")
 		})
 	}
-	if _, err := Run(context.Background(), deps, Params{}); err == nil {
-		t.Error("an empty query must be rejected before money is spent")
-	}
+
+	_, err := Run(context.Background(), deps, Params{})
+	must.Error(err, "an empty query must be rejected before money is spent")
 }
 
-func TestRunEmptyInteractionIDRejected(t *testing.T) {
+func TestRun_EmptyInteractionIDRejected(t *testing.T) {
+	must := require.New(t)
+
 	deps, r, _, _ := happyDeps()
 	r.id = ""
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err == nil {
-		t.Error("an empty interaction id is not a resume handle; the run must fail")
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.Error(err, "an empty interaction id is not a resume handle; the run must fail")
 }
 
 // The empty Multi sink composes with the core for -o none runs.
-func TestRunWithDiscardSink(t *testing.T) {
+func TestRun_DiscardSinkStillEmitsCostSummary(t *testing.T) {
+	must := require.New(t)
+
 	deps, _, _, tr := happyDeps()
 	deps.Sink = sink.Multi()
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err != nil {
-		t.Fatalf("Run with discard sink: %v", err)
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.NoError(err)
+
 	got := tr.kinds()
-	if got[len(got)-1] != transport.KindCostSummary {
-		t.Errorf("events = %v, want the cost summary even when the report is discarded", got)
-	}
+	must.NotEmpty(got)
+	must.Equal(transport.KindCostSummary, got[len(got)-1],
+		"the cost summary must be emitted even when the report is discarded")
 }
 
-// TestRunNilInteractionFromResearcher pins C2-TEST-10, the seam
-// contract: a Researcher whose Result returns nil, nil is a broken
-// implementation, and the run must conclude with a clear error rather
-// than handing the formatter a nil interaction to panic on.
+// A Researcher whose Result returns nil, nil breaks the seam contract. The run
+// must conclude with a clear error rather than hand the formatter a nil
+// interaction to panic on.
 func TestRunNilInteractionFromResearcher(t *testing.T) {
+	must := require.New(t)
+
 	deps, r, _, _ := happyDeps()
-	r.result = nil // Result returns nil, nil
+	r.result = nil
 	_, err := Run(context.Background(), deps, Params{Query: "q"})
-	if err == nil || !strings.Contains(err.Error(), "returned no interaction") {
-		t.Fatalf("error = %v, want the nil-interaction guard", err)
-	}
+	must.ErrorContains(err, "returned no interaction")
 }
 
 // valueTracer records the last value of each metric; spans are no-ops.
@@ -431,41 +399,37 @@ func (v *valueTracer) Metric(_ context.Context, name string, value float64) {
 	v.values[name] = value
 }
 
-// TestRunRecordsRecallCount: the run-level recall count is recorded beside
-// the search count from the interaction's usage.
-func TestRunRecordsRecallCount(t *testing.T) {
+// The run-level recall count is recorded beside the search count from the
+// interaction's usage.
+func TestRun_RecordsRecallCount(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, r, _, _ := happyDeps()
 	r.result.Usage.RecallCount = 3
 	tracer := &valueTracer{}
 	deps.Tracer = tracer
 
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if got := tracer.values[trace.MetricRecallCount]; got != 3 {
-		t.Errorf("%s = %v, want 3", trace.MetricRecallCount, got)
-	}
-	if got := tracer.values[trace.MetricSearchCount]; got != 80 {
-		t.Errorf("%s = %v, want 80", trace.MetricSearchCount, got)
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.NoError(err)
+	check.InDelta(3, tracer.values[trace.MetricRecallCount], 0, "%s", trace.MetricRecallCount)
+	check.InDelta(80, tracer.values[trace.MetricSearchCount], 0, "%s", trace.MetricSearchCount)
 }
 
-// TestRunRecordsWebCost: the run-level web spend and unknown-cost count are
-// recorded from the interaction's usage under their own names.
-func TestRunRecordsWebCost(t *testing.T) {
+// The run-level web spend and unknown-cost count are recorded from the
+// interaction's usage under their own names.
+func TestRun_RecordsWebCost(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	deps, r, _, _ := happyDeps()
 	r.result.Usage.WebCostUSD = 0.015
 	r.result.Usage.WebCostUnknownCalls = 2
 	tracer := &valueTracer{}
 	deps.Tracer = tracer
 
-	if _, err := Run(context.Background(), deps, Params{Query: "q"}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if got := tracer.values[trace.MetricWebCostUSD]; got != 0.015 {
-		t.Errorf("%s = %v, want 0.015", trace.MetricWebCostUSD, got)
-	}
-	if got := tracer.values[trace.MetricWebCostUnknownCalls]; got != 2 {
-		t.Errorf("%s = %v, want 2", trace.MetricWebCostUnknownCalls, got)
-	}
+	_, err := Run(context.Background(), deps, Params{Query: "q"})
+	must.NoError(err)
+	check.InDelta(0.015, tracer.values[trace.MetricWebCostUSD], 0, "%s", trace.MetricWebCostUSD)
+	check.InDelta(2, tracer.values[trace.MetricWebCostUnknownCalls], 0, "%s", trace.MetricWebCostUnknownCalls)
 }

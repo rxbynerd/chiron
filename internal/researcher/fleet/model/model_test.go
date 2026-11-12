@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const testKey = "sk-test-0123456789abcdefABCDEF"
@@ -19,70 +21,64 @@ const testKey = "sk-test-0123456789abcdefABCDEF"
 // construction error.
 func newClient(t *testing.T, endpoint string, mutate ...func(*Options)) *Client {
 	t.Helper()
+	must := require.New(t)
 	opts := Options{Endpoint: endpoint, Model: "gpt-test", APIKey: testKey}
 	for _, m := range mutate {
 		m(&opts)
 	}
 	c, err := New(opts)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	must.NoError(err)
 	return c
 }
 
-func TestGenerateSendsMaxCompletionTokens(t *testing.T) {
+func TestGenerate_SendsMaxCompletionTokens(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// GPT-5 and o-series models reject max_tokens; the cap must ride
 	// max_completion_tokens, and the legacy field must be absent.
 	var body map[string]json.RawMessage
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decoding request body: %v", err)
-		}
+		check.NoError(json.NewDecoder(r.Body).Decode(&body), "decoding request body")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
 	}))
 	defer server.Close()
 
 	c := newClient(t, server.URL)
-	if _, err := c.Generate(context.Background(), Request{
+	_, err := c.Generate(context.Background(), Request{
 		Messages:  []Message{{Role: RoleUser, Content: "hi"}},
 		MaxTokens: 512,
-	}); err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
-	if got := string(body["max_completion_tokens"]); got != "512" {
-		t.Errorf("max_completion_tokens = %q, want 512", got)
-	}
-	if _, present := body["max_tokens"]; present {
-		t.Errorf("request carried the deprecated max_tokens field: %s", body["max_tokens"])
-	}
+	})
+	must.NoError(err)
+	check.Equal("512", string(body["max_completion_tokens"]), "max_completion_tokens")
+	check.NotContains(body, "max_tokens", "request carried the deprecated max_tokens field")
 }
 
-func TestGenerateOmitsCompletionCapWhenUnset(t *testing.T) {
+func TestGenerate_OmitsCompletionCapWhenUnset(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var body map[string]json.RawMessage
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decoding request body: %v", err)
-		}
+		check.NoError(json.NewDecoder(r.Body).Decode(&body), "decoding request body")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`))
 	}))
 	defer server.Close()
 
 	c := newClient(t, server.URL)
-	if _, err := c.Generate(context.Background(), Request{
+	_, err := c.Generate(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
-	}); err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	})
+	must.NoError(err)
 	for _, field := range []string{"max_completion_tokens", "max_tokens"} {
-		if _, present := body[field]; present {
-			t.Errorf("request carried %s with MaxTokens unset: %s", field, body[field])
-		}
+		t.Run("omits "+field, func(t *testing.T) {
+			must := require.New(t)
+			must.NotContains(body, field)
+		})
 	}
 }
 
-func TestValidateStrictSchema(t *testing.T) {
+func TestValidateStrictSchema_AcceptsAndRejects(t *testing.T) {
 	tests := []struct {
 		name    string
 		schema  string
@@ -156,28 +152,25 @@ func TestValidateStrictSchema(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			err := ValidateStrictSchema(json.RawMessage(tt.schema))
 			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatalf("ValidateStrictSchema = %v, want nil", err)
-				}
+				must.NoError(err)
 				return
 			}
-			if err == nil {
-				t.Fatalf("ValidateStrictSchema = nil, want an error containing %q", tt.wantErr)
-			}
-			if !strings.HasPrefix(err.Error(), "model: ") || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("ValidateStrictSchema = %q, want a model: error containing %q", err, tt.wantErr)
-			}
+			must.ErrorContains(err, tt.wantErr)
+			must.Regexp("^model: ", err.Error())
 		})
 	}
 }
 
 func TestCrossHostRedirectRefused(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// A credential-bearing client must not follow a redirect to another
 	// host — that would hand the Authorization header to the target.
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("redirect target was called — the key would have leaked to %s", r.Host)
+		check.Fail("redirect target was called", "the key would have leaked to %s", r.Host)
 		w.Write([]byte(`{"choices":[{"message":{"content":"leaked"}}]}`))
 	}))
 	defer elsewhere.Close()
@@ -191,15 +184,13 @@ func TestCrossHostRedirectRefused(t *testing.T) {
 	_, err := c.Generate(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should fail rather than follow a cross-host redirect")
-	}
-	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
-		t.Errorf("error = %v, want a cross-host redirect refusal", err)
-	}
+	must.Error(err, "Generate should fail rather than follow a cross-host redirect")
+	must.Regexp("refused|cross-origin", err.Error())
 }
 
-func TestCallerCheckRedirectOverridden(t *testing.T) {
+func TestNew_ImposesRedirectPolicyOverCaller(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// New must impose its own redirect policy even when the caller's
 	// http.Client already carries a permissive one.
 	var targetHits atomic.Int32
@@ -221,21 +212,15 @@ func TestCallerCheckRedirectOverridden(t *testing.T) {
 	_, err := c.Generate(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should refuse the redirect even though the caller's client permits it")
-	}
-	if !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "cross-origin") {
-		t.Errorf("error = %v, want a cross-host redirect refusal", err)
-	}
-	if got := originHits.Load(); got != 1 {
-		t.Errorf("origin hits = %d, want 1", got)
-	}
-	if got := targetHits.Load(); got != 0 {
-		t.Errorf("target hits = %d, want 0", got)
-	}
+	must.Error(err, "Generate should refuse the redirect even though the caller's client permits it")
+	must.Regexp("refused|cross-origin", err.Error())
+	check.Equal(int32(1), originHits.Load(), "the origin should see exactly one request")
+	check.Zero(targetHits.Load(), "the redirect target must not be requested")
 }
 
-func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
+func TestGenerate_RefusesHTTPSDowngradeRedirect(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// net/http re-sends Authorization to the same hostname on any scheme, so
 	// an https endpoint redirecting to http on the same host must be refused
 	// before a second connection is opened.
@@ -256,21 +241,13 @@ func TestHTTPSDowngradeRedirectRefused(t *testing.T) {
 	_, err := c.Generate(context.Background(), Request{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	})
-	if err == nil {
-		t.Fatal("Generate should fail rather than follow an https-to-http redirect")
-	}
-	if !strings.Contains(err.Error(), "downgrade") {
-		t.Errorf("error = %v, want a downgrade refusal", err)
-	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("handler hits = %d, want 1", got)
-	}
-	if got := conns.Load(); got != 1 {
-		t.Errorf("connections = %d, want 1 — the cleartext redirect target must never be dialled", got)
-	}
+	must.Error(err, "Generate should fail rather than follow an https-to-http redirect")
+	must.ErrorContains(err, "downgrade")
+	check.Equal(int32(1), hits.Load(), "handler hits")
+	check.Equal(int32(1), conns.Load(), "the cleartext redirect target must never be dialled")
 }
 
-func TestEndpointValidation(t *testing.T) {
+func TestEndpoint_Validation(t *testing.T) {
 	tests := []struct {
 		name     string
 		endpoint string
@@ -292,21 +269,19 @@ func TestEndpointValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			_, err := New(Options{Endpoint: tt.endpoint, Model: "gpt-test", APIKey: testKey})
-			if tt.wantErr && err == nil {
-				t.Errorf("New(%q) succeeded, want an error", tt.endpoint)
+			if !tt.wantErr {
+				must.NoError(err)
+				return
 			}
-			if !tt.wantErr && err != nil {
-				t.Errorf("New(%q) = %v, want success", tt.endpoint, err)
-			}
-			if err != nil && !strings.HasPrefix(err.Error(), "model: endpoint ") {
-				t.Errorf("error = %v, want the model: endpoint prefix", err)
-			}
+			must.Error(err)
+			must.Regexp("^model: endpoint ", err.Error())
 		})
 	}
 }
 
-func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
+func TestEndpoint_RejectsCredentialsWithoutEcho(t *testing.T) {
 	// An endpoint carrying credentials is rejected, and the error never
 	// repeats them, even when a typo stops url.Parse recognising userinfo.
 	const (
@@ -328,21 +303,18 @@ func TestEndpointCredentialsRejectedWithoutEcho(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
 			_, err := New(Options{Endpoint: tt.endpoint, Model: "gpt-test", APIKey: testKey})
-			if err == nil {
-				t.Fatalf("New(%q) succeeded, want an error", tt.endpoint)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
-			}
-			if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), username) {
-				t.Errorf("error echoed the credentials: %v", err)
-			}
+			must.Error(err)
+			must.ErrorContains(err, tt.wantErr)
+			check.NotContains(err.Error(), password, "error echoed the password")
+			check.NotContains(err.Error(), username, "error echoed the username")
 		})
 	}
 }
 
-func TestNewValidatesRequiredFields(t *testing.T) {
+func TestNew_ValidatesRequiredFields(t *testing.T) {
 	tests := []struct {
 		name string
 		opts Options
@@ -352,14 +324,16 @@ func TestNewValidatesRequiredFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := New(tt.opts); err == nil {
-				t.Errorf("New(%+v) succeeded, want an error", tt.opts)
-			}
+			must := require.New(t)
+			_, err := New(tt.opts)
+			must.Error(err)
 		})
 	}
 }
 
 func TestCallerContextDeadlineWins(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	// The caller's tighter deadline must beat the generous RequestTimeout. The
 	// handler drains the body because net/http only cancels r.Context() on
 	// client disconnect once it is read; the 2s backstop keeps Close unblocked.
@@ -380,17 +354,13 @@ func TestCallerContextDeadlineWins(t *testing.T) {
 
 	start := time.Now()
 	_, err := c.Generate(ctx, Request{Messages: []Message{{Role: RoleUser, Content: "hi"}}})
-	if err == nil {
-		t.Fatal("Generate should fail when the caller deadline fires")
-	}
+	must.Error(err, "Generate should fail when the caller deadline fires")
 	// The 100ms caller deadline must win decisively over the 10s
 	// RequestTimeout (and comfortably under the handler's 2s backstop).
-	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
-		t.Errorf("Generate took %s — the caller's 100ms deadline should have won over the 10s RequestTimeout", elapsed)
-	}
+	check.LessOrEqual(time.Since(start), 1500*time.Millisecond, "the caller's 100ms deadline should have won over the 10s RequestTimeout")
 	select {
 	case <-aborted:
 	case <-time.After(time.Second):
-		t.Error("the server never observed the request being aborted")
+		check.Fail("the server never observed the request being aborted")
 	}
 }

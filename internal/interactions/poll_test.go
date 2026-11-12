@@ -2,15 +2,16 @@ package interactions
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
-func TestPollUntilTerminal(t *testing.T) {
+func TestPoll_StopsAtEachTerminalStatus(t *testing.T) {
 	terminals := []Status{
 		StatusCompleted,
 		StatusFailed,
@@ -20,6 +21,7 @@ func TestPollUntilTerminal(t *testing.T) {
 	}
 	for _, terminal := range terminals {
 		t.Run(string(terminal), func(t *testing.T) {
+			must := require.New(t)
 			var calls atomic.Int32
 			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				status := StatusInProgress
@@ -36,23 +38,18 @@ func TestPollUntilTerminal(t *testing.T) {
 				Multiplier:  1.5,
 				OnPoll:      func(in *Interaction) { observed = append(observed, in.Status) },
 			})
-			if err != nil {
-				t.Fatalf("PollUntilTerminal: %v", err)
-			}
-			if in.Status != terminal {
-				t.Errorf("status = %q, want %q", in.Status, terminal)
-			}
-			if got := calls.Load(); got != 3 {
-				t.Errorf("polls = %d, want 3", got)
-			}
-			if len(observed) != 3 || observed[0] != StatusInProgress || observed[2] != terminal {
-				t.Errorf("OnPoll observed %v", observed)
-			}
+			must.NoError(err)
+			must.Equal(terminal, in.Status)
+			must.EqualValues(3, calls.Load())
+			must.Len(observed, 3, "OnPoll observed %v", observed)
+			must.Equal(StatusInProgress, observed[0])
+			must.Equal(terminal, observed[2])
 		})
 	}
 }
 
 func TestPollRequiresActionReturnsTypedError(t *testing.T) {
+	must := require.New(t)
 	// requires_action cannot legitimately occur for deep research; the
 	// poller must surface it immediately as ErrRequiresAction with the
 	// snapshot attached, not hang until the server's 60-minute cap.
@@ -60,15 +57,13 @@ func TestPollRequiresActionReturnsTypedError(t *testing.T) {
 		writeJSON(t, w, `{"id":"v1_abc","status":"requires_action"}`)
 	}))
 	in, err := c.PollUntilTerminal(context.Background(), "v1_abc", PollConfig{Interval: time.Millisecond})
-	if !errors.Is(err, ErrRequiresAction) {
-		t.Fatalf("error = %v, want ErrRequiresAction", err)
-	}
-	if in == nil || in.Status != StatusRequiresAction {
-		t.Errorf("snapshot = %+v, want requires_action interaction", in)
-	}
+	must.ErrorIs(err, ErrRequiresAction)
+	must.NotNil(in)
+	must.Equal(StatusRequiresAction, in.Status)
 }
 
 func TestPollContextCancellation(t *testing.T) {
+	must := require.New(t)
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, `{"id":"v1_abc","status":"in_progress"}`)
 	}))
@@ -77,23 +72,21 @@ func TestPollContextCancellation(t *testing.T) {
 		Interval: time.Hour, // ensure we are waiting, not polling, when cancelled
 		OnPoll:   func(*Interaction) { cancel() },
 	})
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("error = %v, want context.Canceled", err)
-	}
+	must.ErrorIs(err, context.Canceled)
 }
 
-func TestPollPropagatesGetErrors(t *testing.T) {
+func TestPoll_PropagatesGetErrors(t *testing.T) {
+	must := require.New(t)
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}), WithMaxRetries(0))
 	_, err := c.PollUntilTerminal(context.Background(), "v1_gone", PollConfig{Interval: time.Millisecond})
 	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != http.StatusNotFound {
-		t.Errorf("error = %v, want APIError 404", err)
-	}
+	must.ErrorAs(err, &apiErr)
+	must.Equal(http.StatusNotFound, apiErr.HTTPStatus)
 }
 
-func TestNextInterval(t *testing.T) {
+func TestNextInterval_AppliesMultiplierAndCeiling(t *testing.T) {
 	tests := []struct {
 		name    string
 		current time.Duration
@@ -111,16 +104,16 @@ func TestNextInterval(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := nextInterval(tt.current, tt.cfg); got != tt.want {
-				t.Errorf("nextInterval(%v) = %v, want %v", tt.current, got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, nextInterval(tt.current, tt.cfg))
 		})
 	}
 }
 
-func TestPollConfigDefaults(t *testing.T) {
+func TestPollConfig_WithDefaults_FillsUnsetFields(t *testing.T) {
+	must := require.New(t)
 	cfg := PollConfig{}.withDefaults()
-	if cfg.Interval != defaultPollInterval || cfg.MaxInterval != defaultPollMaxInterval || cfg.Multiplier != defaultPollMultiplier {
-		t.Errorf("defaults = %+v", cfg)
-	}
+	must.Equal(defaultPollInterval, cfg.Interval)
+	must.Equal(defaultPollMaxInterval, cfg.MaxInterval)
+	must.InDelta(defaultPollMultiplier, cfg.Multiplier, 0)
 }

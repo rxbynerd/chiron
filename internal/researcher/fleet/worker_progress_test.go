@@ -6,13 +6,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
@@ -44,10 +46,13 @@ func (l *progressLog) snapshot() []Progress {
 // highEntropyKey is credential-shaped enough for secret.Scrub's backstop.
 const highEntropyKey = "Zk3xQ9vB2mN7pL4tR8wY1cH6jD5fG0sA"
 
-// TestRunWorkerProgressPerTurn: a search, fetch, final run reports exactly one
-// Progress per turn, in turn order, carrying the accumulated usage and a
+// TestRunWorker_Progress_OnePerTurn: a search, fetch, final run reports exactly
+// one Progress per turn, in turn order, carrying the accumulated usage and a
 // detail that names each target without its content.
-func TestRunWorkerProgressPerTurn(t *testing.T) {
+func TestRunWorker_Progress_OnePerTurn(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	page := httptest.NewServer(plainTextPage("Rayleigh scattering makes the sky appear blue."))
 	defer page.Close()
 	articleURL := page.URL + "/articles/sky?session=abc123&ref=search#section-2"
@@ -72,9 +77,7 @@ func TestRunWorkerProgressPerTurn(t *testing.T) {
 		Progress: log.hook,
 	}
 	finding := RunWorker(context.Background(), deps, Brief{Objective: "why is the sky blue"})
-	if finding.Status != types.StatusCompleted {
-		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
-	}
+	must.Equal(types.StatusCompleted, finding.Status, "finding detail: %s", finding.Detail)
 
 	got := log.snapshot()
 	want := []struct {
@@ -85,33 +88,41 @@ func TestRunWorkerProgressPerTurn(t *testing.T) {
 		{"fetch", page.URL},
 		{"final", ""},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("progress calls = %+v, want %d (one per turn)", got, len(want))
-	}
+	must.Len(got, len(want), "one report per turn")
+
 	for i, tt := range want {
-		p := got[i]
-		if p.Turn != i+1 || p.MaxTurns != c.MaxTurns || p.Action != tt.action || p.Detail != tt.detail {
-			t.Errorf("call %d = %+v, want turn %d/%d %s %q", i, p, i+1, c.MaxTurns, tt.action, tt.detail)
-		}
-		if i == 0 {
-			continue
-		}
-		prev := got[i-1]
-		if p.InputTokens < prev.InputTokens || p.OutputTokens < prev.OutputTokens || p.EstimatedCostGBP < prev.EstimatedCostGBP {
-			t.Errorf("call %d usage %+v went backwards from %+v", i, p, prev)
-		}
+		t.Run(tt.action, func(t *testing.T) {
+			must := require.New(t)
+			p := got[i]
+			must.Equal(i+1, p.Turn)
+			must.Equal(c.MaxTurns, p.MaxTurns)
+			must.Equal(tt.action, p.Action)
+			must.Equal(tt.detail, p.Detail)
+			if i > 0 {
+				prev := got[i-1]
+				must.GreaterOrEqual(p.InputTokens, prev.InputTokens, "input tokens went backwards")
+				must.GreaterOrEqual(p.OutputTokens, prev.OutputTokens, "output tokens went backwards")
+				must.GreaterOrEqual(p.EstimatedCostGBP, prev.EstimatedCostGBP, "estimated cost went backwards")
+			}
+		})
 	}
-	if got[0].InputTokens != 30 || got[0].OutputTokens != 8 || got[0].EstimatedCostGBP == 0 {
-		t.Errorf("turn 1 usage = %+v, want its own model call counted and priced", got[0])
-	}
+
+	check.Equal(30, got[0].InputTokens, "turn 1 counts its own model call")
+	check.Equal(8, got[0].OutputTokens, "turn 1 counts its own model call")
+	check.NotZero(got[0].EstimatedCostGBP, "turn 1 is priced")
+
 	last := got[len(got)-1]
-	if last.InputTokens != finding.Usage.InputTokens || last.OutputTokens != finding.Usage.OutputTokens || last.EstimatedCostGBP != finding.Usage.EstimatedCostGBP {
-		t.Errorf("final report usage = %+v, want the finding's %+v", last, finding.Usage)
-	}
+	check.Equal(finding.Usage.InputTokens, last.InputTokens, "final report input tokens")
+	check.Equal(finding.Usage.OutputTokens, last.OutputTokens, "final report output tokens")
+	check.InDelta(finding.Usage.EstimatedCostGBP, last.EstimatedCostGBP, 0, "final report estimated cost")
 }
 
-// TestRunWorkerProgressRecall: a recall turn reports the recall query.
-func TestRunWorkerProgressRecall(t *testing.T) {
+// TestRunWorker_Progress_RecallReportsQuery: a recall turn reports the recall
+// query as its detail.
+func TestRunWorker_Progress_RecallReportsQuery(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	recall := &staticRecall{hits: []memory.Recalled{billetHit("m1", "PHY shortlist", "Vendor A was shortlisted.")}}
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
@@ -130,25 +141,19 @@ func TestRunWorkerProgressRecall(t *testing.T) {
 		Caps:      caps(),
 		Progress:  log.hook,
 	}, Brief{Objective: "PHY vendor"})
-	if finding.Status != types.StatusCompleted {
-		t.Fatalf("status = %s (%s), want completed", finding.Status, finding.Detail)
-	}
+	must.Equal(types.StatusCompleted, finding.Status, "finding detail: %s", finding.Detail)
 
 	got := log.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("progress calls = %+v, want 2", got)
-	}
-	if got[0].Action != "recall" || got[0].Detail != "which PHY vendor did we shortlist" {
-		t.Errorf("recall report = %+v, want the recall query as detail", got[0])
-	}
-	if got[1].Action != "final" || got[1].Detail != "" {
-		t.Errorf("final report = %+v, want an empty detail", got[1])
-	}
+	must.Len(got, 2, "one recall report and one final report")
+	check.Equal("recall", got[0].Action)
+	check.Equal("which PHY vendor did we shortlist", got[0].Detail)
+	check.Equal("final", got[1].Action)
+	check.Empty(got[1].Detail, "the final report carries no detail")
 }
 
-// TestRunWorkerProgressNothingBeforeParsedAction: a turn that ends before its
+// TestRunWorker_Progress_SilentBeforeParsedAction: a turn that ends before its
 // action parses reports nothing; the Finding carries that outcome.
-func TestRunWorkerProgressNothingBeforeParsedAction(t *testing.T) {
+func TestRunWorker_Progress_SilentBeforeParsedAction(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		reply modeltest.FakeReply
@@ -159,6 +164,7 @@ func TestRunWorkerProgressNothingBeforeParsedAction(t *testing.T) {
 		{"invalid action", modeltest.FakeReply{Content: `{"action":"shell","query":"rm -rf /"}`}, types.StatusFailed},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.reply)
 			defer modelSrv.Close()
 			searchSrv := searchtest.NewFakeServer(nil)
@@ -172,12 +178,8 @@ func TestRunWorkerProgressNothingBeforeParsedAction(t *testing.T) {
 				Caps:     caps(),
 				Progress: log.hook,
 			}, Brief{Objective: "q"})
-			if finding.Status != tt.want {
-				t.Errorf("status = %s (%s), want %s", finding.Status, finding.Detail, tt.want)
-			}
-			if got := log.snapshot(); len(got) != 0 {
-				t.Errorf("progress calls = %+v, want none", got)
-			}
+			must.Equal(tt.want, finding.Status, "finding detail: %s", finding.Detail)
+			must.Empty(log.snapshot(), "no progress before a parsed action")
 		})
 	}
 }
@@ -207,14 +209,15 @@ func searchFinalRun(t *testing.T, hook func(context.Context, Progress), deadline
 	}, Brief{Objective: "why is the sky blue"})
 }
 
-// TestRunWorkerProgressHookPanicIsRecovered: a hook that panics on every turn
+// TestRunWorker_Progress_HookPanicIsRecovered: a hook that panics on every turn
 // is recovered, the run ends with the Finding it produces without a hook, and
 // the recovered value is logged at Debug with any credential scrubbed.
-func TestRunWorkerProgressHookPanicIsRecovered(t *testing.T) {
+func TestRunWorker_Progress_HookPanicIsRecovered(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	want := searchFinalRun(t, nil, 0, nil)
-	if want.Status != types.StatusCompleted {
-		t.Fatalf("baseline status = %s (%s), want completed", want.Status, want.Detail)
-	}
+	must.Equal(types.StatusCompleted, want.Status, "baseline finding detail: %s", want.Detail)
 
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -224,29 +227,21 @@ func TestRunWorkerProgressHookPanicIsRecovered(t *testing.T) {
 		calls.Add(1)
 		panic("progress hook failure: " + highEntropyKey)
 	}, 0, logger)
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("finding with a panicking hook = %+v, want %+v", got, want)
-	}
-	if n := calls.Load(); n != 2 {
-		t.Errorf("hook calls = %d, want 2: a panic on one turn must not stop later reports", n)
-	}
+	check.Equal(want, got, "finding with a panicking hook")
+	check.EqualValues(2, calls.Load(), "a panic on one turn must not stop later reports")
 
 	log := logged.String()
-	if !strings.Contains(log, "progress hook panicked") {
-		t.Errorf("log = %q, want a record of the recovered panic", log)
-	}
-	if strings.Contains(log, highEntropyKey) {
-		t.Errorf("log = %q, leaked the raw credential from the panic value", log)
-	}
-	if !strings.Contains(log, "REDACTED") {
-		t.Errorf("log = %q, want the scrubbed placeholder in place of the credential", log)
-	}
+	check.Contains(log, "progress hook panicked", "the recovered panic is logged")
+	check.NotContains(log, highEntropyKey, "the raw credential from the panic value is not logged")
+	check.Contains(log, "REDACTED", "the scrubbed placeholder replaces the credential")
 }
 
-// TestRunWorkerProgressBlockingHookIsAbandoned: a hook that ignores its
+// TestRunWorker_Progress_BlockingHookIsAbandoned: a hook that ignores its
 // context is abandoned at the progress deadline on each turn, so the run
 // completes with an unchanged Finding in time bounded by that deadline.
-func TestRunWorkerProgressBlockingHookIsAbandoned(t *testing.T) {
+func TestRunWorker_Progress_BlockingHookIsAbandoned(t *testing.T) {
+	check := assert.New(t)
+
 	want := searchFinalRun(t, nil, 0, nil)
 
 	release := make(chan struct{})
@@ -259,20 +254,15 @@ func TestRunWorkerProgressBlockingHookIsAbandoned(t *testing.T) {
 	}, 50*time.Millisecond, nil)
 	elapsed := time.Since(start)
 
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("finding with a blocking hook = %+v, want %+v", got, want)
-	}
-	if n := calls.Load(); n != 2 {
-		t.Errorf("hook calls = %d, want 2: an abandoned report must not stop later ones", n)
-	}
-	if elapsed >= progressTimeout {
-		t.Errorf("run took %v, want it bounded by the 50ms test deadline per turn (well under %v)", elapsed, progressTimeout)
-	}
+	check.Equal(want, got, "finding with a blocking hook")
+	check.EqualValues(2, calls.Load(), "an abandoned report must not stop later ones")
+	check.Less(elapsed, progressTimeout, "the run is bounded by the 50ms test deadline per turn")
 }
 
-// TestProgressDetail: a detail names the target without its content, as one
-// scrubbed, printable, bounded line; a fetch reduces to scheme://host.
-func TestProgressDetail(t *testing.T) {
+// TestProgressDetail_NamesTargetWithoutContent: a detail names the target
+// without its content, as one scrubbed, printable, bounded line; a fetch
+// reduces to scheme://host.
+func TestProgressDetail_NamesTargetWithoutContent(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		act  action
@@ -293,40 +283,37 @@ func TestProgressDetail(t *testing.T) {
 		{"final carries no answer", action{Kind: actionFinal, Answer: "the whole answer", Citations: []citationInput{{URL: "https://example.org/a"}}}, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := progressDetail(tt.act); got != tt.want {
-				t.Errorf("progressDetail = %q, want %q", got, tt.want)
-			}
+			must := require.New(t)
+			must.Equal(tt.want, progressDetail(tt.act))
 		})
 	}
 }
 
-// TestProgressDetailBounded: a long query is cut to maxProgressDetailRunes on
-// a rune boundary, and scrubbing precedes the cut so a credential straddling
-// the bound leaves no fragment behind.
-func TestProgressDetailBounded(t *testing.T) {
+// TestProgressDetail_BoundsLongQueries: a long query is cut to
+// maxProgressDetailRunes on a rune boundary, and scrubbing precedes the cut so
+// a credential straddling the bound leaves no fragment behind.
+func TestProgressDetail_BoundsLongQueries(t *testing.T) {
+	check := assert.New(t)
+
 	long := strings.Repeat("é", 3*maxProgressDetailRunes)
 	got := progressDetail(action{Kind: actionSearch, Query: long})
-	if n := utf8.RuneCountInString(got); n != maxProgressDetailRunes {
-		t.Errorf("detail runes = %d, want %d", n, maxProgressDetailRunes)
-	}
-	if !utf8.ValidString(got) || !strings.HasPrefix(long, got) {
-		t.Errorf("detail %q is not a clean prefix of the query", got)
-	}
+	check.Equal(maxProgressDetailRunes, utf8.RuneCountInString(got), "detail runes")
+	check.True(utf8.ValidString(got), "detail is valid UTF-8")
+	check.True(strings.HasPrefix(long, got), "detail is a prefix of the query")
 
 	straddle := strings.Repeat("a", maxProgressDetailRunes-10) + " " + highEntropyKey
 	got = progressDetail(action{Kind: actionSearch, Query: straddle})
-	if strings.Contains(got, highEntropyKey[:9]) {
-		t.Errorf("detail %q carries a fragment of the credential", got)
-	}
+	check.NotContains(got, highEntropyKey[:9], "the detail carries no fragment of the credential")
 }
 
 // waitFor polls cond until it holds, failing the test after a generous bound.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
+	must := require.New(t)
 	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+			must.FailNow("timed out waiting for " + what)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -336,6 +323,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // which reports progress to log under the given deadline.
 func newProgressWorker(t *testing.T, modelSrv *modeltest.FakeServer, log *progressLog, deadline time.Duration) *Worker {
 	t.Helper()
+	must := require.New(t)
 	searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "Sky", URL: "https://example.org/sky"}})
 	t.Cleanup(searchSrv.Close)
 	w, err := NewWorker(WorkerDeps{
@@ -346,17 +334,18 @@ func newProgressWorker(t *testing.T, modelSrv *modeltest.FakeServer, log *progre
 		Progress:                log.hook,
 		progressTimeoutOverride: deadline,
 	})
-	if err != nil {
-		t.Fatalf("NewWorker: %v", err)
-	}
+	must.NoError(err, "NewWorker")
 	return w
 }
 
-// TestWorkerProgressWaitsForAwait: the Worker holds a run's progress
+// TestWorker_Progress_WaitsForAwait: the Worker holds a run's progress
 // deliveries until Await is entered for it, so none can precede the run
 // core's id event; the held loop takes no further turn meanwhile, and once
 // Await is entered every report arrives in turn order.
-func TestWorkerProgressWaitsForAwait(t *testing.T) {
+func TestWorker_Progress_WaitsForAwait(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`},
 		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
@@ -367,35 +356,32 @@ func TestWorkerProgressWaitsForAwait(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	waitFor(t, "the first model turn", func() bool { return modelSrv.CallCount() >= 1 })
 	time.Sleep(50 * time.Millisecond)
-	if got := log.snapshot(); len(got) != 0 {
-		t.Fatalf("progress before Await = %+v, want none", got)
-	}
-	if n := modelSrv.CallCount(); n != 1 {
-		t.Fatalf("model calls before Await = %d, want 1: the loop must be held at turn 1's report", n)
-	}
+	must.Empty(log.snapshot(), "progress before Await")
+	must.Equal(1, modelSrv.CallCount(), "the loop must be held at turn 1's report")
 
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	must.NoError(w.Await(ctx, id), "Await")
 	got := log.snapshot()
-	if len(got) != 2 || got[0].Turn != 1 || got[0].Action != "search" || got[1].Turn != 2 || got[1].Action != "final" {
-		t.Errorf("progress after Await = %+v, want turn 1 search then turn 2 final", got)
-	}
+	must.Len(got, 2, "one report per turn")
+	check.Equal(1, got[0].Turn)
+	check.Equal("search", got[0].Action)
+	check.Equal(2, got[1].Turn)
+	check.Equal("final", got[1].Action)
+
 	in, err := w.Result(ctx, id)
-	if err != nil || in.Status != types.StatusCompleted {
-		t.Errorf("Result = %+v, %v, want completed", in, err)
-	}
+	must.NoError(err, "Result")
+	must.Equal(types.StatusCompleted, in.Status)
 }
 
-// TestWorkerProgressDroppedWithoutAwait: a delivery whose gate stays shut past
+// TestWorker_Progress_DroppedWithoutAwait: a delivery whose gate stays shut past
 // the progress deadline is dropped rather than delivered late, and the run
 // completes unaffected.
-func TestWorkerProgressDroppedWithoutAwait(t *testing.T) {
+func TestWorker_Progress_DroppedWithoutAwait(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	modelSrv := modeltest.NewFakeServer(
 		modeltest.FakeReply{Content: `{"action":"search","query":"sky"}`},
 		finalReply("# Answer\n\nblue sky", "https://example.org/sky"),
@@ -406,24 +392,16 @@ func TestWorkerProgressDroppedWithoutAwait(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := w.Start(ctx, researcher.Task{Query: "why is the sky blue"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	must.NoError(err, "Start")
 	waitFor(t, "the loop to finish", func() bool {
 		in, err := w.Result(ctx, id)
 		return err == nil && in.Status != types.StatusInProgress
 	})
-	if got := log.snapshot(); len(got) != 0 {
-		t.Fatalf("progress before Await = %+v, want none: Await was never called yet", got)
-	}
-	if err := w.Await(ctx, id); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
-	if got := log.snapshot(); len(got) != 0 {
-		t.Errorf("progress = %+v, want both reports dropped at the deadline", got)
-	}
+	must.Empty(log.snapshot(), "progress before Await: Await was never called yet")
+	must.NoError(w.Await(ctx, id), "Await")
+	check.Empty(log.snapshot(), "both reports dropped at the deadline")
+
 	in, err := w.Result(ctx, id)
-	if err != nil || in.Status != types.StatusCompleted {
-		t.Errorf("Result = %+v, %v, want completed", in, err)
-	}
+	must.NoError(err, "Result")
+	check.Equal(types.StatusCompleted, in.Status)
 }

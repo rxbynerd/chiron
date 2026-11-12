@@ -2,10 +2,11 @@ package config
 
 import (
 	"bytes"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // validWorker returns a Default config selecting the worker agent with a
@@ -83,27 +84,24 @@ func TestValidateAcceptsWorkerAndFleet(t *testing.T) {
 		}()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.cfg.Validate(); err != nil {
-				t.Errorf("Validate: %v", err)
-			}
+			must := require.New(t)
+			must.NoError(tt.cfg.Validate())
 		})
 	}
 }
 
-// TestValidateDeepResearchIgnoresFleet: a deep-research run must stay valid
-// with a zero Fleet block — the fleet caps are never enforced for it, so a
-// pipeline that never sets --agent worker/fleet is unaffected.
-func TestValidateDeepResearchIgnoresFleet(t *testing.T) {
-	cfg := Default()
-	cfg.Agent = AgentDeepResearch
-	cfg.Fleet = FleetConfig{} // deliberately zero: no memory, no caps.
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("deep-research with a zero Fleet must validate: %v", err)
-	}
-
-	cfg.Agent = AgentDeepResearchMax
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("deep-research-max with a zero Fleet must validate: %v", err)
+// TestConfig_Validate_DeepResearchIgnoresFleet: a deep-research run must stay
+// valid with a zero Fleet block — the fleet caps are never enforced for it, so
+// a pipeline that never sets --agent worker/fleet is unaffected.
+func TestConfig_Validate_DeepResearchIgnoresFleet(t *testing.T) {
+	for _, agent := range []string{AgentDeepResearch, AgentDeepResearchMax} {
+		t.Run(agent, func(t *testing.T) {
+			must := require.New(t)
+			cfg := Default()
+			cfg.Agent = agent
+			cfg.Fleet = FleetConfig{} // deliberately zero: no memory, no caps.
+			must.NoError(cfg.Validate())
+		})
 	}
 }
 
@@ -173,20 +171,19 @@ func TestValidateRejectsBadFleet(t *testing.T) {
 		{"search query arg whitespace", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = "query arg" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validWorker()
 			tt.mutate(&cfg)
-			if err := cfg.Validate(); err == nil {
-				t.Errorf("%s: validated", tt.name)
-			}
+			must.Error(cfg.Validate())
 		})
 	}
 }
 
-// TestValidateMemoryBinding: the fleet passes findings by reference, so it
-// requires inmemory and rejects noop with an error naming the fix; the
+// TestConfig_Validate_MemoryBinding: the fleet passes findings by reference,
+// so it requires inmemory and rejects noop with an error naming the fix; the
 // worker has no session plane and accepts either; unknown values are
 // rejected for both.
-func TestValidateMemoryBinding(t *testing.T) {
+func TestConfig_Validate_MemoryBinding(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		agent   string
@@ -203,50 +200,44 @@ func TestValidateMemoryBinding(t *testing.T) {
 		{"fleet empty", AgentFleet, "", []string{"fleet.memory:"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validWorker()
 			cfg.Agent = tt.agent
 			cfg.Fleet.Memory = tt.memory
 			err := cfg.Validate()
 			if len(tt.wantErr) == 0 {
-				if err != nil {
-					t.Errorf("Validate: %v", err)
-				}
+				must.NoError(err)
 				return
 			}
-			if err == nil {
-				t.Fatal("validated")
-			}
+			must.Error(err)
 			for _, want := range tt.wantErr {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("Validate = %v, want it to contain %q", err, want)
-				}
+				must.ErrorContains(err, want)
 			}
 		})
 	}
 }
 
-// TestValidateFleetRejectsDefaultMemory: noop stays the default, so a bare
+// TestConfig_Validate_FleetRejectsDefaultMemory: noop stays the default, so a bare
 // fleet config is rejected until inmemory is chosen.
-func TestValidateFleetRejectsDefaultMemory(t *testing.T) {
-	if Default().Fleet.Memory != MemoryNoop {
-		t.Fatalf("default fleet.memory = %q, want %q", Default().Fleet.Memory, MemoryNoop)
-	}
+func TestConfig_Validate_FleetRejectsDefaultMemory(t *testing.T) {
+	must := require.New(t)
+	must.Equal(MemoryNoop, Default().Fleet.Memory)
+
 	cfg := Default()
 	cfg.Agent = AgentFleet
-	if err := cfg.Validate(); err == nil || !strings.HasPrefix(err.Error(), "fleet.memory:") {
-		t.Errorf("fleet with the default memory binding: err = %v, want a fleet.memory error", err)
-	}
+	err := cfg.Validate()
+	must.Error(err)
+	must.True(strings.HasPrefix(err.Error(), "fleet.memory:"), "err = %v, want a fleet.memory error", err)
 }
 
-// TestValidateFleetOnlyCaps: MaxWorkers/Concurrency bound fan-out, which a
-// single worker has none of — so they are enforced for the fleet agent and
-// ignored for the lone worker.
-func TestValidateFleetOnlyCaps(t *testing.T) {
+// MaxWorkers/Concurrency bound fan-out, which a single worker has none of — so
+// they are enforced for the fleet agent and ignored for the lone worker.
+func TestConfig_Validate_FleetOnlyCapsForFleetAgent(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		mutate     func(*ResearchConfig)
-		workerOK   bool // valid when Agent is worker
-		fleetError bool // rejected when Agent is fleet
+		name          string
+		mutate        func(*ResearchConfig)
+		workerValid   bool // valid when Agent is worker
+		fleetRejected bool // rejected when Agent is fleet
 	}{
 		{"max workers zero", func(c *ResearchConfig) { c.Fleet.MaxWorkers = 0 }, true, true},
 		{"concurrency zero", func(c *ResearchConfig) { c.Fleet.Concurrency = 0 }, true, true},
@@ -256,17 +247,17 @@ func TestValidateFleetOnlyCaps(t *testing.T) {
 		}, true, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			worker := validWorker()
 			tt.mutate(&worker)
-			if err := worker.Validate(); (err == nil) != tt.workerOK {
-				t.Errorf("worker: err = %v, want ok=%v", err, tt.workerOK)
-			}
+			workerErr := worker.Validate()
+			must.Equal(tt.workerValid, workerErr == nil, "worker: err = %v", workerErr)
 
 			fleet := validFleet()
 			tt.mutate(&fleet)
-			if err := fleet.Validate(); (err != nil) != tt.fleetError {
-				t.Errorf("fleet: err = %v, want error=%v", err, tt.fleetError)
-			}
+			fleetErr := fleet.Validate()
+			must.Equal(tt.fleetRejected, fleetErr != nil, "fleet: err = %v", fleetErr)
 		})
 	}
 }
@@ -289,23 +280,22 @@ func TestValidateErrorsNeverEchoSecrets(t *testing.T) {
 		{"search query arg", func(c *ResearchConfig) { c.Fleet.SearchQueryArg = literal + "/" + literal }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			cfg := validWorker()
 			tt.mutate(&cfg)
 			err := cfg.Validate()
-			if err == nil {
-				t.Fatal("literal key was accepted")
-			}
-			if strings.Contains(err.Error(), literal) {
-				t.Errorf("validation error leaked the literal: %v", err)
-			}
+			must.Error(err, "literal key was accepted")
+			must.NotContains(err.Error(), literal, "validation error leaked the literal")
 		})
 	}
 }
 
-// TestFleetRoundTrip pins the new fields through EncodeJSON -> decode: the
-// research-config command emits JSON that the next pipeline stage decodes,
-// so a dropped or misnamed fleet field would silently reset a paid run.
-func TestFleetRoundTrip(t *testing.T) {
+// TestConfig_EncodeJSON_FleetRoundTrip pins the fleet fields through
+// EncodeJSON and decode: the research-config command emits JSON that the next
+// pipeline stage decodes, so a dropped or misnamed fleet field would silently
+// reset a paid run.
+func TestConfig_EncodeJSON_FleetRoundTrip(t *testing.T) {
+	must := require.New(t)
 	in := validFleet()
 	in.Query = "10BASE-T1L PHY vendors"
 	in.Fleet.MaxTurns = 12
@@ -319,32 +309,27 @@ func TestFleetRoundTrip(t *testing.T) {
 	in.Fleet.SearchQueryArg = "q"
 
 	var buf bytes.Buffer
-	if err := in.EncodeJSON(&buf); err != nil {
-		t.Fatalf("EncodeJSON: %v", err)
-	}
+	must.NoError(in.EncodeJSON(&buf))
 	out, err := decode(&buf)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !reflect.DeepEqual(out.Fleet, in.Fleet) {
-		t.Errorf("fleet round trip lost data:\n got %+v\nwant %+v", out.Fleet, in.Fleet)
-	}
+	must.NoError(err)
+	must.Equal(in.Fleet, out.Fleet, "fleet round trip lost data")
 }
 
-// TestFleetDecodeRejectsUnknownKeys: the strict-decode contract still
+// TestConfig_Decode_RejectsUnknownFleetKeys: the strict-decode contract still
 // holds under the nested block — a typo inside fleet must be an error, not
 // a silently ignored knob on a paid run.
-func TestFleetDecodeRejectsUnknownKeys(t *testing.T) {
+func TestConfig_Decode_RejectsUnknownFleetKeys(t *testing.T) {
+	must := require.New(t)
 	const in = "agent: worker\nfleet:\n  max_trns: 4\n"
-	if _, err := decode(strings.NewReader(in)); err == nil {
-		t.Error("a typo inside the fleet block was accepted silently")
-	}
+	_, err := decode(strings.NewReader(in))
+	must.Error(err, "a typo inside the fleet block was accepted silently")
 }
 
-// TestValidateRejectsDeepResearchLeversForInProcessAgents: a Gemini-only
+// TestConfig_Validate_RejectsDeepResearchLeversForInProcessAgents: a Gemini-only
 // spend or planning lever set alongside the worker or fleet agent is an
 // error naming the lever, never a silent no-op.
-func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
+func TestConfig_Validate_RejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
+	must := require.New(t)
 	for _, tt := range []struct {
 		name   string
 		mutate func(*ResearchConfig)
@@ -362,66 +347,68 @@ func TestValidateRejectsDeepResearchLeversForInProcessAgents(t *testing.T) {
 	} {
 		for _, agent := range []string{AgentWorker, AgentFleet} {
 			t.Run(tt.name+"/"+agent, func(t *testing.T) {
+				must := require.New(t)
 				cfg := withAgent(validWorker(), agent)
 				tt.mutate(&cfg)
 				err := cfg.Validate()
-				if err == nil || !strings.HasPrefix(err.Error(), tt.want) {
-					t.Errorf("Validate = %v, want an error starting %q", err, tt.want)
-				}
+				must.Error(err)
+				must.True(strings.HasPrefix(err.Error(), tt.want), "err = %v, want an error starting %q", err, tt.want)
 			})
 		}
 	}
+
 	// The same levers remain valid for the deep-research tiers.
 	cfg := Default()
 	cfg.BudgetGBP, cfg.Plan, cfg.Template = 2, true, "t.md"
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("deep-research with levers: %v", err)
-	}
+	must.NoError(cfg.Validate())
 }
 
-// TestValidateAcceptsTemplateForInProcessAgents: template shapes the worker's
+// TestConfig_Validate_AcceptsTemplateForInProcessAgents: template shapes the worker's
 // output-format block, so it is valid for worker and fleet.
-func TestValidateAcceptsTemplateForInProcessAgents(t *testing.T) {
+func TestConfig_Validate_AcceptsTemplateForInProcessAgents(t *testing.T) {
 	for _, agent := range []string{AgentWorker, AgentFleet} {
-		cfg := withAgent(validWorker(), agent)
-		cfg.Template = "t.md"
-		if err := cfg.Validate(); err != nil {
-			t.Errorf("%s with template: %v", agent, err)
-		}
+		t.Run(agent, func(t *testing.T) {
+			must := require.New(t)
+			cfg := withAgent(validWorker(), agent)
+			cfg.Template = "t.md"
+			must.NoError(cfg.Validate())
+		})
 	}
 }
 
-// TestDefaultFleetIsBounded: the defaults alone cap turns, tokens, page size
-// and wall clock, so a bare --agent worker run is bounded on every axis
+// TestConfig_Default_FleetIsBounded: the defaults alone cap turns, tokens, page
+// size and wall clock, so a bare --agent worker run is bounded on every axis
 // that needs no price table.
-func TestDefaultFleetIsBounded(t *testing.T) {
+func TestConfig_Default_FleetIsBounded(t *testing.T) {
+	must := require.New(t)
 	f := Default().Fleet
-	if f.MaxTurns <= 0 || f.MaxTokens <= 0 || f.MaxPageBytes <= 0 || time.Duration(f.WorkerTimeout) <= 0 {
-		t.Errorf("default fleet caps are not all positive: %+v", f)
-	}
+	must.Positive(f.MaxTurns, "MaxTurns")
+	must.Positive(f.MaxTokens, "MaxTokens")
+	must.Positive(f.MaxPageBytes, "MaxPageBytes")
+	must.Positive(time.Duration(f.WorkerTimeout), "WorkerTimeout")
 }
 
-// TestDefaultFleetSearchIdentifiers: a bare --agent worker run already
+// TestConfig_Default_FleetSearchIdentifiers: a bare --agent worker run already
 // names the reference search MCP's tool and argument, so it needs no
 // override to reach the documented default backend (docs/DECISIONS.md,
 // 2026-09-25 "SP-A").
-func TestDefaultFleetSearchIdentifiers(t *testing.T) {
+func TestConfig_Default_FleetSearchIdentifiers(t *testing.T) {
+	must := require.New(t)
 	f := Default().Fleet
-	if f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
-		t.Errorf("default search identifiers = %q/%q, want %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
-	}
+	must.Equal(DefaultSearchTool, f.SearchTool, "search tool")
+	must.Equal(DefaultSearchQueryArg, f.SearchQueryArg, "search query arg")
 }
 
-// TestFleetSearchIdentifiersDefaultOnPartialBlock: a fleet block that sets
-// other fields and omits search_tool/search_query_arg must still resolve to
-// their documented defaults, not a zero value that would fail validation.
-func TestFleetSearchIdentifiersDefaultOnPartialBlock(t *testing.T) {
+// TestConfig_Decode_FleetSearchIdentifiersDefaultOnPartialBlock: a fleet block
+// that sets other fields and omits search_tool/search_query_arg must still
+// resolve to their documented defaults, not a zero value that would fail
+// validation.
+func TestConfig_Decode_FleetSearchIdentifiersDefaultOnPartialBlock(t *testing.T) {
+	must := require.New(t)
 	const in = "agent: worker\nfleet:\n  search_endpoint: https://search.example\n"
 	cfg, err := decode(strings.NewReader(in))
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if f := cfg.Fleet; f.SearchTool != DefaultSearchTool || f.SearchQueryArg != DefaultSearchQueryArg {
-		t.Errorf("partial fleet block search identifiers = %q/%q, want the defaults %q/%q", f.SearchTool, f.SearchQueryArg, DefaultSearchTool, DefaultSearchQueryArg)
-	}
+	must.NoError(err)
+	f := cfg.Fleet
+	must.Equal(DefaultSearchTool, f.SearchTool, "search tool")
+	must.Equal(DefaultSearchQueryArg, f.SearchQueryArg, "search query arg")
 }

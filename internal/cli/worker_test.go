@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -29,6 +31,9 @@ func workerArgs(modelSrv *modeltest.FakeServer, searchSrv *searchtest.FakeServer
 // through the compiled command tree: search, fetch a loopback page (admitted
 // by the test-only loopback switch), and answer citing it.
 func TestWorkerSearchFetchFinalThroughCLI(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html><body><h1>Sky</h1><p>Rayleigh scattering.</p></body></html>"))
@@ -46,26 +51,22 @@ func TestWorkerSearchFetchFinalThroughCLI(t *testing.T) {
 	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "1")
 
 	stdout, stderr, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "text")...)
-	if err != nil {
-		t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-	}
-	if got := modelSrv.CallCount(); got != 3 {
-		t.Errorf("model call count = %d, want 3", got)
-	}
-	if !strings.Contains(stdout, "Rayleigh scattering") || !strings.Contains(stdout, "[Sky article]("+page.URL+")") {
-		t.Errorf("report lacks the body or the fetched source:\n%s", stdout)
-	}
-	if !strings.Contains(stderr, `"interaction_created"`) || !strings.Contains(stderr, "wkr_") {
-		t.Errorf("stderr lacks the early interaction id event:\n%s", stderr)
-	}
+	must.NoError(err, "research --agent worker failed; stderr:\n%s", stderr)
+	check.Equal(3, modelSrv.CallCount(), "model call count")
+	check.Contains(stdout, "Rayleigh scattering", "report lacks the answer body")
+	check.Contains(stdout, "[Sky article]("+page.URL+")", "report lacks the fetched source")
+	check.Contains(stderr, `"interaction_created"`, "stderr lacks the interaction_created event")
+	check.Contains(stderr, "wkr_", "stderr lacks the worker interaction id")
 }
 
-// TestWorkerCustomSearchToolConfiguration: fleet.search_tool and
+// TestWorker_CustomSearchTool_IsConfigurable: fleet.search_tool and
 // fleet.search_query_arg let the worker reach a search MCP server that names
 // its tool and query argument differently from the reference backend's
 // search/query (docs/DECISIONS.md, 2026-09-25 "SP-A").
-func TestWorkerCustomSearchToolConfiguration(t *testing.T) {
+func TestWorker_CustomSearchTool_IsConfigurable(t *testing.T) {
 	t.Run("succeeds when configured", func(t *testing.T) {
+		must := require.New(t)
+
 		page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte("<html><body><h1>Sky</h1><p>Rayleigh scattering.</p></body></html>"))
@@ -88,15 +89,14 @@ func TestWorkerCustomSearchToolConfiguration(t *testing.T) {
 		args := workerArgs(modelSrv, searchSrv, "-o", "text",
 			"--fleet-search-tool", "web_search", "--fleet-search-query-arg", "q")
 		stdout, stderr, err := execute(t, args...)
-		if err != nil {
-			t.Fatalf("research --agent worker: %v\nstderr: %s", err, stderr)
-		}
-		if !strings.Contains(stdout, "Rayleigh scattering") || !strings.Contains(stdout, "[Sky article]("+page.URL+")") {
-			t.Errorf("report lacks the body or the fetched source:\n%s", stdout)
-		}
+		must.NoError(err, "research --agent worker failed; stderr:\n%s", stderr)
+		must.Contains(stdout, "Rayleigh scattering", "report lacks the answer body")
+		must.Contains(stdout, "[Sky article]("+page.URL+")", "report lacks the fetched source")
 	})
 
 	t.Run("fails when not configured", func(t *testing.T) {
+		must := require.New(t)
+
 		searchSrv := searchtest.NewFakeServer(nil, searchtest.WithExpectedTool("web_search", "q"))
 		defer searchSrv.Close()
 		var replies []modeltest.FakeReply
@@ -111,18 +111,17 @@ func TestWorkerCustomSearchToolConfiguration(t *testing.T) {
 		// search/query defaults, which the fake above refuses.
 		stdout, _, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "text")...)
 		var exitErr *ExitError
-		if !errors.As(err, &exitErr) || exitErr.Code != ExitResearchFailed {
-			t.Fatalf("err = %v, want ExitError code %d", err, ExitResearchFailed)
-		}
-		if !strings.Contains(stdout, "consecutive tool failures") {
-			t.Errorf("report lacks the tool-failure detail:\n%s", stdout)
-		}
+		must.ErrorAs(err, &exitErr)
+		must.Equal(ExitResearchFailed, exitErr.Code, "exit code")
+		must.Contains(stdout, "consecutive tool failures", "report lacks the tool-failure detail")
 	})
 }
 
-// TestWorkerLoopbackSwitchRejectsOtherValues: the loopback switch accepts
+// TestWorker_LoopbackSwitch_RejectsOtherValues: the loopback switch accepts
 // only "1", so a typo cannot widen the SSRF guard.
-func TestWorkerLoopbackSwitchRejectsOtherValues(t *testing.T) {
+func TestWorker_LoopbackSwitch_RejectsOtherValues(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer()
@@ -131,18 +130,16 @@ func TestWorkerLoopbackSwitchRejectsOtherValues(t *testing.T) {
 	t.Setenv("CHIRON_FETCH_ALLOW_LOOPBACK", "true")
 
 	_, _, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "none")...)
-	if err == nil || !strings.Contains(err.Error(), "CHIRON_FETCH_ALLOW_LOOPBACK") {
-		t.Fatalf("err = %v, want the switch rejected", err)
-	}
-	if got := modelSrv.CallCount(); got != 0 {
-		t.Errorf("model call count = %d, want 0 before the switch is validated", got)
-	}
+	must.ErrorContains(err, "CHIRON_FETCH_ALLOW_LOOPBACK")
+	must.Zero(modelSrv.CallCount(), "the model must not be called before the switch is validated")
 }
 
-// TestWorkerFailureExitCode: a worker run that ends failed (an invalid model
-// action) exits with the research-failed code after emitting a placeholder
-// report, matching the exit-code contract.
-func TestWorkerFailureExitCode(t *testing.T) {
+// TestWorker_FailedRun_ExitsWithResearchFailedCode: a worker run that ends
+// failed (an invalid model action) exits with the research-failed code after
+// emitting a placeholder report, matching the exit-code contract.
+func TestWorker_FailedRun_ExitsWithResearchFailedCode(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{Content: `{"action":"shell","query":"rm -rf /"}`, FinishReason: "stop"})
@@ -151,17 +148,17 @@ func TestWorkerFailureExitCode(t *testing.T) {
 
 	stdout, _, err := execute(t, workerArgs(modelSrv, searchSrv, "-o", "text")...)
 	var exitErr *ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != ExitResearchFailed {
-		t.Fatalf("err = %v, want ExitError code %d", err, ExitResearchFailed)
-	}
-	if !strings.Contains(stdout, "status: failed") || !strings.Contains(stdout, "invalid model action") {
-		t.Errorf("placeholder report lacks the failed status detail:\n%s", stdout)
-	}
+	must.ErrorAs(err, &exitErr)
+	must.Equal(ExitResearchFailed, exitErr.Code, "exit code")
+	must.Contains(stdout, "status: failed", "placeholder report lacks the failed status")
+	must.Contains(stdout, "invalid model action", "placeholder report lacks the failure detail")
 }
 
-// TestWorkerRejectsDeepResearchLevers: --budget and --plan are refused with
-// --agent worker before any secret is resolved or request made.
-func TestWorkerRejectsDeepResearchLevers(t *testing.T) {
+// TestWorker_DeepResearchLevers_AreRefused: --budget and --plan are refused
+// with --agent worker before any secret is resolved or request made.
+func TestWorker_DeepResearchLevers_AreRefused(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer()
@@ -177,24 +174,21 @@ func TestWorkerRejectsDeepResearchLevers(t *testing.T) {
 		{"tools", []string{"--tools", "google_search"}, "tools:"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			_, _, err := execute(t, workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, tt.args...)...)...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want an error naming %s", err, tt.want)
-			}
-			if _, ok := errors.AsType[*ExitError](err); ok {
-				t.Errorf("a rejected lever is a usage error: %v", err)
-			}
+			must.ErrorContains(err, tt.want)
+			_, isExitErr := errors.AsType[*ExitError](err)
+			must.False(isExitErr, "a rejected lever is a usage error, not an *ExitError: %v", err)
 		})
 	}
-	if got := modelSrv.CallCount(); got != 0 {
-		t.Errorf("model call count = %d, want 0", got)
-	}
+	must.Zero(modelSrv.CallCount(), "model call count")
 }
 
-// TestGetAndFollowUpRefuseWorkerIDs: the commands that re-attach to
+// TestGetAndFollowUp_RefuseWorkerIDs: the commands that re-attach to
 // server-side state refuse a worker-minted id with a clear message, before
 // resolving the Gemini key.
-func TestGetAndFollowUpRefuseWorkerIDs(t *testing.T) {
+func TestGetAndFollowUp_RefuseWorkerIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		args []string
@@ -203,17 +197,19 @@ func TestGetAndFollowUpRefuseWorkerIDs(t *testing.T) {
 		{"follow-up", []string{"follow-up", "wkr_0123456789abcdef0123456789abcdef", "--query", "more?", "-o", "none"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			_, _, err := execute(t, tt.args...)
-			if err == nil || !strings.Contains(err.Error(), "in-process worker id") {
-				t.Fatalf("err = %v, want the worker-id refusal", err)
-			}
+			must.ErrorContains(err, "in-process worker id")
 		})
 	}
 }
 
-// TestWorkerMissingFleetFieldsFailBeforeAnyRequest: each required fleet
+// TestWorker_MissingFleetField_FailsBeforeAnyRequest: each required fleet
 // field is named in the error when absent, and nothing is dialled.
-func TestWorkerMissingFleetFieldsFailBeforeAnyRequest(t *testing.T) {
+func TestWorker_MissingFleetField_FailsBeforeAnyRequest(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer()
@@ -231,31 +227,24 @@ func TestWorkerMissingFleetFieldsFailBeforeAnyRequest(t *testing.T) {
 		{"search endpoint", "--fleet-search-endpoint", "fleet.search_endpoint"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			full := workerArgs(modelSrv, searchSrv, "-o", "none")
-			var args []string
-			for i := 0; i < len(full); i++ {
-				if full[i] == tt.drop {
-					i++
-					continue
-				}
-				args = append(args, full[i])
-			}
+			must := require.New(t)
+
+			args := withoutFlag(workerArgs(modelSrv, searchSrv, "-o", "none"), tt.drop)
 			_, _, err := execute(t, args...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want it to name %s", err, tt.want)
-			}
+			must.ErrorContains(err, tt.want)
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-		t.Error("a misconfigured worker must not dial any endpoint")
-	}
+	must.Zero(modelSrv.CallCount(), "a misconfigured worker must not call the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a misconfigured worker must not call the search endpoint")
 }
 
-// TestWorkerKnowledgeCompositionChecks: the knowledge requirements fail the
-// run before any secret is resolved or endpoint dialled. The model key ref
-// names an unset variable, so an error that reached secret resolution would
-// name it instead of the knowledge field.
-func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
+// TestWorker_KnowledgeComposition_RejectsMisconfiguration: the knowledge
+// requirements fail the run before any secret is resolved or endpoint
+// dialled. The model key ref names an unset variable, so an error that
+// reached secret resolution would name it instead of the knowledge field.
+func TestWorker_KnowledgeComposition_RejectsMisconfiguration(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer()
@@ -275,24 +264,23 @@ func TestWorkerKnowledgeCompositionChecks(t *testing.T) {
 		{"stray endpoint without provider", []string{"--fleet-knowledge-endpoint", "https://billet.internal/"}, "fleet.knowledge_provider is empty"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			args := workerArgs(modelSrv, searchSrv, append([]string{"-o", "none", "--fleet-model-key-ref", "secret://" + unsetModelKey}, tt.args...)...)
 			_, _, err := execute(t, args...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want it to contain %q", err, tt.want)
-			}
-			if strings.Contains(err.Error(), unsetModelKey) {
-				t.Errorf("a secret was resolved before the knowledge check: %v", err)
-			}
+			must.ErrorContains(err, tt.want)
+			must.NotContains(err.Error(), unsetModelKey, "a secret was resolved before the knowledge check")
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-		t.Error("a misconfigured knowledge store must not dial any endpoint")
-	}
+	must.Zero(modelSrv.CallCount(), "a misconfigured knowledge store must not call the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a misconfigured knowledge store must not call the search endpoint")
 }
 
-// TestWorkerKnowledgeKeyResolution: an unresolvable knowledge key ref stops
-// the run before any request and never leaks a resolved value.
-func TestWorkerKnowledgeKeyResolution(t *testing.T) {
+// TestWorker_KnowledgeKey_UnresolvableStopsRun: an unresolvable knowledge key
+// ref stops the run before any request and never leaks a resolved value.
+func TestWorker_KnowledgeKey_UnresolvableStopsRun(t *testing.T) {
+	must := require.New(t)
+
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	modelSrv := modeltest.NewFakeServer()
@@ -312,25 +300,22 @@ func TestWorkerKnowledgeKeyResolution(t *testing.T) {
 		}, "CHIRON_TEST_UNSET_KB_KEY"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			_, _, err := execute(t, workerArgs(modelSrv, searchSrv, append([]string{"-o", "none"}, tt.args...)...)...)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err = %v, want it to contain %q", err, tt.want)
-			}
-			if strings.Contains(err.Error(), "test-kb-key") {
-				t.Errorf("the resolved key leaked into the error: %v", err)
-			}
+			must.ErrorContains(err, tt.want)
+			must.NotContains(err.Error(), "test-kb-key", "the resolved knowledge key leaked into the error")
 		})
 	}
-	if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-		t.Error("a worker that cannot build its knowledge store must not dial any endpoint")
-	}
+	must.Zero(modelSrv.CallCount(), "a worker that cannot build its knowledge store must not call the model endpoint")
+	must.Zero(searchSrv.CallCount(), "a worker that cannot build its knowledge store must not call the search endpoint")
 }
 
-// TestInProcessKeyRefResolution: for either in-process agent, a model or
-// search key ref naming an unset variable stops the run with an error naming
-// it, before any endpoint is dialled or an id minted, and never leaks the
-// key that did resolve.
-func TestInProcessKeyRefResolution(t *testing.T) {
+// TestInProcessAgents_UnresolvedKeyRef_StopsRun: for either in-process agent,
+// a model or search key ref naming an unset variable stops the run with an
+// error naming it, before any endpoint is dialled or an id minted, and never
+// leaks the key that did resolve.
+func TestInProcessAgents_UnresolvedKeyRef_StopsRun(t *testing.T) {
 	t.Setenv("MODEL_KEY", "test-model-key")
 	for _, agent := range []string{"worker", "fleet"} {
 		for _, tt := range []struct {
@@ -342,6 +327,8 @@ func TestInProcessKeyRefResolution(t *testing.T) {
 			{"search key", "--fleet-search-key-ref", "CHIRON_TEST_UNSET_SEARCH_KEY"},
 		} {
 			t.Run(agent+" "+tt.name, func(t *testing.T) {
+				must := require.New(t)
+
 				modelSrv := modeltest.NewFakeServer()
 				defer modelSrv.Close()
 				searchSrv := searchtest.NewFakeServer(nil)
@@ -353,18 +340,13 @@ func TestInProcessKeyRefResolution(t *testing.T) {
 				args = append(withoutFlag(args, tt.flag), tt.flag, "secret://"+tt.env)
 
 				_, stderr, err := execute(t, args...)
-				if err == nil || !strings.Contains(err.Error(), tt.env) {
-					t.Fatalf("err = %v, want it to name %s", err, tt.env)
-				}
-				if strings.Contains(err.Error(), "test-model-key") || strings.Contains(stderr, "test-model-key") {
-					t.Errorf("the resolved model key leaked: err %v, stderr:\n%s", err, stderr)
-				}
-				if modelSrv.CallCount() != 0 || searchSrv.CallCount() != 0 {
-					t.Error("an agent whose key did not resolve dialled an endpoint")
-				}
-				if strings.Contains(stderr, "wkr_") || strings.Contains(stderr, "flt_") {
-					t.Errorf("an agent whose key did not resolve minted an id:\n%s", stderr)
-				}
+				must.ErrorContains(err, tt.env)
+				must.NotContains(err.Error(), "test-model-key", "the resolved model key leaked into the error")
+				must.NotContains(stderr, "test-model-key", "the resolved model key leaked into stderr")
+				must.Zero(modelSrv.CallCount(), "an agent whose key did not resolve must not call the model endpoint")
+				must.Zero(searchSrv.CallCount(), "an agent whose key did not resolve must not call the search endpoint")
+				must.NotContains(stderr, "wkr_", "an agent whose key did not resolve minted a worker id")
+				must.NotContains(stderr, "flt_", "an agent whose key did not resolve minted a fleet id")
 			})
 		}
 	}

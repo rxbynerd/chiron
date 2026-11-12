@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -14,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search"
@@ -192,6 +194,7 @@ func (m *cliFleetModel) total() int {
 // numbered from 1.
 func fleetDecomposition(t *testing.T, n int) string {
 	t.Helper()
+	must := require.New(t)
 	briefs := make([]map[string]string, n)
 	for i := range briefs {
 		briefs[i] = map[string]string{
@@ -203,9 +206,7 @@ func fleetDecomposition(t *testing.T, n int) string {
 		}
 	}
 	b, err := json.Marshal(map[string]any{"briefs": briefs})
-	if err != nil {
-		t.Fatalf("marshal decomposition: %v", err)
-	}
+	must.NoError(err, "marshal decomposition")
 	return string(b)
 }
 
@@ -230,11 +231,14 @@ func fleetArgs(modelURL string, searchSrv *searchtest.FakeServer, extra ...strin
 	return append(args, extra...)
 }
 
-// TestFleetAgentThroughCLI: --agent fleet over one loopback model endpoint
-// produces a synthesised report citing every worker's source, worker-tagged
-// progress between interaction_created and run_completed, and one usage
-// rollup of the lead's and workers' calls.
-func TestFleetAgentThroughCLI(t *testing.T) {
+// TestFleet_Run_ReportsCitedSynthesisAndUsage: --agent fleet over one loopback
+// model endpoint produces a synthesised report citing every worker's source,
+// worker-tagged progress between interaction_created and run_completed, and one
+// usage rollup of the lead's and workers' calls.
+func TestFleet_Run_ReportsCitedSynthesisAndUsage(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := newCLIFleetModel(t, 3)
 	modelSrv := httptest.NewServer(fm)
 	defer modelSrv.Close()
@@ -243,34 +247,26 @@ func TestFleetAgentThroughCLI(t *testing.T) {
 	t.Setenv("MODEL_KEY", "test-model-key")
 
 	stdout, stderr, err := execute(t, fleetArgs(modelSrv.URL, searchSrv, "-o", "text")...)
-	if err != nil {
-		t.Fatalf("research --agent fleet: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "stderr:\n%s", stderr)
 
 	for _, want := range []string{"agent: fleet", "interaction: flt_", "status: completed", "tools: [web_search, web_fetch]", fleetReportBody, "## Sources"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("report lacks %q:\n%s", want, stdout)
-		}
+		check.Contains(stdout, want)
 	}
 	for _, src := range fleetSources {
-		if !strings.Contains(stdout, "["+src.Title+"]("+src.URL+")") {
-			t.Errorf("report does not cite %s, which a worker found:\n%s", src.URL, stdout)
-		}
+		check.Contains(stdout, "["+src.Title+"]("+src.URL+")", "report does not cite %s, which a worker found", src.URL)
 	}
 
 	for kind, want := range map[string]int{fleetKindDecompose: 1, fleetKindWorker: 6, fleetKindSynthesise: 1, fleetKindCite: 1} {
-		if got := len(fm.requestsOf(kind)); got != want {
-			t.Errorf("%s requests = %d, want %d", kind, got, want)
-		}
+		t.Run(kind, func(t *testing.T) {
+			must := require.New(t)
+			must.Len(fm.requestsOf(kind), want)
+		})
 	}
-	if got := searchSrv.ToolCallCount(); got != 3 {
-		t.Errorf("search tool calls = %d, want one per worker", got)
-	}
+	check.Equal(3, searchSrv.ToolCallCount(), "one search tool call per worker")
 
 	want := types.Usage{InputTokens: 100 + 6*10 + 300 + 150, OutputTokens: 40 + 6*5 + 200 + 50}
-	if !strings.Contains(stdout, fmt.Sprintf("tokens:\n  input: %d\n  output: %d\n", want.InputTokens, want.OutputTokens)) {
-		t.Errorf("report tokens are not the rollup %+v:\n%s", want, stdout)
-	}
+	check.Contains(stdout, fmt.Sprintf("tokens:\n  input: %d\n  output: %d\n", want.InputTokens, want.OutputTokens),
+		"report tokens are not the rollup %+v", want)
 
 	created, completed := -1, -1
 	workerTurns := map[string]int{}
@@ -279,55 +275,45 @@ func TestFleetAgentThroughCLI(t *testing.T) {
 		switch ev.Kind {
 		case transport.KindInteractionCreated:
 			created = i
-			if !strings.Contains(string(ev.Payload), `"flt_`) {
-				t.Errorf("interaction_created payload lacks a fleet id: %s", ev.Payload)
-			}
+			check.Contains(string(ev.Payload), `"flt_`, "interaction_created payload lacks a fleet id")
 		case transport.KindRunCompleted:
 			completed = i
 		case transport.KindCostSummary:
 			var p struct {
 				Usage types.Usage `json:"usage"`
 			}
-			if err := json.Unmarshal(ev.Payload, &p); err != nil {
-				t.Fatalf("cost_summary payload %s: %v", ev.Payload, err)
-			}
+			must.NoError(json.Unmarshal(ev.Payload, &p), "cost_summary payload %s", ev.Payload)
 			summary = &p.Usage
 		case transport.KindDelta:
 			var p workerTurnPayload
-			if err := json.Unmarshal(ev.Payload, &p); err != nil {
-				t.Fatalf("delta payload %s: %v", ev.Payload, err)
-			}
+			must.NoError(json.Unmarshal(ev.Payload, &p), "delta payload %s", ev.Payload)
 			if p.Type != "worker_turn" {
 				continue
 			}
-			if created < 0 || completed >= 0 {
-				t.Errorf("worker_turn delta at %d outside interaction_created and run_completed: %s", i, ev.Payload)
-			}
-			if !strings.HasPrefix(p.WorkerID, "worker-") || !strings.HasPrefix(p.Text, p.WorkerID+" turn ") {
-				t.Errorf("worker_turn delta does not name its worker: %+v", p)
-			}
+			check.True(created >= 0 && completed < 0,
+				"worker_turn delta at %d outside interaction_created and run_completed: %s", i, ev.Payload)
+			check.True(strings.HasPrefix(p.WorkerID, "worker-") && strings.HasPrefix(p.Text, p.WorkerID+" turn "),
+				"worker_turn delta does not name its worker: %+v", p)
 			workerTurns[p.WorkerID]++
 		}
 	}
-	if len(workerTurns) != 3 {
-		t.Errorf("worker_turn deltas per worker = %v, want three workers", workerTurns)
-	}
+	check.Len(workerTurns, 3, "worker_turn deltas per worker: %v", workerTurns)
 	for id, n := range workerTurns {
-		if n != 2 {
-			t.Errorf("%s reported %d turns, want 2", id, n)
-		}
+		check.Equal(2, n, "turn deltas for %s", id)
 	}
-	if summary == nil {
-		t.Fatalf("stderr lacks cost_summary:\n%s", stderr)
-	}
-	if summary.InputTokens != want.InputTokens || summary.OutputTokens != want.OutputTokens || summary.SearchCount != 3 {
-		t.Errorf("cost_summary usage = %+v, want the rollup %+v with 3 searches", *summary, want)
-	}
+
+	must.NotNil(summary, "stderr lacks cost_summary:\n%s", stderr)
+	check.Equal(want.InputTokens, summary.InputTokens)
+	check.Equal(want.OutputTokens, summary.OutputTokens)
+	check.Equal(3, summary.SearchCount)
 }
 
-// TestFleetTemplateShapesOnlyTheSynthesis: --template reaches the lead's
+// TestFleet_Template_ShapesOnlySynthesis: --template reaches the lead's
 // synthesis prompt, query substituted, and no worker's prompt.
-func TestFleetTemplateShapesOnlyTheSynthesis(t *testing.T) {
+func TestFleet_Template_ShapesOnlySynthesis(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := newCLIFleetModel(t, 3)
 	modelSrv := httptest.NewServer(fm)
 	defer modelSrv.Close()
@@ -337,27 +323,23 @@ func TestFleetTemplateShapesOnlyTheSynthesis(t *testing.T) {
 	path := writeWorkerTemplate(t, "Answer \"{{.Query}}\" as a comparison table.\n")
 
 	_, stderr, err := execute(t, fleetArgs(modelSrv.URL, searchSrv, "-o", "none", "--template", path)...)
-	if err != nil {
-		t.Fatalf("research --agent fleet --template: %v\nstderr: %s", err, stderr)
-	}
+	must.NoError(err, "stderr:\n%s", stderr)
+
 	synth := fm.requestsOf(fleetKindSynthesise)
-	if len(synth) != 1 {
-		t.Fatalf("synthesis requests = %d, want 1", len(synth))
-	}
+	must.Len(synth, 1)
 	want := "Required output format:\nAnswer \"How do heat pumps compare with gas boilers?\" as a comparison table."
-	if !strings.Contains(synth[0].System, want) {
-		t.Errorf("synthesis prompt lacks the rendered template %q:\n%s", want, synth[0].System)
-	}
+	check.Contains(synth[0].System, want)
 	for _, req := range fm.requestsOf(fleetKindWorker) {
-		if strings.Contains(req.System, "comparison table") {
-			t.Errorf("a worker prompt carries the report template:\n%s", req.System)
-		}
+		check.NotContains(req.System, "comparison table", "a worker prompt carries the report template")
 	}
 }
 
-// TestFleetFailedDecompositionExitCode: a decomposition outside the brief
-// bounds fails the run as a research outcome, and no worker runs.
-func TestFleetFailedDecompositionExitCode(t *testing.T) {
+// TestFleet_Decompose_OutOfBoundsExitsResearchFailed: a decomposition outside
+// the brief bounds fails the run as a research outcome, and no worker runs.
+func TestFleet_Decompose_OutOfBoundsExitsResearchFailed(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := newCLIFleetModel(t, 2)
 	modelSrv := httptest.NewServer(fm)
 	defer modelSrv.Close()
@@ -366,16 +348,12 @@ func TestFleetFailedDecompositionExitCode(t *testing.T) {
 	t.Setenv("MODEL_KEY", "test-model-key")
 
 	_, _, err := execute(t, fleetArgs(modelSrv.URL, searchSrv, "-o", "none")...)
-	exitErr, ok := errors.AsType[*ExitError](err)
-	if !ok || exitErr.Code != ExitResearchFailed {
-		t.Fatalf("err = %v, want exit code %d", err, ExitResearchFailed)
-	}
-	if n := fm.total(); n != 1 {
-		t.Errorf("model requests = %d, want only the decomposition", n)
-	}
-	if n := searchSrv.CallCount(); n != 0 {
-		t.Errorf("search calls = %d, want 0", n)
-	}
+	var exitErr *ExitError
+	must.ErrorAs(err, &exitErr)
+	must.Equal(ExitResearchFailed, exitErr.Code)
+
+	check.Equal(1, fm.total(), "the decomposition should be the only model request")
+	check.Zero(searchSrv.CallCount(), "no worker should search")
 }
 
 // executeContext is execute with ctx as the command's context. Ending ctx
@@ -394,12 +372,15 @@ func executeContext(ctx context.Context, t *testing.T, args ...string) (stdout, 
 
 var loggedCost = regexp.MustCompile(`estimated_cost_gbp=(\S+)`)
 
-// TestFleetRunEndedDuringSynthesisLogsSpend: when the run's context ends
+// TestFleet_Cancel_DuringSynthesisLogsSpend: when the run's context ends
 // while synthesis is in flight, after every worker finished, no report
 // reaches stdout and the run fails as a usage error; stderr carries the
 // run's rolled-up spend, workers included, with no finding text, and no
 // citation call is made.
-func TestFleetRunEndedDuringSynthesisLogsSpend(t *testing.T) {
+func TestFleet_Cancel_DuringSynthesisLogsSpend(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
 	fm := newCLIFleetModel(t, 3)
 	fm.holdSynthesis = make(chan struct{})
 	modelSrv := httptest.NewServer(fm)
@@ -419,15 +400,10 @@ func TestFleetRunEndedDuringSynthesisLogsSpend(t *testing.T) {
 	}()
 	stdout, stderr, err := executeContext(ctx, t, fleetArgs(modelSrv.URL, searchSrv,
 		"--fleet-price-input", "2", "--fleet-price-output", "10")...)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want the run's context error\nstderr: %s", err, stderr)
-	}
-	if _, ok := errors.AsType[*ExitError](err); ok {
-		t.Errorf("a run whose context ended is a usage error, not a research outcome: %v", err)
-	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want no report", stdout)
-	}
+	must.ErrorIs(err, context.Canceled, "stderr:\n%s", stderr)
+	_, isExitErr := errors.AsType[*ExitError](err)
+	check.False(isExitErr, "a run whose context ended is a usage error, not a research outcome")
+	check.Empty(stdout, "no report should reach stdout")
 
 	var spend string
 	for line := range strings.Lines(stderr) {
@@ -436,37 +412,40 @@ func TestFleetRunEndedDuringSynthesisLogsSpend(t *testing.T) {
 		}
 	}
 	id := regexp.MustCompile(`interaction_id=(flt_[0-9a-f]{32})`).FindStringSubmatch(spend)
-	if id == nil || !strings.Contains(stderr, `{"interaction_id":"`+id[1]+`"}`) {
-		t.Fatalf("stderr lacks a spend line naming the emitted interaction id:\n%s", stderr)
-	}
+	must.NotNil(id, "stderr lacks a spend line:\n%s", stderr)
+	check.Contains(stderr, `{"interaction_id":"`+id[1]+`"}`, "the spend line should name the emitted interaction id")
+
 	wantIn, wantOut := 100+6*10, 40+6*5
-	for _, want := range []string{"status=incomplete", fmt.Sprintf("input_tokens=%d", wantIn), fmt.Sprintf("output_tokens=%d", wantOut), "search_count=3"} {
-		if !strings.Contains(spend, want) {
-			t.Errorf("spend line lacks %s: %s", want, spend)
-		}
+	wantSpend := []string{
+		"status=incomplete",
+		fmt.Sprintf("input_tokens=%d", wantIn),
+		fmt.Sprintf("output_tokens=%d", wantOut),
+		"search_count=3",
 	}
+	for _, want := range wantSpend {
+		check.Contains(spend, want)
+	}
+
 	cost := loggedCost.FindStringSubmatch(spend)
+	must.NotNil(cost, "spend line lacks the estimated cost: %s", spend)
 	wantCost := float64(wantIn*2+wantOut*10) / 1e6
-	if cost == nil {
-		t.Fatalf("spend line lacks the estimated cost: %s", spend)
-	}
-	if got, err := strconv.ParseFloat(cost[1], 64); err != nil || math.Abs(got-wantCost) > 1e-12 {
-		t.Errorf("logged cost = %s, want %v", cost[1], wantCost)
-	}
-	if strings.Contains(stderr, "Finding 1.") {
-		t.Errorf("stderr carries finding text:\n%s", stderr)
-	}
+	got, err := strconv.ParseFloat(cost[1], 64)
+	must.NoError(err)
+	check.InDelta(wantCost, got, 1e-12, "logged cost %s", cost[1])
+
+	check.NotContains(stderr, "Finding 1.", "stderr should carry no finding text")
 	for kind, want := range map[string]int{fleetKindWorker: 6, fleetKindSynthesise: 1, fleetKindCite: 0} {
-		if got := len(fm.requestsOf(kind)); got != want {
-			t.Errorf("%s requests = %d, want %d", kind, got, want)
-		}
+		t.Run(kind, func(t *testing.T) {
+			must := require.New(t)
+			must.Len(fm.requestsOf(kind), want)
+		})
 	}
 }
 
-// TestFleetRefusedBeforeAnyRequest: a fleet configuration the composition
-// root cannot run fails as a usage error before the model or search endpoint
-// is dialled.
-func TestFleetRefusedBeforeAnyRequest(t *testing.T) {
+// TestFleet_Config_RefusedBeforeAnyRequest: a fleet configuration the
+// composition root cannot run fails as a usage error before the model or
+// search endpoint is dialled.
+func TestFleet_Config_RefusedBeforeAnyRequest(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		edit func([]string) []string
@@ -480,6 +459,8 @@ func TestFleetRefusedBeforeAnyRequest(t *testing.T) {
 		{"concurrency above workers", func(args []string) []string { return append(args, "--fleet-concurrency", "4") }, []string{"fleet.concurrency:"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			fm := newCLIFleetModel(t, 3)
 			modelSrv := httptest.NewServer(fm)
 			defer modelSrv.Close()
@@ -488,23 +469,15 @@ func TestFleetRefusedBeforeAnyRequest(t *testing.T) {
 			t.Setenv("MODEL_KEY", "test-model-key")
 
 			_, stderr, err := execute(t, tt.edit(fleetArgs(modelSrv.URL, searchSrv, "-o", "none"))...)
-			if err == nil {
-				t.Fatal("the run was not refused")
-			}
+			must.Error(err, "the run was not refused")
 			for _, want := range tt.want {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("err = %v, want it to contain %s", err, want)
-				}
+				must.ErrorContains(err, want)
 			}
-			if _, ok := errors.AsType[*ExitError](err); ok {
-				t.Errorf("a refused configuration is a usage error, not a research outcome: %v", err)
-			}
-			if fm.total() != 0 || searchSrv.CallCount() != 0 {
-				t.Error("a refused fleet dialled an endpoint")
-			}
-			if strings.Contains(stderr, "flt_") {
-				t.Errorf("a refused fleet minted an id:\n%s", stderr)
-			}
+			_, isExitErr := errors.AsType[*ExitError](err)
+			must.False(isExitErr, "a refused configuration is a usage error, not a research outcome: %v", err)
+			must.Zero(fm.total(), "a refused fleet dialled the model endpoint")
+			must.Zero(searchSrv.CallCount(), "a refused fleet dialled the search endpoint")
+			must.NotContains(stderr, "flt_", "a refused fleet minted an id")
 		})
 	}
 }
@@ -522,10 +495,10 @@ func withoutFlag(args []string, flag string) []string {
 	return out
 }
 
-// TestGetAndFollowUpRefuseFleetIDs: the commands that re-attach to
+// TestFleetID_GetAndFollowUp_Refused: the commands that re-attach to
 // server-side state refuse a fleet-minted id with a message naming the
 // fleet, before resolving the Gemini key.
-func TestGetAndFollowUpRefuseFleetIDs(t *testing.T) {
+func TestFleetID_GetAndFollowUp_Refused(t *testing.T) {
 	const id = "flt_0123456789abcdef0123456789abcdef"
 	for _, tt := range []struct {
 		name string
@@ -535,10 +508,10 @@ func TestGetAndFollowUpRefuseFleetIDs(t *testing.T) {
 		{"follow-up", []string{"follow-up", id, "--query", "more?", "-o", "none"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+
 			_, _, err := execute(t, tt.args...)
-			if err == nil || !strings.Contains(err.Error(), tt.name+": "+id+" is an in-process fleet id") {
-				t.Fatalf("err = %v, want the fleet-id refusal", err)
-			}
+			must.ErrorContains(err, tt.name+": "+id+" is an in-process fleet id")
 		})
 	}
 }

@@ -13,6 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest"
@@ -41,23 +44,24 @@ func readAndSynthesise(ctx context.Context, l *lead, query string, plan leadPlan
 // synthesisPrompt is the user message of the model's only synthesis request.
 func synthesisPrompt(t *testing.T, modelSrv *modeltest.FakeServer) string {
 	t.Helper()
+	must := require.New(t)
 	reqs := modelSrv.Requests()
-	if len(reqs) != 1 || len(reqs[0].Messages) != 2 {
-		t.Fatalf("model requests = %+v, want one two-message synthesis request", reqs)
-	}
+	must.Len(reqs, 1, "model requests = %+v, want one synthesis request", reqs)
+	must.Len(reqs[0].Messages, 2, "want a two-message synthesis request")
 	return reqs[0].Messages[1].Content
 }
 
-// TestSynthesisSystemPromptIsPinned: the synthesis system prompt with the
-// built-in output format matches its snapshot byte for byte.
-func TestSynthesisSystemPromptIsPinned(t *testing.T) {
+// TestSynthesise_SystemPrompt_MatchesSnapshot: the synthesis system prompt
+// with the built-in output format matches its snapshot byte for byte.
+func TestSynthesise_SystemPrompt_MatchesSnapshot(t *testing.T) {
 	checkGolden(t, "lead-synthesise-system-prompt.txt", []byte(synthesisSystemPrompt(defaultReportFormat)))
 }
 
-// TestSynthesiseReadsFindingsByReference: the synthesis prompt carries what
+// TestSynthesise_ReadsFindingsByReference: the synthesis prompt carries what
 // the store returns for each reference, not the worker's in-process
 // finding, in one plain-text request with the completion cap.
-func TestSynthesiseReadsFindingsByReference(t *testing.T) {
+func TestSynthesise_ReadsFindingsByReference(t *testing.T) {
+	must := require.New(t)
 	fm := &fleetModel{
 		t:         t,
 		worker:    func(brief, _ int) string { return finalReply(fmt.Sprintf("answer %d", brief)).Content },
@@ -84,37 +88,31 @@ func TestSynthesiseReadsFindingsByReference(t *testing.T) {
 
 	l := mustLead(t, leadDeps{Model: mc, Store: rewritingStore{store, "answer ", "stored answer "}, Namespace: ns})
 	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
-	if res.Status != types.StatusCompleted || res.Body != "# Report\n\nThe synthesised body." {
-		t.Fatalf("synthesis = %+v, want the completed reply body", res)
-	}
+	must.Equal(types.StatusCompleted, res.Status, "synthesis status")
+	must.Equal("# Report\n\nThe synthesised body.", res.Body, "synthesis body")
 
 	reqs := fm.requestsOf(kindSynthesise)
-	if len(reqs) != 1 {
-		t.Fatalf("synthesis requests = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1, "synthesis requests")
 	prompt := reqs[0][1].Content
 	for n := 1; n <= 2; n++ {
-		dispatches.mu.Lock()
-		inProcess := dispatches.findings[fmt.Sprintf("Objective %d", n)].Text
-		dispatches.mu.Unlock()
-		if inProcess != fmt.Sprintf("answer %d", n) {
-			t.Fatalf("brief %d's in-process finding = %q", n, inProcess)
-		}
-		if want := fmt.Sprintf("Text:\nstored answer %d\n", n); !strings.Contains(prompt, want) {
-			t.Errorf("the prompt lacks the stored text %q:\n%s", want, prompt)
-		}
-		if bad := fmt.Sprintf("Text:\nanswer %d\n", n); strings.Contains(prompt, bad) {
-			t.Errorf("the prompt carries the in-process text %q", bad)
-		}
-		if got := res.Set.Findings[n-1].Finding.Text; got != fmt.Sprintf("stored answer %d", n) {
-			t.Errorf("collected finding %d = %q, want the stored text", n, got)
-		}
+		t.Run(fmt.Sprintf("brief %d", n), func(t *testing.T) {
+			must := require.New(t)
+			dispatches.mu.Lock()
+			inProcess := dispatches.findings[fmt.Sprintf("Objective %d", n)].Text
+			dispatches.mu.Unlock()
+			must.Equal(fmt.Sprintf("answer %d", n), inProcess, "in-process finding")
+			must.Contains(prompt, fmt.Sprintf("Text:\nstored answer %d\n", n), "the prompt lacks the stored text")
+			must.NotContains(prompt, fmt.Sprintf("Text:\nanswer %d\n", n), "the prompt carries the in-process text")
+			must.Equal(fmt.Sprintf("stored answer %d", n), res.Set.Findings[n-1].Finding.Text, "collected finding")
+		})
 	}
 }
 
-// TestSynthesiseRequestShape: one plain-text request carrying the system
+// TestSynthesise_RequestShape: one plain-text request carrying the system
 // prompt and the query between its markers, capped at synthesiseMaxTokens.
-func TestSynthesiseRequestShape(t *testing.T) {
+func TestSynthesise_RequestShape(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(synthesisReply("Body."))
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
@@ -122,43 +120,32 @@ func TestSynthesiseRequestShape(t *testing.T) {
 	readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 
 	reqs := modelSrv.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("model requests = %d, want 1", len(reqs))
-	}
+	must.Len(reqs, 1, "model requests")
 	req := reqs[0]
-	if req.ResponseFormatType != "" || req.SchemaName != "" {
-		t.Errorf("response format = %q %q, want a plain-text request", req.ResponseFormatType, req.SchemaName)
-	}
-	if req.MaxTokens != synthesiseMaxTokens {
-		t.Errorf("max tokens = %d, want %d", req.MaxTokens, synthesiseMaxTokens)
-	}
-	if req.Messages[0].Content != synthesisSystemPrompt(defaultReportFormat) {
-		t.Errorf("system prompt = %q, want the built-in format's", req.Messages[0].Content)
-	}
+	check.Empty(req.ResponseFormatType, "response format of a plain-text request")
+	check.Empty(req.SchemaName, "schema name of a plain-text request")
+	check.Equal(synthesiseMaxTokens, req.MaxTokens, "max tokens")
+	check.Equal(synthesisSystemPrompt(defaultReportFormat), req.Messages[0].Content, "system prompt")
 	want := questionOpen + "\n" + testQuery + "\n" + questionClose
-	if !strings.Contains(req.Messages[1].Content, want) {
-		t.Errorf("the user message does not carry the delimited query:\n%s", req.Messages[1].Content)
-	}
-	if !strings.Contains(req.Messages[1].Content, "Finding 1 of 1, from brief-1\nObjective: Objective 1\n") ||
-		!strings.Contains(req.Messages[1].Content, "1. Source 1\n   URL: "+poolSourceURL+"\n") {
-		t.Errorf("the finding is not labelled with its brief, objective and sources:\n%s", req.Messages[1].Content)
-	}
+	check.Contains(req.Messages[1].Content, want, "the user message carries the delimited query")
+	check.Contains(req.Messages[1].Content, "Finding 1 of 1, from brief-1\nObjective: Objective 1\n", "the finding is labelled with its brief and objective")
+	check.Contains(req.Messages[1].Content, "1. Source 1\n   URL: "+poolSourceURL+"\n", "the finding lists its sources")
 }
 
-// TestCollectFindingsGapsEveryUnusableBrief: only a finding that reads back
+// TestCollectFindings_GapsEveryUnusableBrief: only a finding that reads back
 // from the run's session under its own worker and brief, did not fail and
 // has text is collected. Every other brief is a gap with a scrubbed reason,
 // in brief order.
-func TestCollectFindingsGapsEveryUnusableBrief(t *testing.T) {
+func TestCollectFindings_GapsEveryUnusableBrief(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+	must := require.New(t)
+	check := assert.New(t)
 	ctx := context.Background()
 	modelSrv := modeltest.NewFakeServer()
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
 	other, err := store.OpenSession(ctx, memory.SessionRef{ID: "another-run"})
-	if err != nil {
-		t.Fatalf("OpenSession: %v", err)
-	}
+	must.NoError(err, "open a session for another run")
 
 	good := completedFinding(1, poolSourceURL)
 	partial := Finding{Text: "Partial text.", Status: types.StatusIncomplete, Detail: "reached the 8-turn cap before a final answer", Turns: 8}
@@ -180,12 +167,12 @@ func TestCollectFindingsGapsEveryUnusableBrief(t *testing.T) {
 	}
 	set := l.collectFindings(ctx, leadPlan{Briefs: poolBriefs(10)}, poolResult{Briefs: results})
 
-	if len(set.Findings) != 2 || set.Findings[0].BriefID != "brief-1" || set.Findings[1].BriefID != "brief-9" {
-		t.Fatalf("collected = %+v, want brief-1 and brief-9", set.Findings)
-	}
-	if set.Findings[0].Objective != "Objective 1" || set.Findings[1].Finding.Text != "Partial text." {
-		t.Errorf("collected = %+v, want each finding with its plan objective and stored text", set.Findings)
-	}
+	must.Len(set.Findings, 2, "collected findings = %+v", set.Findings)
+	must.Equal("brief-1", set.Findings[0].BriefID)
+	must.Equal("brief-9", set.Findings[1].BriefID)
+	check.Equal("Objective 1", set.Findings[0].Objective, "brief-1's finding keeps its plan objective")
+	check.Equal("Partial text.", set.Findings[1].Finding.Text, "brief-9's finding keeps its stored text")
+
 	wantGaps := []struct{ id, reason string }{
 		{"brief-2", "the finding could not be read back"},
 		{"brief-3", "the stored finding names another worker or brief"},
@@ -196,20 +183,16 @@ func TestCollectFindingsGapsEveryUnusableBrief(t *testing.T) {
 		{"brief-8", "the finding was not stored: store unavailable"},
 		{"brief-10", "not started: the run ended"},
 	}
-	if len(set.Gaps) != len(wantGaps) {
-		t.Fatalf("gaps = %+v, want %d", set.Gaps, len(wantGaps))
-	}
+	must.Len(set.Gaps, len(wantGaps), "gaps = %+v", set.Gaps)
 	for i, want := range wantGaps {
-		g := set.Gaps[i]
-		if g.BriefID != want.id || !strings.Contains(g.Reason, want.reason) {
-			t.Errorf("gap %d = %+v, want %s with a reason containing %q", i, g, want.id, want.reason)
-		}
-		if g.Objective != "Objective "+strings.TrimPrefix(want.id, "brief-") {
-			t.Errorf("gap %s objective = %q, want its plan objective", g.BriefID, g.Objective)
-		}
-		if strings.Contains(g.Reason, key) {
-			t.Errorf("gap %s reason carries the credential: %q", g.BriefID, g.Reason)
-		}
+		t.Run(want.id, func(t *testing.T) {
+			must := require.New(t)
+			g := set.Gaps[i]
+			must.Equal(want.id, g.BriefID)
+			must.Contains(g.Reason, want.reason, "gap = %+v", g)
+			must.Equal("Objective "+strings.TrimPrefix(want.id, "brief-"), g.Objective, "gap objective")
+			must.NotContains(g.Reason, key, "gap reason carries the credential")
+		})
 	}
 }
 
@@ -236,11 +219,13 @@ func (s *slowReadStore) Get(ctx context.Context, ref memory.Reference) (io.ReadC
 	return s.ContextStore.Get(ctx, ref)
 }
 
-// TestSlowStoreHoldsSynthesisOnlyToTheReadDeadline: every read-back shares
+// TestSynthesise_SlowStore_BoundedByOneReadDeadline: every read-back shares
 // one deadline, so a store that stalls on four of five findings holds the
 // run for one read bound, not four, no read starts once it has passed, and
 // synthesis still runs over the finding that did read back.
-func TestSlowStoreHoldsSynthesisOnlyToTheReadDeadline(t *testing.T) {
+func TestSynthesise_SlowStore_BoundedByOneReadDeadline(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	const bound = 250 * time.Millisecond
 	modelSrv := modeltest.NewFakeServer(synthesisReply("# Report"), citeReplyOf(citedClaims{{Claim: "Claim.", URLs: []string{citeURLA}}}.json(t)))
 	defer modelSrv.Close()
@@ -262,41 +247,38 @@ func TestSlowStoreHoldsSynthesisOnlyToTheReadDeadline(t *testing.T) {
 	elapsed := end.Sub(start)
 
 	// Four stalled reads under a per-read bound would take at least 4*bound.
-	if elapsed < bound || elapsed >= 3*bound {
-		t.Errorf("conclude took %v, want one read bound of %v and well under %v", elapsed, bound, 3*bound)
-	}
-	if n := modelSrv.CallCount(); n != 2 {
-		t.Errorf("model calls = %d, want synthesis and the citation pass", n)
-	}
-	if out.Status != types.StatusIncomplete || out.Body != "# Report" {
-		t.Errorf("outcome = %s %q, want the synthesised body, incomplete", out.Status, out.Body)
-	}
-	for _, want := range []string{
-		"brief-2 produced no finding: the finding could not be read back",
-		"brief-3 produced no finding: the read-back deadline passed before the finding was read",
-		"brief-5 produced no finding: the read-back deadline passed",
+	check.GreaterOrEqual(elapsed, bound, "conclude waits at least one read bound")
+	check.Less(elapsed, 3*bound, "conclude is not held one read bound per stalled finding")
+	check.Equal(2, modelSrv.CallCount(), "model calls: synthesis and the citation pass")
+	check.Equal(types.StatusIncomplete, out.Status, "outcome status")
+	check.Equal("# Report", out.Body, "outcome body")
+	for _, tt := range []struct{ name, want string }{
+		{"brief 2 could not be read", "brief-2 produced no finding: the finding could not be read back"},
+		{"brief 3 read after deadline", "brief-3 produced no finding: the read-back deadline passed before the finding was read"},
+		{"brief 5 deadline passed", "brief-5 produced no finding: the read-back deadline passed"},
 	} {
-		if !strings.Contains(out.Detail, want) {
-			t.Errorf("detail = %q, want %q", out.Detail, want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Contains(out.Detail, tt.want)
+		})
 	}
 
 	slow.mu.Lock()
 	defer slow.mu.Unlock()
-	if len(slow.deadlines) != 2 {
-		t.Fatalf("store reads = %d, want brief-1's and the one stalled read; none after the deadline", len(slow.deadlines))
-	}
+	must.Len(slow.deadlines, 2, "store reads: brief-1's and the one stalled read, none after the deadline")
 	first := slow.deadlines[0]
-	if first.Before(start.Add(bound)) || first.After(end) || !slow.deadlines[1].Equal(first) {
-		t.Errorf("read deadlines = %v, want one shared deadline %v after the reads began", slow.deadlines, bound)
-	}
+	check.False(first.Before(start.Add(bound)), "the shared deadline is earlier than one read bound after the run started")
+	check.False(first.After(end), "the shared deadline is after conclude returned")
+	check.True(slow.deadlines[1].Equal(first), "the stalled read does not share the first read's deadline")
 }
 
-// TestSynthesisPromptBoundsEachFinding: each finding's text is cut to
+// TestSynthesise_Prompt_BoundsEachFinding: each finding's text is cut to
 // maxSynthesisFindingBytes at a rune boundary with the truncation marker,
 // each source list to maxFindingSourcesBytes, and the span counts the cut
 // texts.
-func TestSynthesisPromptBoundsEachFinding(t *testing.T) {
+func TestSynthesise_Prompt_BoundsEachFinding(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(synthesisReply("Body."))
 	defer modelSrv.Close()
 	var out bytes.Buffer
@@ -312,28 +294,18 @@ func TestSynthesisPromptBoundsEachFinding(t *testing.T) {
 	plan, pooled := storedRun(t, store, ns, long, many, short)
 	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
 
-	if res.Truncated != 1 {
-		t.Errorf("truncated = %d, want 1", res.Truncated)
-	}
+	check.Equal(1, res.Truncated, "findings cut to the budget")
 	prompt := synthesisPrompt(t, modelSrv)
-	if !utf8.ValidString(prompt) {
-		t.Error("the prompt is not valid UTF-8")
-	}
+	check.True(utf8.ValidString(prompt), "the prompt is valid UTF-8")
 	cut := boundBytes(long.Text, maxSynthesisFindingBytes)
-	if len(cut) > maxSynthesisFindingBytes || !strings.HasSuffix(cut, truncatedMarker) {
-		t.Fatalf("the expected cut is %d bytes: %q", len(cut), cut[len(cut)-20:])
-	}
-	if !strings.Contains(prompt, "Text:\n"+cut+"\n"+toolResultClose) {
-		t.Error("the long finding is not cut to its budget")
-	}
-	if !strings.Contains(prompt, "Text:\n"+short.Text+"\n"+toolResultClose) {
-		t.Error("the short finding is not carried whole")
-	}
+	must.LessOrEqual(len(cut), maxSynthesisFindingBytes, "the cut is over its budget")
+	must.True(strings.HasSuffix(cut, truncatedMarker), "the cut ends with the truncation marker")
+	check.Contains(prompt, "Text:\n"+cut+"\n"+toolResultClose, "the long finding is cut to its budget")
+	check.Contains(prompt, "Text:\n"+short.Text+"\n"+toolResultClose, "the short finding is carried whole")
 	block := prompt[strings.Index(prompt, "Finding 2 of 3"):]
 	sources := block[strings.Index(block, "Sources:\n"):strings.Index(block, "Text:\n")]
-	if len(sources) > maxFindingSourcesBytes || !strings.HasSuffix(sources, truncatedMarker+"\n") {
-		t.Errorf("the source list is %d bytes, want at most %d and marked truncated", len(sources), maxFindingSourcesBytes)
-	}
+	check.LessOrEqual(len(sources), maxFindingSourcesBytes, "the source list is within its budget")
+	check.True(strings.HasSuffix(sources, truncatedMarker+"\n"), "the source list is marked truncated")
 
 	span := onlySpan(t, out.String(), trace.SpanSynthesise)
 	for key, want := range map[string]any{
@@ -344,21 +316,21 @@ func TestSynthesisPromptBoundsEachFinding(t *testing.T) {
 		"output_tokens":      float64(synthesisUsage.OutputTokens),
 		"status":             "completed",
 	} {
-		if got := span.Attrs[key]; got != want {
-			t.Errorf("span %s = %v, want %v", key, got, want)
-		}
+		t.Run(key, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(want, span.Attrs[key])
+		})
 	}
-	if span.Error != "" {
-		t.Errorf("span error = %q, want none", span.Error)
-	}
+	check.Empty(span.Error, "the synthesis span records no error")
 }
 
-// TestSynthesisPromptFencesUntrustedText: every stored field reaches the
+// TestSynthesise_Prompt_FencesUntrustedText: every stored field reaches the
 // prompt defanged, each finding and the gap list sit inside their own
 // untrusted-data fence, the query sits between its markers, and a gap's
 // reason is scrubbed.
-func TestSynthesisPromptFencesUntrustedText(t *testing.T) {
+func TestSynthesise_Prompt_FencesUntrustedText(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(synthesisReply("Body."))
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
@@ -380,34 +352,36 @@ func TestSynthesisPromptFencesUntrustedText(t *testing.T) {
 	readAndSynthesise(context.Background(), l, query, plan, pooled)
 
 	prompt := synthesisPrompt(t, modelSrv)
-	for marker, want := range map[string]int{toolResultOpen: 3, toolResultClose: 3, questionOpen: 1, questionClose: 1} {
-		if n := strings.Count(prompt, marker); n != want {
-			t.Errorf("%q appears %d times, want %d:\n%s", marker, n, want, prompt)
-		}
+	for _, tt := range []struct {
+		name, marker string
+		want         int
+	}{
+		{"tool result open marker", toolResultOpen, 3},
+		{"tool result close marker", toolResultClose, 3},
+		{"question open marker", questionOpen, 1},
+		{"question close marker", questionClose, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.want, strings.Count(prompt, tt.marker), "the prompt:\n%s", prompt)
+		})
 	}
 	rest := prompt
 	for _, marker := range []string{toolResultOpen, toolResultClose, questionOpen, questionClose} {
 		rest = strings.ReplaceAll(rest, marker, "")
 	}
-	if strings.Contains(rest, "<<") {
-		t.Errorf("stored or query text kept a << outside the markers:\n%s", prompt)
-	}
-	if strings.Contains(prompt, key) {
-		t.Errorf("the gap's credential reached the prompt:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "Gaps: these briefs produced no finding") || !strings.Contains(prompt, "- brief-3 (objective: Objective 3 ") {
-		t.Errorf("the prompt does not list the gap with its objective:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "<b>") {
-		t.Errorf("a source title kept its markup:\n%s", prompt)
-	}
+	check.NotContains(rest, "<<", "stored or query text kept a << outside the markers")
+	check.NotContains(prompt, key, "the gap's credential reached the prompt")
+	check.Contains(prompt, "Gaps: these briefs produced no finding", "the gap list has its heading")
+	check.Contains(prompt, "- brief-3 (objective: Objective 3 ", "the gap lists its objective")
+	check.NotContains(prompt, "<b>", "a source title kept its markup")
 }
 
-// TestSynthesiseFailureFallsBackToFindings: a failed, filtered or empty
+// TestSynthesise_FailureFallsBackToFindings: a failed, filtered or empty
 // synthesis makes exactly one request and keeps every paid finding: the body
 // is the findings stitched under their objectives and sanitised, the status
 // Failed with a scrubbed detail, and a reply's usage is still reported.
-func TestSynthesiseFailureFallsBackToFindings(t *testing.T) {
+func TestSynthesise_FailureFallsBackToFindings(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
 	errorBody := `{"error":{"message":"upstream trouble for key ` + key + `"}}`
 	for _, tt := range []struct {
@@ -416,14 +390,15 @@ func TestSynthesiseFailureFallsBackToFindings(t *testing.T) {
 		want      string
 		wantUsage bool
 	}{
-		{"500", modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: errorBody}, "HTTP 500", false},
-		{"502", modeltest.FakeReply{Status: http.StatusBadGateway, StatusBody: errorBody}, "HTTP 502", false},
-		{"429", modeltest.FakeReply{Status: http.StatusTooManyRequests, StatusBody: errorBody}, "HTTP 429", false},
+		{"http 500", modeltest.FakeReply{Status: http.StatusInternalServerError, StatusBody: errorBody}, "HTTP 500", false},
+		{"http 502", modeltest.FakeReply{Status: http.StatusBadGateway, StatusBody: errorBody}, "HTTP 502", false},
+		{"http 429", modeltest.FakeReply{Status: http.StatusTooManyRequests, StatusBody: errorBody}, "HTTP 429", false},
 		{"content filter", modeltest.FakeReply{Content: "Partial.", FinishReason: "content_filter", Usage: synthesisUsage}, "content filter", true},
 		{"empty reply", synthesisReply("  <!-- nothing -->  "), "was empty", true},
 		{"cut off before any text", modeltest.FakeReply{FinishReason: "length", Usage: synthesisUsage}, "was empty", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			modelSrv := modeltest.NewFakeServer(tt.reply, synthesisReply("A second reply that must never be requested."))
 			defer modelSrv.Close()
 			var out bytes.Buffer
@@ -433,33 +408,22 @@ func TestSynthesiseFailureFallsBackToFindings(t *testing.T) {
 			plan, pooled := storedRun(t, store, ns, first, completedFinding(2))
 
 			res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
-			if n := modelSrv.CallCount(); n != 1 {
-				t.Errorf("model calls = %d, want exactly 1", n)
-			}
-			if res.Status != types.StatusFailed {
-				t.Errorf("status = %s, want failed", res.Status)
-			}
+			must.Equal(1, modelSrv.CallCount(), "model calls")
+			must.Equal(types.StatusFailed, res.Status, "synthesis status")
 			want := stitchedNote + "\n\n## Objective 1\n\nFirst finding  with [pixel](https://beacon.example/i.png) text.\n\n## Objective 2\n\nFinding 2 text."
-			if res.Body != want {
-				t.Errorf("body = %q, want the stitched findings %q", res.Body, want)
-			}
-			if !strings.Contains(res.Detail, tt.want) || !strings.Contains(res.Detail, "stitched unedited") {
-				t.Errorf("detail = %q, want %q and the fallback named", res.Detail, tt.want)
-			}
-			if strings.Contains(res.Detail, key) || strings.Contains(out.String(), key) {
-				t.Errorf("the credential leaked: detail %q", res.Detail)
-			}
+			must.Equal(want, res.Body, "body is the stitched findings")
+			must.Contains(res.Detail, tt.want)
+			must.Contains(res.Detail, "stitched unedited", "the fallback is named")
+			must.NotContains(res.Detail, key, "detail leaks the credential")
+			must.NotContains(out.String(), key, "trace leaks the credential")
 			wantUsage := types.Usage{}
 			if tt.wantUsage {
 				wantUsage = types.Usage{InputTokens: synthesisUsage.InputTokens, OutputTokens: synthesisUsage.OutputTokens}
 			}
-			if res.Usage != wantUsage {
-				t.Errorf("usage = %+v, want %+v", res.Usage, wantUsage)
-			}
+			must.Equal(wantUsage, res.Usage, "usage")
 			span := onlySpan(t, out.String(), trace.SpanSynthesise)
-			if span.Attrs["status"] != "failed" || span.Error == "" {
-				t.Errorf("span status %v, error %q; want a failed span", span.Attrs["status"], span.Error)
-			}
+			must.Equal("failed", span.Attrs["status"], "span status")
+			must.NotEmpty(span.Error, "span records the error")
 		})
 	}
 }
@@ -473,25 +437,27 @@ func longErrorReply() modeltest.FakeReply {
 	}
 }
 
-// TestSynthesiseFallbackDetailIsBounded: a fallback reason far over the
+// TestSynthesise_FallbackDetail_IsBounded: a fallback reason far over the
 // bound is cut so the whole detail, the fallback note included, fits
 // maxDetailBytes and still ends in the note.
-func TestSynthesiseFallbackDetailIsBounded(t *testing.T) {
+func TestSynthesise_FallbackDetail_IsBounded(t *testing.T) {
+	must := require.New(t)
 	modelSrv := modeltest.NewFakeServer(longErrorReply())
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
 	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
-	if len(res.Detail) > maxDetailBytes || !strings.Contains(res.Detail, truncatedMarker) ||
-		!strings.HasSuffix(res.Detail, "; the report is the worker findings, stitched unedited") {
-		t.Errorf("detail is %d bytes, want the reason cut to fit %d with the note kept: %q", len(res.Detail), maxDetailBytes, res.Detail)
-	}
+	must.LessOrEqual(len(res.Detail), maxDetailBytes, "the detail is over its bound")
+	must.Contains(res.Detail, truncatedMarker, "the reason is not cut")
+	must.True(strings.HasSuffix(res.Detail, "; the report is the worker findings, stitched unedited"),
+		"the detail does not end with the fallback note: %q", res.Detail)
 }
 
-// TestSynthesiseCutOffKeepsBody: a reply cut off at the completion cap keeps
+// TestSynthesise_CutOff_KeepsBody: a reply cut off at the completion cap keeps
 // its sanitised body, Incomplete, with the cap in the detail.
-func TestSynthesiseCutOffKeepsBody(t *testing.T) {
+func TestSynthesise_CutOff_KeepsBody(t *testing.T) {
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(modeltest.FakeReply{Content: "# Report\n\nA body cut <b>off", FinishReason: "length", Usage: synthesisUsage})
 	defer modelSrv.Close()
 	var out bytes.Buffer
@@ -499,23 +465,20 @@ func TestSynthesiseCutOffKeepsBody(t *testing.T) {
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
 	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
-	if res.Status != types.StatusIncomplete || res.Body != "# Report\n\nA body cut off" {
-		t.Errorf("synthesis = %s %q, want the sanitised body, incomplete", res.Status, res.Body)
-	}
-	if want := fmt.Sprintf("cut off at the %d-token completion cap", synthesiseMaxTokens); !strings.Contains(res.Detail, want) {
-		t.Errorf("detail = %q, want %q", res.Detail, want)
-	}
+	check.Equal(types.StatusIncomplete, res.Status, "synthesis status")
+	check.Equal("# Report\n\nA body cut off", res.Body, "sanitised body")
+	check.Contains(res.Detail, fmt.Sprintf("cut off at the %d-token completion cap", synthesiseMaxTokens))
 	span := onlySpan(t, out.String(), trace.SpanSynthesise)
-	if span.Attrs["status"] != "incomplete" || span.Error != "" {
-		t.Errorf("span status %v, error %q; want incomplete without an error", span.Attrs["status"], span.Error)
-	}
+	check.Equal("incomplete", span.Attrs["status"], "span status")
+	check.Empty(span.Error, "span error")
 }
 
-// TestSynthesiseSanitisesTheBody: raw HTML, comments, every image form and
+// TestSynthesise_Body_Sanitises: raw HTML, comments, every image form and
 // credentials in the synthesis reply are neutralised, and no raw-HTML opener
 // that tag removal misses survives unescaped, while links stay.
-func TestSynthesiseSanitisesTheBody(t *testing.T) {
+func TestSynthesise_Body_Sanitises(t *testing.T) {
 	const key = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+	check := assert.New(t)
 	reply := "# Report\n\n<script>alert(1)</script>Text <img src=\"https://beacon.example/p.gif\"> and " +
 		"![beacon](https://beacon.example/i.png) and !![double](https://beacon.example/j.png)<!-- hidden -->\n\nKey " + key +
 		"\n\n" + strings.Join(rawHTMLProbes, "\n\n")
@@ -525,25 +488,28 @@ func TestSynthesiseSanitisesTheBody(t *testing.T) {
 	plan, pooled := storedRun(t, store, ns, completedFinding(1))
 
 	res := readAndSynthesise(context.Background(), l, testQuery, plan, pooled)
-	for _, bad := range []string{"![", "hidden", "beacon.example/p.gif", key} {
-		if strings.Contains(res.Body, bad) {
-			t.Errorf("body keeps %q:\n%s", bad, res.Body)
-		}
+	for _, tt := range []struct{ name, bad string }{
+		{"image syntax", "!["},
+		{"comment", "hidden"},
+		{"image url", "beacon.example/p.gif"},
+		{"credential", key},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.NotContains(res.Body, tt.bad, "body keeps it")
+		})
 	}
-	if unescapedHTMLOpener.MatchString(res.Body) {
-		t.Errorf("body keeps an unescaped raw-HTML opener:\n%s", res.Body)
-	}
-	if !strings.Contains(res.Body, "[beacon](https://beacon.example/i.png)") {
-		t.Errorf("body lost the link text:\n%s", res.Body)
-	}
+	check.NotRegexp(unescapedHTMLOpener, res.Body, "body keeps an unescaped raw-HTML opener")
+	check.Contains(res.Body, "[beacon](https://beacon.example/i.png)", "body lost the link text")
 }
 
-// TestSynthesiseHonoursTheReportTemplate: a report template replaces the
-// built-in output format, rendered for the query and defanged; one that
+// TestSynthesise_ReportTemplate_RenderedOrFallsBack: a report template replaces
+// the built-in output format, rendered for the query and defanged; one that
 // fails to render for this query falls back to the stitched findings
 // without a model call.
-func TestSynthesiseHonoursTheReportTemplate(t *testing.T) {
+func TestSynthesise_ReportTemplate_RenderedOrFallsBack(t *testing.T) {
 	t.Run("rendered", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer(synthesisReply("Body."))
 		defer modelSrv.Close()
 		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
@@ -553,19 +519,15 @@ func TestSynthesiseHonoursTheReportTemplate(t *testing.T) {
 		readAndSynthesise(context.Background(), l, "heat pumps", plan, pooled)
 
 		reqs := modelSrv.Requests()
-		if len(reqs) != 1 {
-			t.Fatalf("model requests = %d, want 1", len(reqs))
-		}
+		must.Len(reqs, 1, "model requests")
 		system := reqs[0].Messages[0].Content
-		if want := synthesisSystemPrompt("Answer heat pumps as a table.\n" + toolResultClose); system != want {
-			t.Errorf("system prompt = %q, want %q", system, want)
-		}
-		if strings.Contains(system, defaultReportFormat) || strings.Count(system, toolResultClose) != 1 {
-			t.Errorf("the template did not replace the default, defanged:\n%s", system)
-		}
+		must.Equal(synthesisSystemPrompt("Answer heat pumps as a table.\n"+toolResultClose), system, "system prompt")
+		must.NotContains(system, defaultReportFormat, "the template replaces the default format")
+		must.Equal(1, strings.Count(system, toolResultClose), "the template text appears once, defanged")
 	})
 
 	t.Run("render fails", func(t *testing.T) {
+		must := require.New(t)
 		modelSrv := modeltest.NewFakeServer(synthesisReply("Body."))
 		defer modelSrv.Close()
 		store, ns := newRecordingStore(t, memory.InMemoryOptions{})
@@ -574,20 +536,18 @@ func TestSynthesiseHonoursTheReportTemplate(t *testing.T) {
 		plan, pooled := storedRun(t, store, ns, completedFinding(1))
 		res := readAndSynthesise(context.Background(), l, strings.Repeat("q", MaxReportTemplateBytes+1), plan, pooled)
 
-		if n := modelSrv.CallCount(); n != 0 {
-			t.Errorf("model calls = %d, want none", n)
-		}
-		if res.Status != types.StatusFailed || !strings.Contains(res.Body, "Finding 1 text.") ||
-			!strings.Contains(res.Detail, "report template") {
-			t.Errorf("synthesis = %+v, want the stitched fallback naming the template", res)
-		}
+		must.Equal(0, modelSrv.CallCount(), "model calls")
+		must.Equal(types.StatusFailed, res.Status, "synthesis status")
+		must.Contains(res.Body, "Finding 1 text.", "the body is the stitched findings")
+		must.Contains(res.Detail, "report template", "the detail names the template")
 	})
 }
 
-// TestSynthesiseWithoutFindingsMakesNoCall: when no brief yields a finding
+// TestSynthesise_WithoutFindings_MakesNoCall: when no brief yields a finding
 // with text there is nothing to synthesise, so no call is made and the
 // failed span records the gaps.
-func TestSynthesiseWithoutFindingsMakesNoCall(t *testing.T) {
+func TestSynthesise_WithoutFindings_MakesNoCall(t *testing.T) {
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(synthesisReply("never"))
 	defer modelSrv.Close()
 	var out bytes.Buffer
@@ -599,23 +559,22 @@ func TestSynthesiseWithoutFindingsMakesNoCall(t *testing.T) {
 	}}
 
 	res := readAndSynthesise(context.Background(), l, testQuery, leadPlan{Briefs: poolBriefs(2)}, pooled)
-	if n := modelSrv.CallCount(); n != 0 {
-		t.Errorf("model calls = %d, want none", n)
-	}
-	if res.Status != types.StatusFailed || res.Body != "" || len(res.Set.Gaps) != 2 ||
-		res.Detail != "no worker produced a finding with text" {
-		t.Errorf("synthesis = %+v, want failed with no body and two gaps", res)
-	}
+	check.Equal(0, modelSrv.CallCount(), "model calls")
+	check.Equal(types.StatusFailed, res.Status, "synthesis status")
+	check.Empty(res.Body, "body")
+	check.Len(res.Set.Gaps, 2, "gaps")
+	check.Equal("no worker produced a finding with text", res.Detail, "detail")
 	span := onlySpan(t, out.String(), trace.SpanSynthesise)
-	if span.Attrs["findings_included"] != float64(0) || span.Attrs["findings_gapped"] != float64(2) || span.Error == "" {
-		t.Errorf("span = %+v, want no findings, two gaps and an error", span)
-	}
+	check.InDelta(0, span.Attrs["findings_included"], 0, "span findings_included")
+	check.InDelta(2, span.Attrs["findings_gapped"], 0, "span findings_gapped")
+	check.NotEmpty(span.Error, "span error")
 }
 
-// TestSynthesiseKeepsFindingsWhenTheRunEnds: once the run's context has
+// TestSynthesise_RunEnded_KeepsFindings: once the run's context has
 // ended, the findings still read back and become the stitched body, and no
 // synthesis is paid for.
-func TestSynthesiseKeepsFindingsWhenTheRunEnds(t *testing.T) {
+func TestSynthesise_RunEnded_KeepsFindings(t *testing.T) {
+	check := assert.New(t)
 	modelSrv := modeltest.NewFakeServer(synthesisReply("never"))
 	defer modelSrv.Close()
 	l, store, ns := synthesisLead(t, modelSrv, nil)
@@ -624,13 +583,9 @@ func TestSynthesiseKeepsFindingsWhenTheRunEnds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	res := readAndSynthesise(ctx, l, testQuery, plan, pooled)
-	if n := modelSrv.CallCount(); n > 1 {
-		t.Errorf("model calls = %d, want at most 1", n)
-	}
-	if res.Status != types.StatusFailed || !strings.Contains(res.Body, "Finding 1 text.") || !strings.Contains(res.Body, "Finding 2 text.") {
-		t.Errorf("synthesis = %+v, want both findings stitched", res)
-	}
-	if !strings.Contains(res.Detail, "the run ended during the synthesis call") {
-		t.Errorf("detail = %q, want the run's end named", res.Detail)
-	}
+	check.LessOrEqual(modelSrv.CallCount(), 1, "model calls")
+	check.Equal(types.StatusFailed, res.Status, "synthesis status")
+	check.Contains(res.Body, "Finding 1 text.")
+	check.Contains(res.Body, "Finding 2 text.")
+	check.Contains(res.Detail, "the run ended during the synthesis call", "the detail names the run's end")
 }

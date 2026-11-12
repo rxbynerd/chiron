@@ -6,14 +6,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestFileResolveWarnsOnOpenPermissions pins C1-SEC-5: a key file
-// readable beyond its owner resolves — a mis-permissioned but valid
-// file must not block a run — but warns the operator.
-func TestFileResolveWarnsOnOpenPermissions(t *testing.T) {
+// A key file readable beyond its owner still resolves, so a
+// mis-permissioned but valid file does not block a run. The operator is
+// warned instead.
+func TestFile_Resolve_WarnsOnOpenPermissions(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -21,31 +25,21 @@ func TestFileResolveWarnsOnOpenPermissions(t *testing.T) {
 	ctx := context.Background()
 
 	open := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(open, []byte("k3y"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(open, []byte("k3y"), 0o644))
 	got, err := File{}.Resolve(ctx, "secret://file"+open)
-	if err != nil || got != "k3y" {
-		t.Fatalf("Resolve = %q, %v; the warning must not block resolution", got, err)
-	}
-	if !strings.Contains(buf.String(), "tighten to 0600") {
-		t.Errorf("no permission warning logged for a 0644 key file: %q", buf.String())
-	}
+	must.NoError(err, "the warning must not block resolution")
+	must.Equal("k3y", got)
+	check.Contains(buf.String(), "tighten to 0600", "no permission warning logged for a 0644 key file")
 
 	buf.Reset()
 	tight := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(tight, []byte("k3y"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (File{}).Resolve(ctx, "secret://file"+tight); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if buf.Len() != 0 {
-		t.Errorf("a 0600 key file must not warn: %q", buf.String())
-	}
+	must.NoError(os.WriteFile(tight, []byte("k3y"), 0o600))
+	_, err = File{}.Resolve(ctx, "secret://file"+tight)
+	must.NoError(err)
+	check.Empty(buf.String(), "a 0600 key file must not warn")
 }
 
-func TestParseRef(t *testing.T) {
+func TestParseRef_AcceptsValidAndRejectsInvalid(t *testing.T) {
 	tests := []struct {
 		name    string
 		ref     string
@@ -67,13 +61,14 @@ func TestParseRef(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
 			got, err := ParseRef(tt.ref)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ParseRef(%q) error = %v, wantErr %v", tt.ref, err, tt.wantErr)
+			if tt.wantErr {
+				must.Error(err)
+			} else {
+				must.NoError(err)
 			}
-			if got != tt.want {
-				t.Fatalf("ParseRef(%q) = %+v, want %+v", tt.ref, got, tt.want)
-			}
+			must.Equal(tt.want, got)
 		})
 	}
 }
@@ -81,93 +76,97 @@ func TestParseRef(t *testing.T) {
 // A rejected literal must not be echoed into the error: errors end up in
 // logs, and the literal may be a credential.
 func TestParseRefLiteralNotEchoed(t *testing.T) {
+	must := require.New(t)
 	const literal = "totally-secret-literal-value-12345"
 	_, err := ParseRef(literal)
-	if err == nil {
-		t.Fatal("ParseRef accepted a literal value")
-	}
-	if strings.Contains(err.Error(), literal) {
-		t.Fatalf("error echoes the literal value: %v", err)
-	}
+	must.Error(err, "ParseRef accepted a literal value")
+	must.NotContains(err.Error(), literal, "error echoes the literal value")
 }
 
-func TestEnvResolve(t *testing.T) {
+func TestEnv_Resolve_ReadsVariableAndRejectsOthers(t *testing.T) {
 	ctx := context.Background()
-
 	t.Setenv("CHIRON_TEST_SECRET", "hunter2")
-	got, err := Env{}.Resolve(ctx, "secret://CHIRON_TEST_SECRET")
-	if err != nil || got != "hunter2" {
-		t.Fatalf("Resolve bare = %q, %v; want hunter2, nil", got, err)
-	}
-	got, err = Env{}.Resolve(ctx, "secret://env/CHIRON_TEST_SECRET")
-	if err != nil || got != "hunter2" {
-		t.Fatalf("Resolve explicit = %q, %v; want hunter2, nil", got, err)
+	t.Setenv("CHIRON_TEST_EMPTY", "")
+
+	for _, tt := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{"bare name", "secret://CHIRON_TEST_SECRET", "hunter2"},
+		{"explicit env", "secret://env/CHIRON_TEST_SECRET", "hunter2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got, err := Env{}.Resolve(ctx, tt.ref)
+			must.NoError(err)
+			must.Equal(tt.want, got)
+		})
 	}
 
-	if _, err := (Env{}).Resolve(ctx, "secret://CHIRON_TEST_UNSET"); err == nil {
-		t.Fatal("Resolve of unset variable succeeded; want error")
-	}
-	t.Setenv("CHIRON_TEST_EMPTY", "")
-	if _, err := (Env{}).Resolve(ctx, "secret://CHIRON_TEST_EMPTY"); err == nil {
-		t.Fatal("Resolve of empty variable succeeded; want error")
-	}
-	if _, err := (Env{}).Resolve(ctx, "secret://file/etc/key"); err == nil {
-		t.Fatal("env resolver accepted a file reference; want error")
-	}
-	if _, err := (Env{}).Resolve(ctx, "literal-value"); err == nil {
-		t.Fatal("env resolver accepted a literal; want error")
+	for _, tt := range []struct {
+		name string
+		ref  string
+	}{
+		{"rejects unset variable", "secret://CHIRON_TEST_UNSET"},
+		{"rejects empty variable", "secret://CHIRON_TEST_EMPTY"},
+		{"rejects file reference", "secret://file/etc/key"},
+		{"rejects literal value", "literal-value"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			_, err := Env{}.Resolve(ctx, tt.ref)
+			must.Error(err)
+		})
 	}
 }
 
-func TestFileResolve(t *testing.T) {
+func TestFile_Resolve_ReadsKeyFileAndRejectsOthers(t *testing.T) {
+	must := require.New(t)
 	ctx := context.Background()
 	dir := t.TempDir()
 
 	path := filepath.Join(dir, "key")
-	if err := os.WriteFile(path, []byte("hunter2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(path, []byte("hunter2\n"), 0o600))
 	got, err := File{}.Resolve(ctx, "secret://file"+path)
-	if err != nil || got != "hunter2" {
-		t.Fatalf("Resolve = %q, %v; want hunter2 with trailing newline trimmed", got, err)
-	}
+	must.NoError(err)
+	must.Equal("hunter2", got, "the trailing newline should be trimmed")
 
 	empty := filepath.Join(dir, "empty")
-	if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (File{}).Resolve(ctx, "secret://file"+empty); err == nil {
-		t.Fatal("Resolve of empty file succeeded; want error")
-	}
+	must.NoError(os.WriteFile(empty, []byte("\n"), 0o600))
 
-	if _, err := (File{}).Resolve(ctx, "secret://file"+filepath.Join(dir, "absent")); err == nil {
-		t.Fatal("Resolve of missing file succeeded; want error")
-	}
-	if _, err := (File{}).Resolve(ctx, "secret://ENV_NAME"); err == nil {
-		t.Fatal("file resolver accepted an env reference; want error")
+	for _, tt := range []struct {
+		name string
+		ref  string
+	}{
+		{"rejects empty file", "secret://file" + empty},
+		{"rejects missing file", "secret://file" + filepath.Join(dir, "absent")},
+		{"rejects env reference", "secret://ENV_NAME"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			_, err := File{}.Resolve(ctx, tt.ref)
+			must.Error(err)
+		})
 	}
 }
 
-func TestDefaultResolverDispatch(t *testing.T) {
+func TestDefaultResolver_Dispatch(t *testing.T) {
+	must := require.New(t)
 	ctx := context.Background()
 	r := Default()
 
 	t.Setenv("CHIRON_TEST_SECRET", "from-env")
 	got, err := r.Resolve(ctx, "secret://CHIRON_TEST_SECRET")
-	if err != nil || got != "from-env" {
-		t.Fatalf("env dispatch = %q, %v; want from-env, nil", got, err)
-	}
+	must.NoError(err)
+	must.Equal("from-env", got)
 
 	path := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(path, []byte("from-file"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must.NoError(os.WriteFile(path, []byte("from-file"), 0o600))
 	got, err = r.Resolve(ctx, "secret://file"+path)
-	if err != nil || got != "from-file" {
-		t.Fatalf("file dispatch = %q, %v; want from-file, nil", got, err)
-	}
+	must.NoError(err)
+	must.Equal("from-file", got)
 
-	if _, err := r.Resolve(ctx, "not-a-reference"); err == nil {
-		t.Fatal("default resolver accepted a literal; want error")
-	}
+	_, err = r.Resolve(ctx, "not-a-reference")
+	must.Error(err)
 }
