@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,6 +107,29 @@ func TestExitCode_DeclinedPlanIsBlocked(t *testing.T) {
 	// declined plan must never start the research run chained from it.
 	must.Len(bodies, 1, "want the planning create only")
 	must.NotContains(bodies[0], "previous_interaction_id")
+}
+
+// TestResearchPlan_PipedApprovalIsRefused proves that approval text on a
+// pipe cannot approve --plan spend. The base config comes from a file so the
+// pipe is left for the plan reader, which would accept "a"; without
+// --accept-plan the review is refused before the planning create, so no
+// request is sent at all.
+func TestResearchPlan_PipedApprovalIsRefused(t *testing.T) {
+	must := require.New(t)
+
+	var bodies []map[string]any
+	server := newPlanFlowServer(t, &bodies)
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	base := filepath.Join(t.TempDir(), "base.yaml")
+	must.NoError(os.WriteFile(base, []byte("query: smoke question\n"), 0o600))
+
+	_, _, err := executeWithStdin(t, pipedStdin(t, "a\n"),
+		"research", "--config", base, "--plan", "-o", "none")
+
+	must.ErrorContains(err, "--accept-plan")
+	must.Empty(bodies, "no create may be sent, planning or research")
 }
 
 // executeChildRole marks the child process of
