@@ -25,6 +25,15 @@ and a run's sources appear only inside the Markdown at `report.markdown`.
   the standard alphabet with padding, because Go's `encoding/json` encodes
   `[]byte` that way. A consumer must decode `report.markdown` to read the
   report. The decoded value is UTF-8 Markdown.
+- These two keys are not omitted when empty, and the encoder writes `null`
+  for a nil byte slice (an empty, non-nil slice is `""`). The Markdown
+  formatter always produces a non-empty `report.markdown`, so that key is a
+  string in every document `chiron` writes. An asset's `data` is the image
+  bytes the researcher returned, so an image the API sent without data
+  encodes as `"data": null`. A consumer should treat `null` as empty.
+- The encoder escapes `<`, `>` and `&` inside strings as `\u003c`, `\u003e`
+  and `\u0026`, so a consumer must decode the JSON rather than match raw
+  bytes.
 
 ## Top level
 
@@ -40,7 +49,7 @@ and a run's sources appear only inside the Markdown at `report.markdown`.
 
 | Key | Type | Presence | Meaning |
 | --- | --- | --- | --- |
-| `markdown` | string (base64) | always | The full Markdown document: YAML front matter, body and numbered sources. Base64 of the UTF-8 bytes. |
+| `markdown` | string (base64) | always, not omitted when empty | The full Markdown document: YAML front matter, body and numbered sources. Base64 of the UTF-8 bytes. |
 | `assets` | array of objects | omitted when empty | Chart images the Markdown links to by name. |
 
 ## `report.assets[]`
@@ -49,7 +58,7 @@ and a run's sources appear only inside the Markdown at `report.markdown`.
 | --- | --- | --- | --- |
 | `name` | string | always | The file name the Markdown refers to, for example `chart-1.png`. |
 | `mime_type` | string | omitted when empty | The media type, for example `image/png`. |
-| `data` | string (base64) | always | The file contents. |
+| `data` | string (base64) or `null` | always, not omitted when empty | The file contents; `null` when the asset has no bytes. |
 
 ## `usage`
 
