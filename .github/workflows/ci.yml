@@ -38,4 +38,4 @@ jobs:
           # Pinned for the same reason as the action SHAs: "latest"
           # let a golangci-lint release break main with no change in
           # this repository. Bump deliberately alongside .golangci.yml.
-          version: v2.12.2
+          version: v2.15.0

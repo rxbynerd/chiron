@@ -12,15 +12,161 @@
 #     writes and similar are conventionally unchecked.
 #   - testifylint rejects common testify misuse in tests (swapped
 #     expected/actual, Equal on errors, require off the test goroutine).
+#   - depguard enforces the package layering (no vendor AI SDKs, the run
+#     core importing only seam packages, wire types confined to the Gemini
+#     adapter and the CLI, stdlib-only leaves, no process execution, no
+#     test doubles or httptest in production code); forbidigo confines
+#     environment reads to internal/cli and internal/secret and forbids
+#     package-level slog calls. The path globs name today's package paths.
+#   - gocyclo, gocognit, funlen and nestif cap function size and
+#     complexity. The functions exempted below are a ratchet: the list
+#     may only shrink.
+#   - gofmt and goimports are the formatters; check them read-only with
+#     `golangci-lint fmt --diff ./...`.
 #
 # The CI workflow pins the golangci-lint version for the same reason
 # the actions are SHA-pinned (C1-SEC-3): main must not break without a
-# change in this repository.
+# change in this repository. The configuration is verified with the
+# pinned version, golangci-lint v2.15.0.
 version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/rxbynerd/chiron
 
 linters:
   enable:
     - testifylint
+    - staticcheck
+    - bodyclose
+    - noctx
+    - nilerr
+    - nilnil
+    - errname
+    - unconvert
+    - usestdlibvars
+    - copyloopvar
+    - sloglint
+    - fatcontext
+    - gochecknoinits
+    - godot
+    - tparallel
+    - forcetypeassert
+    - containedctx
+    - gocyclo
+    - gocognit
+    - funlen
+    - nestif
+    - depguard
+    - forbidigo
+  settings:
+    staticcheck:
+      checks: ["all"]
+    gocyclo:
+      min-complexity: 20
+    gocognit:
+      min-complexity: 25
+    funlen:
+      lines: 100
+      statements: 60
+    nestif:
+      min-complexity: 5
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^os\.(Getenv|LookupEnv|Environ)$'
+          msg: "read the environment only in internal/cli, or in the env backend of internal/secret"
+        - pattern: '^slog\.(Debug|Info|Warn|Error|Log|DebugContext|InfoContext|WarnContext|ErrorContext|LogAttrs)$'
+          msg: "no package-level slog calls; use an injected logger"
+    depguard:
+      rules:
+        vendor-ai-sdks:
+          files: ["$all"]
+          deny:
+            - pkg: github.com/openai/openai-go
+              desc: "no vendor AI SDKs; hand-rolled net/http adapters only"
+            - pkg: github.com/anthropics/anthropic-sdk-go
+              desc: "no vendor AI SDKs; hand-rolled net/http adapters only"
+            - pkg: google.golang.org/genai
+              desc: "no vendor AI SDKs; hand-rolled net/http adapters only"
+            - pkg: github.com/google/generative-ai-go
+              desc: "no vendor AI SDKs; hand-rolled net/http adapters only"
+        research-only:
+          files: ["$all", "!$test"]
+          deny:
+            - pkg: os/exec
+              desc: "research-only: Chiron never executes processes"
+        no-httptest-in-binary:
+          files: ["$all", "!$test", "!**/*test/*.go"]
+          deny:
+            - pkg: net/http/httptest
+              desc: "httptest must not link into the chiron binary; put fakes in a <pkg>test package"
+        no-test-packages-in-binary:
+          files: ["$all", "!$test", "!**/*test/*.go"]
+          deny:
+            - pkg: github.com/rxbynerd/chiron/internal/mcpclient/mcpclienttest
+              desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/memory/billet/billettest
+              desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/memory/alexandria/alexandriatest
+              desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest
+              desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/researcher/fleet/search/searchtest
+              desc: "test double; production code must not import it"
+            - pkg: github.com/rxbynerd/chiron/internal/researcher/fleet/web/exa/exatest
+              desc: "test double; production code must not import it"
+        run-core-seams:
+          files: ["**/internal/run/*.go", "!$test"]
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/rxbynerd/chiron/internal/formatter
+            - github.com/rxbynerd/chiron/internal/researcher
+            - github.com/rxbynerd/chiron/internal/sink
+            - github.com/rxbynerd/chiron/internal/trace
+            - github.com/rxbynerd/chiron/internal/transport
+            - github.com/rxbynerd/chiron/internal/types
+        wire-types-stay-in-gemini:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/researcher/gemini/*.go"
+            - "!**/internal/cli/*.go"
+            - "!**/internal/interactions/*.go"
+          deny:
+            - pkg: github.com/rxbynerd/chiron/internal/interactions
+              desc: "wire types stay inside the Gemini adapter and the composition root"
+        leaf-packages-stdlib-only:
+          files:
+            - "**/internal/httpx/*.go"
+            - "**/internal/types/*.go"
+            - "**/internal/researcher/fleet/web/*.go"
+            - "**/internal/memory/*.go"
+            - "!$test"
+          list-mode: strict
+          allow:
+            - $gostd
+        seams-import-no-adapters:
+          files:
+            - "**/internal/researcher/researcher.go"
+            - "**/internal/planner/*.go"
+            - "**/internal/formatter/*.go"
+            - "**/internal/sink/*.go"
+            - "**/internal/transport/*.go"
+            - "!$test"
+          deny:
+            - pkg: github.com/rxbynerd/chiron/internal/researcher/
+              desc: "seam packages never import an adapter"
+            - pkg: github.com/rxbynerd/chiron/internal/interactions
+              desc: "wire types stay inside the Gemini adapter"
+            - pkg: github.com/rxbynerd/chiron/internal/mcpclient
+              desc: "seam packages never import an adapter transport"
   exclusions:
     presets:
       - std-error-handling
@@ -28,3 +174,28 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
+          - forcetypeassert
+          - noctx
+          - containedctx
+          - funlen
+          - gocyclo
+          - gocognit
+          - nestif
+          - forbidigo
+      - path: '(^|/)internal/(cli|secret)/'
+        linters: [forbidigo]
+        text: 'read the environment'
+      # The one package-level slog call in production code.
+      - path: '(^|/)internal/secret/resolve\.go$'
+        linters: [forbidigo]
+        text: 'package-level slog'
+      # Complexity exemptions. This list may only shrink; never add a function.
+      - linters: [gocyclo, gocognit]
+        text: 'of func `(ApplyFlags|tagAttrs|\(FleetConfig\)\.validate|\(\*Client\)\.readEventStream)` is'
+      - linters: [funlen]
+        text: "Function 'ApplyFlags' "
+
+issues:
+  # Report every issue on a line, so a function over both the cyclomatic
+  # and the length limit shows both and each exemption hides only its own.
+  uniq-by-line: false
