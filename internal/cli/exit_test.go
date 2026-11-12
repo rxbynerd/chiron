@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -103,8 +105,8 @@ func TestExitCode_DeclinedPlanIsBlocked(t *testing.T) {
 		"research", "--query", "smoke question", "--plan", "-o", "none")
 
 	must.Equal(ExitBlocked, code, "stderr:\n%s", stderr)
-	// Planning itself spends, so one create precedes the review, but the
-	// declined plan must never start the research run chained from it.
+	// The one create is the paid planning create, sent before the review;
+	// the declined plan must never start the research run chained from it.
 	must.Len(bodies, 1, "want the planning create only")
 	must.NotContains(bodies[0], "previous_interaction_id")
 }
@@ -153,7 +155,9 @@ func TestExecute_ExitsWithBlockedStatusThroughProcess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestExecute_ExitsWithBlockedStatusThroughProcess$")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExecute_ExitsWithBlockedStatusThroughProcess$")
 	// An explicit environment, so nothing ambient reaches the child.
 	cmd.Env = []string{
 		executeChildRole + "=1",
