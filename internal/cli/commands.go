@@ -238,7 +238,9 @@ func stdinIsPiped(in io.Reader) bool {
 // terminal — the only stdin that can approve spend (--plan review).
 // Deliberately not the negation of stdinIsPiped: an unknown reader type
 // is neither an implicit config source nor a terminal, so it can
-// neither smuggle config in nor approve a paid run.
+// neither smuggle config in nor approve a paid run. A character device
+// such as /dev/null counts as a terminal; the plan reader aborts at end
+// of input, so it still cannot approve anything.
 func stdinIsTerminal(in io.Reader) bool {
 	f, ok := in.(*os.File)
 	if !ok {
