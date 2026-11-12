@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -92,4 +94,46 @@ func TestExitCode_DeclinedPlanIsBlocked(t *testing.T) {
 	// declined plan must never start the research run chained from it.
 	must.Len(bodies, 1, "want the planning create only")
 	must.NotContains(bodies[0], "previous_interaction_id")
+}
+
+// executeChildRole marks the child process of
+// TestExecute_ExitsWithBlockedStatusThroughProcess.
+const executeChildRole = "CHIRON_TEST_EXECUTE_CHILD"
+
+// TestExecute_ExitsWithBlockedStatusThroughProcess runs the real entry
+// point in a child process, the only way to observe the integer Execute
+// hands to os.Exit and the line it prints on the process's own stderr.
+func TestExecute_ExitsWithBlockedStatusThroughProcess(t *testing.T) {
+	if os.Getenv(executeChildRole) == "1" {
+		os.Args = []string{"chiron", "research", "--query", "q", "--budget", "1.00", "-o", "none"}
+		os.Exit(Execute())
+	}
+
+	must := require.New(t)
+	check := assert.New(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		check.Fail("the budget gate must block before any request", "got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestExecute_ExitsWithBlockedStatusThroughProcess$")
+	// An explicit environment, so nothing ambient reaches the child.
+	cmd.Env = []string{
+		executeChildRole + "=1",
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"CHIRON_GEMINI_BASE_URL=" + server.URL,
+		"GEMINI_API_KEY=test-key",
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	must.ErrorAs(err, &exitErr, "child stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	must.Equal(ExitBlocked, exitErr.ExitCode(), "stderr:\n%s", stderr.String())
+	must.True(strings.HasPrefix(stderr.String(), "chiron: research blocked before any spend"), "stderr: %q", stderr.String())
 }
