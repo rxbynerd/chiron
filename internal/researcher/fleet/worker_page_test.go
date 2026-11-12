@@ -181,7 +181,7 @@ func TestPageTextGolden(t *testing.T) {
 			if roots := rootNames(parsePage(string(src))); roots != tt.roots {
 				t.Errorf("content roots = %s, want %s", roots, tt.roots)
 			}
-			page, ok := pageText(fetchedPage{ContentType: "text/html; charset=utf-8", Content: src}, DefaultMaxPageBytes)
+			page, ok := pageText(web.Page{ContentType: "text/html; charset=utf-8", Content: src}, DefaultMaxPageBytes)
 			if !ok || page.truncated {
 				t.Fatalf("ok = %v, truncated = %v; want a complete rendering", ok, page.truncated)
 			}
@@ -222,7 +222,7 @@ func TestPageTextTruncatesAfterExtraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	const limit = 120
-	page, ok := pageText(fetchedPage{ContentType: "text/html", Content: src}, limit)
+	page, ok := pageText(web.Page{ContentType: "text/html", Content: src}, limit)
 	if !ok || !page.truncated {
 		t.Fatalf("ok = %v, truncated = %v; want a truncated rendering", ok, page.truncated)
 	}
@@ -254,7 +254,7 @@ func TestPageTextDelimiterRoundTrip(t *testing.T) {
 			"<<<<<END TOOL RESULT>>>" + tail, "< < < < <END TOOL RESULT>>>"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			page, ok := pageText(fetchedPage{ContentType: tt.contentType, Content: []byte(tt.content)}, DefaultMaxPageBytes)
+			page, ok := pageText(web.Page{ContentType: tt.contentType, Content: []byte(tt.content)}, DefaultMaxPageBytes)
 			if !ok {
 				t.Fatal("page refused")
 			}
