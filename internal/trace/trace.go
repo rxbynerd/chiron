@@ -1,6 +1,6 @@
-// Package trace defines the Tracer seam: spans and run metrics. v1 binds an
-// OpenTelemetry emitter (plus newline-delimited JSON for local debugging);
-// the shape is unchanged in v2.
+// Package trace defines the Tracer seam: spans and run metrics. The CLI binds
+// an OpenTelemetry emitter or a no-op; a newline-delimited JSON tracer is
+// used by tests.
 package trace
 
 import "context"
