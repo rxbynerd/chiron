@@ -13,9 +13,9 @@ v2 is in progress: `docs/V2-PLAN.md` is the phased implementation plan and
 v2 researcher core). Per the prove-first pivot (V2-AMENDS amend 8), the v2
 `Researcher` is Chiron's own **in-process** research loop on **one
 OpenAI-compatible standard model** plus web search (an MCP tool or Exa) and
-fetch (an SSRF-guarded `web_fetch` or Exa). `--agent worker` runs a single bounded loop and
-`--agent fleet` runs a lead orchestrating several workers; both are
-implemented and opt-in. The evaluation gate (the eval-versus-baseline harness,
+fetch (an SSRF-guarded `web_fetch` or Exa). `--agent worker` runs a single
+bounded loop and `--agent fleet` runs a lead orchestrating several workers;
+both are implemented and opt-in. The evaluation gate (the eval-versus-baseline harness,
 issue #25) is outstanding, so `deep-research` stays the default agent.
 **Managed deep research (the v1 Gemini Deep Research adapter) is a stopgap +
 eval baseline only, never the product.**
@@ -31,6 +31,8 @@ Non-negotiables worth repeating:
 - New dependencies require a justification entry in `docs/DECISIONS.md`.
 - Wire types live in `internal/interactions`; `internal/types` is the
   stable domain model — keep API churn inside the adapter.
-- Spend paths follow AGENTS.md "Money safety": budget gate before any
-  create, no auto-retry on creates, emit the interaction id early.
+- Spend paths follow the two money-safety sections of AGENTS.md. On the
+  Gemini path: budget gate before any create, no auto-retry on creates,
+  emit the interaction id early. For the in-process agents: no paid model
+  call is retried, and every worker runs under the fleet caps.
 - en-GB spelling in documentation; no emojis.

@@ -208,8 +208,8 @@ in-process), or, only if hard per-worker process isolation is ever required, for
 
 ## 4. Spend safety for a multi-agent run (budgeting deferred)
 
-v1's money-safety rules (`AGENTS.md`, "Money safety") were written for one paid
-interaction per run. A fleet run creates many, and v2 may spend a lot (amend 7). v2
+v1's money-safety rules (`AGENTS.md`, "Money safety for the Gemini path") were
+written for one paid interaction per run. A fleet run creates many, and v2 may spend a lot (amend 7). v2
 **defers budget enforcement and cost attribution** (D6): the current estimate is broken
 (hard-coded per-session costs), and fixing it — plus standing up Stint — is a future
 release. What remains, and is acceptance criteria for Wave 4, is the part of "money

@@ -83,7 +83,8 @@ with actions pinned to full commit SHAs.
 ## Money safety for the Gemini path
 
 This section covers `deep-research` and `deep-research-max`, and the
-`get`, `follow-up` and `--plan` paths that share them. Research tasks cost £1–7 each, so spend paths have hard rules:
+`get`, `follow-up` and `--plan` paths that share them. Research tasks
+cost £1–7 each, so spend paths have hard rules:
 
 - Nothing creates an interaction before the `--budget` gate has run;
   the gate precedes the plan phase too, because plan rounds also spend.
@@ -116,13 +117,19 @@ implemented today:
   synthesis (`TestSynthesise_FailureFallsBackToFindings`) and citation
   call (`TestCite_FallsBackToEveryWorkerCitation`), the last two falling
   back to the stitched findings and every worker citation.
-- Each worker is capped on turns, tokens, GBP and wall-clock time, and
-  hitting a cap ends it `incomplete` with the citations so far
+- Each worker runs under a turn cap (`fleet.max_turns`, default 8) and a
+  wall-clock timeout (`fleet.worker_timeout`, default five minutes), both
+  always on. The token cap (`fleet.max_tokens`, default 400,000) is off
+  when set to 0. The GBP ceiling (`fleet.ceiling_gbp`) is off by default,
+  counts model tokens only, and needs a price: validation rejects a
+  ceiling when both prices are 0. The turn, token and GBP caps are
+  checked before each turn, so a run can pass the token or GBP cap by up
+  to one turn; the timeout also cancels a call in flight. Reaching any
+  cap ends the worker `incomplete`
   (`TestRunWorkerCapsStopDeterministically`, `TestRunWorkerTokenCapStops`,
-  `TestRunWorker_CostCeilingStops`, `TestRunWorkerTimeoutIsIncomplete`).
-  The fleet's pool gives every worker the same caps
-  (`TestPool_Run_AppliesPerWorkerCaps`). The GBP ceiling needs prices and
-  counts model tokens only.
+  `TestRunWorker_CostCeilingStops`,
+  `TestRunWorker_TimeoutMidTurnIsIncomplete`). The fleet's pool gives
+  every worker the same caps (`TestPool_Run_AppliesPerWorkerCaps`).
 - Fan-out is bounded by `fleet.max_workers` and `fleet.concurrency`
   (`TestPool_Run_BoundsConcurrencyAndWorkerCount`).
 - Web-provider spend is reported in USD, with a count of calls of unknown
@@ -135,8 +142,10 @@ implemented today:
 - Findings pass between workers and the lead by reference through the
   in-process store, not by copy (`TestPool_Run_ReturnsStoredFindingReferences`).
 - There is no run-level GBP ceiling across a fleet: the worst case is
-  `fleet.max_workers` times one worker's caps (`docs/V2-PLAN.md`,
-  decision D6).
+  `fleet.max_workers` times one worker's caps, plus the lead's
+  decompose, synthesise and cite calls, which no ceiling counts and
+  which are bounded only by a 16,384-token completion cap each
+  (`docs/V2-PLAN.md`, decision D6).
 
 ## Test infrastructure conventions
 
