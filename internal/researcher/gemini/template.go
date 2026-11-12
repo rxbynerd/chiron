@@ -22,6 +22,10 @@ var builtinFS embed.FS
 // (PROPOSAL §4.3).
 const visualiseNudge = "\nInclude charts or other visualisations wherever they make the findings easier to grasp.\n"
 
+// queryProbe is rendered through every template at construction. It is
+// chosen so that no template's own text can contain it.
+const queryProbe = "chiron-query-probe-7f3a91"
+
 // promptTemplate renders the research prompt from the query.
 type promptTemplate struct {
 	tmpl      *template.Template
@@ -35,8 +39,9 @@ type templateData struct {
 }
 
 // loadTemplate parses the template at path, or the built-in one when
-// path is empty. Parsing happens at construction so a broken template
-// fails before any request is built.
+// path is empty, and renders it once with queryProbe. Both happen at
+// construction so a broken template, or one that never prints the query,
+// fails before any request is built whatever query is passed later.
 func loadTemplate(path string, visualise bool) (*promptTemplate, error) {
 	var (
 		text string
@@ -60,7 +65,11 @@ func loadTemplate(path string, visualise bool) (*promptTemplate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gemini: parsing template %s: %w", name, err)
 	}
-	return &promptTemplate{tmpl: tmpl, visualise: visualise}, nil
+	p := &promptTemplate{tmpl: tmpl, visualise: visualise}
+	if _, err := p.render(queryProbe); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // render produces the prompt for a query. A rendered prompt that does

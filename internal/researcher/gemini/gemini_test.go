@@ -375,19 +375,55 @@ func TestCustomTemplate(t *testing.T) {
 	must.Contains(prompt, "Q: the question")
 }
 
-func TestStart_TemplateWithoutQuery_Rejected(t *testing.T) {
+// TestNew_TemplateWithoutQuery_Rejected: a template that never prints the
+// query is refused at construction, whatever query would be passed later and
+// without any request reaching the server.
+func TestNew_TemplateWithoutQuery_Rejected(t *testing.T) {
 	must := require.New(t)
-	dir := t.TempDir()
-	tmplPath := filepath.Join(dir, "bad.md")
+	check := assert.New(t)
+	tmplPath := filepath.Join(t.TempDir(), "bad.md")
 	must.NoError(os.WriteFile(tmplPath, []byte("No query placeholder here.\n"), 0o644))
 
-	r, err := New(Options{APIKey: testKey, TemplatePath: tmplPath})
-	must.NoError(err)
-	_, err = r.Start(context.Background(), researcher.Task{Query: "q"})
-	must.Error(err, "a template that drops the query must be rejected before money is spent")
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		check.Fail("no request must be sent for a template that drops the query")
+	}))
+	defer server.Close()
+
+	_, err := New(Options{APIKey: testKey, BaseURL: server.URL, TemplatePath: tmplPath})
+	must.ErrorContains(err, "{{.Query}}")
+	must.Zero(requests.Load(), "requests that reached the server")
+}
+
+// TestStart_TemplateUsingQueryConditionally_Rejected: the per-render check
+// still refuses a prompt that lacks the query when only some queries make the
+// template print it.
+func TestStart_TemplateUsingQueryConditionally_Rejected(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+	tmplPath := filepath.Join(t.TempDir(), "conditional.md")
+	text := `{{if eq .Query "` + queryProbe + `"}}Q: {{.Query}}{{else}}Boilerplate only.{{end}}`
+	must.NoError(os.WriteFile(tmplPath, []byte(text), 0o644))
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests.Add(1)
+		check.Fail("no request must be sent for a prompt that drops the query")
+	}))
+	defer server.Close()
+
+	r := newResearcher(t, server, func(o *Options) { o.TemplatePath = tmplPath })
+	_, err := r.Start(context.Background(), researcher.Task{Query: "q"})
+	must.ErrorContains(err, "{{.Query}}")
+	must.Zero(requests.Load(), "requests that reached the server")
 }
 
 func TestConstructionValidation(t *testing.T) {
+	must := require.New(t)
+	noQueryTemplate := filepath.Join(t.TempDir(), "no-query.md")
+	must.NoError(os.WriteFile(noQueryTemplate, []byte("No query placeholder here.\n"), 0o644))
+
 	cases := []struct {
 		name string
 		opts Options
@@ -397,6 +433,7 @@ func TestConstructionValidation(t *testing.T) {
 		{"unsupported tool", Options{APIKey: testKey, Tools: []string{"function"}}},
 		{"mcp via --tools", Options{APIKey: testKey, Tools: []string{"mcp_server"}}},
 		{"missing template", Options{APIKey: testKey, TemplatePath: "/does/not/exist.md"}},
+		{"template without query", Options{APIKey: testKey, TemplatePath: noQueryTemplate}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
