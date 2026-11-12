@@ -85,6 +85,10 @@ jobs:
           go-version-file: go.mod
       - name: Lint and compile the Buf module
         working-directory: proto
+        # setup-go pins GOTOOLCHAIN=local; buf may need a newer Go than
+        # go.mod names, so this step lets go fetch the toolchain buf asks for.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go run github.com/bufbuild/buf/cmd/buf@v1.75.0 lint
           go run github.com/bufbuild/buf/cmd/buf@v1.75.0 build
