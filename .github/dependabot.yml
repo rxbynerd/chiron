@@ -1,0 +1,45 @@
+# Modules that must move together arrive as one pull request per group.
+# The tool versions pinned in ci.yml and the Justfile (golangci-lint, buf,
+# govulncheck) are not visible to Dependabot and are bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # Version updates wait a week after release; security updates do not.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      opentelemetry:
+        patterns:
+          - "go.opentelemetry.io/*"
+      golang-x:
+        patterns:
+          - "golang.org/x/*"
+      grpc-stack:
+        patterns:
+          - "google.golang.org/grpc*"
+          - "google.golang.org/genproto*"
+          - "google.golang.org/protobuf*"
+          - "github.com/grpc-ecosystem/*"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "build(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "build(ci)"

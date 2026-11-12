@@ -8,28 +8,58 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a running pull request check; runs on main finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Actions are pinned to full commit SHAs (C1-SEC-3): tags on third-party
 # repositories are mutable and can be redirected silently. The trailing
 # comment records the release each SHA was resolved from.
+#
+# `just ci` runs the checks below in the same read-only form. Keep the two
+# in step.
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
       - name: Build
         run: go build ./...
+      - name: Build stamped binary
+        run: go build -ldflags "-X github.com/rxbynerd/chiron/internal/version.Version=ci" -o /dev/null ./cmd/chiron
+      - name: Check the binary links no test-only package
+        run: ./scripts/check-binary-deps.sh
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race ./...
+        run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -n 1 | awk '{print $NF}')
+          echo "Total statement coverage: ${total}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+      - name: Check go.mod is tidy
+        run: go mod tidy -diff
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
@@ -38,4 +68,40 @@ jobs:
           # Pinned for the same reason as the action SHAs: "latest"
           # let a golangci-lint release break main with no change in
           # this repository. Bump deliberately alongside .golangci.yml.
-          version: v2.12.2
+          version: v2.15.0
+      # The action adds the binary it installed to PATH for later steps.
+      - name: Check formatting
+        run: golangci-lint fmt --diff ./...
+
+  proto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Lint and compile the Buf module
+        working-directory: proto
+        # setup-go pins GOTOOLCHAIN=local; buf may need a newer Go than
+        # go.mod names, so this step lets go fetch the toolchain buf asks for.
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go run github.com/bufbuild/buf/cmd/buf@v1.75.0 lint
+          go run github.com/bufbuild/buf/cmd/buf@v1.75.0 build
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Scan for reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
