@@ -2882,3 +2882,26 @@ three or more `<` (`<<<<<` becomes `< < < < <`), then cuts at
 `fleet.max_page_bytes` on a rune boundary. Its output never contains `<<<`
 however the page spells the run (raw, `&lt;`, `&#60;`), independently of
 `fetchedPageMessage`'s defang; `<<` (a shift operator, a heredoc) is kept.
+
+## 2026-11-12 — Tests assert with testify through per-scope objects
+
+Test dependency: `github.com/stretchr/testify` (`require` and `assert`
+only; no `mock` or `suite`). It is linked into test binaries alone, never
+into the `chiron` binary, and was already in the module graph as an
+indirect dependency.
+
+Every test function or closure that asserts builds its own object from
+its own `t`: `must := require.New(t)`, plus `check := assert.New(t)` where
+a soft assertion is wanted, and asserts as `must.Equal(want, got)` with
+the most specific form available (`NoError`, `ErrorIs`, `ErrorContains`,
+`Len`, `Contains`, `JSONEq` and so on). Off the test goroutine (`go func`
+bodies, `httptest` handlers) only `check` is used, because `require`
+calls `t.FailNow`, which must run on the test goroutine. `testifylint`
+is enabled in `.golangci.yml` with its default checkers.
+
+The convention, the names `must` and `check`, and the
+`Test<Subject>_<Behaviour>[_<Detail>]` naming rule match Stirrup's
+(`rxbynerd/stirrup#808`), so the suite reads the same in both
+repositories. Hand-rolled `if got != want { t.Fatalf(...) }` comparisons
+and `reflect.DeepEqual` are not accepted in new tests. AGENTS.md "Writing
+tests" states the rules for contributors.
