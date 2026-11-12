@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,6 +81,21 @@ func execute(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	root.SetArgs(args)
 	err = root.Execute()
 	return out.String(), errBuf.String(), err
+}
+
+// executeCode runs the chiron command tree as main does, through runRoot,
+// and returns the process exit code with the captured stdout and stderr.
+// The final error line shares stderr with the command's own output.
+func executeCode(t *testing.T, stdin io.Reader, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	root := NewRootCommand()
+	var out, errBuf bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&errBuf)
+	root.SetIn(stdin)
+	root.SetArgs(args)
+	code = runRoot(root, &errBuf)
+	return code, out.String(), errBuf.String()
 }
 
 func TestResearchEndToEndText(t *testing.T) {

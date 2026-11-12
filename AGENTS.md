@@ -68,7 +68,7 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/researcher/fleet/model/modeltest` | `model.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `model` so `net/http/httptest` does not link into the `chiron` binary. |
 | `internal/planner` | `Planner` seam (Propose/Refine) + the interactive plan-review `Session` for `--plan`; renders on stderr, bounded at `DefaultMaxRounds`. |
 | `internal/formatter` | `Formatter` seam: `Interaction` → Markdown `Report` (provenance comment, front matter, body, charts as assets, numbered sources). Pure — no IO; golden-file tested. |
-| `internal/version` | The single `Version` var, stamped at build time via `-X` ldflags (see Justfile); `"dev"` otherwise. Read by `--version` and the report's provenance comment, so both report the same build identically. |
+| `internal/version` | `String()` names the build: the `Version` var stamped at build time via `-X` ldflags (see Justfile) when set, otherwise the commit from the embedded build information (`-dirty` for a modified tree), otherwise the main module version, otherwise `"dev"`. Read by `--version` and the report's provenance comment, so both report the same build identically; read it through `String()`, never `Version` directly. |
 | `internal/sink` | `ReportSink` seam: stdout-markdown, file (0600, writes assets), stdout-json, multi. |
 | `internal/transport` | `Transport` seam: run events out of the core. `Stdio` NDJSON on stderr (v1); `grpc` stub for v2. Event kinds mirror `proto/chiron/v1` one-to-one. |
 | `internal/trace` | `Tracer` seam with three bindings: OTel (OTLP/HTTP), JSONL (local debug), Noop. `names.go` fixes the span/metric vocabulary, including the reserved fleet span names (`decompose`, `delegate`, `synthesise`, `cite`, `control_plane`) and attribute keys (`worker_id`, `brief_id` on a delegate span; `brief_count` on decompose), pinned by a vocabulary test; all payloads scrubbed. |
@@ -159,6 +159,15 @@ Research tasks cost £1–7 each, so spend paths have hard rules:
   than raw `io.WriteString` literals, so a handler that keeps the
   connection open cannot leave the scanner blocked.
 - Table-test loop variables are named `tt`.
+- The `internal/cli` tests run under a `TestMain` that unsets every
+  `OTEL_` and `CHIRON_` variable plus `GEMINI_API_KEY`, `EXA_API_KEY` and
+  the two `LANGFUSE_` keys, so a developer's shell cannot change a result
+  or send spans to a collector. A test that needs a value sets it with
+  `t.Setenv`. `TestAmbientEnv_CoversEveryProductionRead` fails when
+  production code in `internal/cli` or `internal/config` starts using a
+  variable the clearing does not cover. A child process a test starts gets
+  the environment its parent builds, and its role variable is listed in
+  `childRoleVars` so `TestMain` leaves that process alone.
 
 ## Writing tests
 

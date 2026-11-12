@@ -1,0 +1,179 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// The exit codes are the contract scripts parse, so these tests assert
+// the integer the process would exit with, through the real command tree.
+
+// TestExitCode_ConstantsMatchDocumentedValues pins each constant to the
+// integer the research command's help documents, so the tests that compare
+// against the constants cannot pass after a renumbering.
+func TestExitCode_ConstantsMatchDocumentedValues(t *testing.T) {
+	must := require.New(t)
+
+	must.Equal(1, ExitUsage)
+	must.Equal(2, ExitResearchFailed)
+	must.Equal(3, ExitResearchStopped)
+	must.Equal(4, ExitBlocked)
+}
+
+func TestExitCode_ResearchOutcomes(t *testing.T) {
+	tests := []struct {
+		status   string
+		wantCode int
+	}{
+		{"completed", 0},
+		{"failed", ExitResearchFailed},
+		{"requires_action", ExitResearchFailed},
+		{"cancelled", ExitResearchStopped},
+		{"budget_exceeded", ExitResearchStopped},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			must := require.New(t)
+			server := newInteractionsServer(t, tt.status)
+			defer server.Close()
+			t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+			t.Setenv("GEMINI_API_KEY", "test-key")
+
+			code, _, stderr := executeCode(t, strings.NewReader(""),
+				"research", "--query", "smoke question", "-o", "none")
+
+			must.Equal(tt.wantCode, code, "stderr:\n%s", stderr)
+		})
+	}
+}
+
+func TestExitCode_UnknownFlagIsUsageError(t *testing.T) {
+	must := require.New(t)
+
+	code, _, stderr := executeCode(t, strings.NewReader(""), "research", "--no-such-flag")
+
+	must.Equal(ExitUsage, code)
+	must.True(strings.HasPrefix(stderr, "chiron: "), "stderr: %q", stderr)
+}
+
+func TestExitCode_BudgetBlockIsBlocked(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		check.Fail("the budget gate must block before any request", "got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	code, _, stderr := executeCode(t, strings.NewReader(""),
+		"research", "--query", "q", "--budget", "1.00", "-o", "none")
+
+	must.Equal(ExitBlocked, code)
+	must.True(strings.HasPrefix(stderr, "chiron: research blocked before any spend"), "stderr: %q", stderr)
+}
+
+func TestExitCode_DeclinedPlanIsBlocked(t *testing.T) {
+	must := require.New(t)
+
+	var bodies []map[string]any
+	server := newPlanFlowServer(t, &bodies)
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+
+	// /dev/null is a character device, so it passes for a terminal; the
+	// plan reader meets end of input and aborts, which declines the plan.
+	devNull, err := os.Open(os.DevNull)
+	must.NoError(err)
+	defer devNull.Close()
+
+	code, _, stderr := executeCode(t, devNull,
+		"research", "--query", "smoke question", "--plan", "-o", "none")
+
+	must.Equal(ExitBlocked, code, "stderr:\n%s", stderr)
+	// The one create is the paid planning create, sent before the review;
+	// the declined plan must never start the research run chained from it.
+	must.Len(bodies, 1, "want the planning create only")
+	must.NotContains(bodies[0], "previous_interaction_id")
+}
+
+// TestResearchPlan_PipedApprovalIsRefused proves that approval text on a
+// pipe cannot approve --plan spend. The base config comes from a file so the
+// pipe is left for the plan reader, which would accept "a"; without
+// --accept-plan the review is refused before the planning create, so no
+// request is sent at all.
+func TestResearchPlan_PipedApprovalIsRefused(t *testing.T) {
+	must := require.New(t)
+
+	var bodies []map[string]any
+	server := newPlanFlowServer(t, &bodies)
+	defer server.Close()
+	t.Setenv("CHIRON_GEMINI_BASE_URL", server.URL)
+	t.Setenv("GEMINI_API_KEY", "test-key")
+	base := filepath.Join(t.TempDir(), "base.yaml")
+	must.NoError(os.WriteFile(base, []byte("query: smoke question\n"), 0o600))
+
+	_, _, err := executeWithStdin(t, pipedStdin(t, "a\n"),
+		"research", "--config", base, "--plan", "-o", "none")
+
+	must.ErrorContains(err, "--accept-plan")
+	must.Empty(bodies, "no create may be sent, planning or research")
+}
+
+// executeChildRole marks the child process of
+// TestExecute_ExitsWithBlockedStatusThroughProcess.
+const executeChildRole = "CHIRON_TEST_EXECUTE_CHILD"
+
+// TestExecute_ExitsWithBlockedStatusThroughProcess runs the real entry
+// point in a child process, the only way to observe the integer Execute
+// hands to os.Exit and the line it prints on the process's own stderr.
+func TestExecute_ExitsWithBlockedStatusThroughProcess(t *testing.T) {
+	if os.Getenv(executeChildRole) == "1" {
+		os.Args = []string{"chiron", "research", "--query", "q", "--budget", "1.00", "-o", "none"}
+		os.Exit(Execute())
+	}
+
+	must := require.New(t)
+	check := assert.New(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		check.Fail("the budget gate must block before any request", "got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExecute_ExitsWithBlockedStatusThroughProcess$")
+	// An explicit environment, so nothing ambient reaches the child.
+	cmd.Env = []string{
+		executeChildRole + "=1",
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"CHIRON_GEMINI_BASE_URL=" + server.URL,
+		"GEMINI_API_KEY=test-key",
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	var exitErr *exec.ExitError
+	must.ErrorAs(err, &exitErr, "child stdout: %s\nstderr: %s", stdout.String(), stderr.String())
+	must.Equal(ExitBlocked, exitErr.ExitCode(), "stderr:\n%s", stderr.String())
+	must.True(strings.HasPrefix(stderr.String(), "chiron: research blocked before any spend"), "stderr: %q", stderr.String())
+}
