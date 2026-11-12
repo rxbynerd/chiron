@@ -15,12 +15,17 @@ import (
 type fakeT struct {
 	errors []string
 	fatals []string
+	logs   []string
 }
 
 func (f *fakeT) Helper() {}
 
 func (f *fakeT) Errorf(format string, args ...any) {
 	f.errors = append(f.errors, fmt.Sprintf(format, args...))
+}
+
+func (f *fakeT) Logf(format string, args ...any) {
+	f.logs = append(f.logs, fmt.Sprintf(format, args...))
 }
 
 // Fatalf ends the calling goroutine, like testing.T.Fatalf.
@@ -169,6 +174,38 @@ func TestCompare_RejectsAnyOtherNonEmptyValue(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join("testdata", "a.txt"))
 			must.NoError(err)
 			check.Equal("alpha\n", string(content), "a rejected value must not rewrite the file")
+		})
+	}
+}
+
+func TestCompare_Update_LogsOnlyFilesItChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		file     string
+		existing string
+		got      string
+		logged   bool
+	}{
+		{name: "creates a file", file: "new.txt", got: "fresh\n", logged: true},
+		{name: "changes a file", file: "a.txt", existing: "old\n", got: "new\n", logged: true},
+		{name: "leaves an identical file alone", file: "a.txt", existing: "same\n", got: "same\n", logged: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
+			inTempDir(t, "a.txt", tt.existing)
+			t.Setenv(updateEnv, updateValue)
+			path := filepath.Join("testdata", tt.file)
+
+			f := compareOnFake(path, []byte(tt.got))
+
+			check.Empty(f.fatals)
+			if !tt.logged {
+				check.Empty(f.logs)
+				return
+			}
+			must.Len(f.logs, 1)
+			check.Contains(f.logs[0], path)
 		})
 	}
 }

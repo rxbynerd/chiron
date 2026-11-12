@@ -8,6 +8,7 @@
 package golden
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ const (
 type tb interface {
 	assert.TestingT
 	Helper()
+	Logf(format string, args ...any)
 	Fatalf(format string, args ...any)
 }
 
@@ -34,7 +36,7 @@ type tb interface {
 // fails the test without stopping it, so a caller comparing several goldens
 // reports every mismatch. When CHIRON_UPDATE_GOLDEN is 1, Assert instead
 // writes exactly got to the file, creating its directory, and compares
-// nothing.
+// nothing; it logs each file it creates or changes.
 func Assert(t *testing.T, name string, got []byte) {
 	t.Helper()
 	compare(t, filepath.Join("testdata", filepath.FromSlash(name)), got)
@@ -47,9 +49,7 @@ func compare(t tb, path string, got []byte) {
 		t.Fatalf("%v", err)
 	}
 	if update {
-		if err := write(path, got); err != nil {
-			t.Fatalf("update golden %s: %v", path, err)
-		}
+		rewrite(t, path, got)
 		return
 	}
 	want, err := os.ReadFile(path)
@@ -58,6 +58,18 @@ func compare(t tb, path string, got []byte) {
 	}
 	assert.Equal(t, string(want), string(got),
 		"golden %s differs (regenerate with %s=%s and review the diff)", path, updateEnv, updateValue)
+}
+
+// rewrite writes got to path unless the file already holds exactly got.
+func rewrite(t tb, path string, got []byte) {
+	t.Helper()
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, got) {
+		return
+	}
+	if err := write(path, got); err != nil {
+		t.Fatalf("update golden %s: %v", path, err)
+	}
+	t.Logf("updated golden %s", path)
 }
 
 func updateRequested() (bool, error) {
