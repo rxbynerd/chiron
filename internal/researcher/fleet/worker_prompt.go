@@ -177,16 +177,37 @@ const (
 		"insufficient, say so in the answer."
 )
 
-// kickoffMessage is the first user turn; the model's reply is its first
-// action.
-const kickoffMessage = "Begin. Return your first action as a JSON object matching the schema."
+// kickoffMessage is the first user turn, stating the turn budget; the
+// model's reply is its first action.
+func kickoffMessage(maxTurns int) string {
+	unit := "turns"
+	if maxTurns == 1 {
+		unit = "turn"
+	}
+	return fmt.Sprintf("Begin. You have at most %d %s, and the last accepts only a final answer. "+
+		"Return your first action as a JSON object matching the schema.", maxTurns, unit)
+}
 
 // initialTranscript is the transcript before the first model turn.
-func initialTranscript(brief Brief, recall bool) []model.Message {
+func initialTranscript(brief Brief, recall bool, maxTurns int) []model.Message {
 	return []model.Message{
 		{Role: model.RoleSystem, Content: buildSystemPrompt(brief, recall)},
-		{Role: model.RoleUser, Content: kickoffMessage},
+		{Role: model.RoleUser, Content: kickoffMessage(maxTurns)},
 	}
+}
+
+// turnNote is the budget line appended to the user message a turn answers.
+// The first turn's note is empty unless it is also the last, because the
+// kickoff already states the budget.
+func turnNote(turn, maxTurns int, last bool) string {
+	if !last {
+		if turn == 1 {
+			return ""
+		}
+		return fmt.Sprintf("Turn %d of %d.", turn, maxTurns)
+	}
+	return fmt.Sprintf("Turn %d of %d. This is your last turn, so only the final action is accepted: "+
+		"deliver your final answer now from the sources gathered so far, citing them.", turn, maxTurns)
 }
 
 // Tool results are wrapped in explicit delimiters so the model can tell

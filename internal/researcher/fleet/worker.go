@@ -53,10 +53,11 @@ type Finding struct {
 	// EstimatedCostGBP stays 0 and the token counts are the spend signal.
 	Usage types.Usage
 	// Status is the terminal outcome: Completed when the model delivered a
-	// final answer within the caps; Incomplete when a cap, the context, or a
-	// truncated reply stopped the loop; Failed when a model error, an invalid
-	// action, or repeated tool failures ended it. Citations gathered before a
-	// stop are preserved on every outcome.
+	// final answer, including on the final-only last turn a cap imposes;
+	// Incomplete when a cap, the context, or a truncated reply stopped the
+	// loop before one; Failed when a model error, an invalid action, or
+	// repeated tool failures ended it. Citations gathered before a stop are
+	// preserved on every outcome.
 	Status types.Status
 	// Detail is a human-readable reason accompanying an Incomplete or Failed
 	// outcome, empty on success. It is scrubbed and bounded in length.
@@ -90,9 +91,11 @@ type Progress struct {
 	WorkerID string
 }
 
-// Caps bound one worker run deterministically. Exceeding a cap ends the loop
-// with StatusIncomplete rather than an error: a bounded, partial finding is a
-// legitimate outcome, not a fault.
+// Caps bound one worker run deterministically. A turn that the turn, token
+// or cost cap makes the last is offered only the final action, so a capped
+// run still returns an answer from the sources it gathered. A run that ends
+// on a cap without one is StatusIncomplete rather than an error, because a
+// bounded, partial finding is a legitimate outcome, not a fault.
 type Caps struct {
 	// MaxTurns caps the number of model turns. It must be positive; it is the
 	// primary runaway guard.
@@ -244,6 +247,10 @@ func runWorker(ctx context.Context, deps WorkerDeps, brief Brief, progressGate <
 	if span != nil {
 		span.SetAttr("status", string(finding.Status))
 		span.SetAttr("turns", w.turns)
+		span.SetAttr("final_only_turn", w.finalOnlyCap != "")
+		if w.finalOnlyCap != "" {
+			span.SetAttr("final_only_cap", string(w.finalOnlyCap))
+		}
 		span.SetAttr("dropped_citations", w.droppedCitations)
 		if finding.Detail != "" {
 			span.SetAttr("detail", finding.Detail)
@@ -295,13 +302,29 @@ type workerRun struct {
 	turns            int
 	toolFailures     int
 	droppedCitations int
+	// prevTurnUsage is the most recent model turn's own usage, from which
+	// the token and cost caps predict the next turn.
+	prevTurnUsage model.Usage
+	// finalOnlyCap names the cap that made the run's last turn final-only;
+	// empty when no turn was.
+	finalOnlyCap capKind
 }
+
+// capKind names one of the caps checked before each turn.
+type capKind string
+
+const (
+	capTurns  capKind = "turns"
+	capTokens capKind = "tokens"
+	capCost   capKind = "cost"
+)
 
 // loop runs the turn loop to a terminal Finding. The caps are checked at the
 // top of each turn so a run that has already spent its budget stops before
-// paying for another model turn.
+// paying for another model turn, and a turn a cap makes the last is
+// final-only.
 func (w *workerRun) loop(ctx context.Context) Finding {
-	w.transcript = initialTranscript(w.brief, w.recallEnabled())
+	w.transcript = initialTranscript(w.brief, w.recallEnabled(), w.deps.Caps.MaxTurns)
 	w.seenURLs = map[string]bool{}
 	w.citableRefs = map[string]bool{}
 	w.titles = map[string]string{}
@@ -310,33 +333,81 @@ func (w *workerRun) loop(ctx context.Context) Finding {
 		if err := ctx.Err(); err != nil {
 			return w.incomplete("worker context ended: " + w.scrub(err.Error()))
 		}
-		if w.turns >= w.deps.Caps.MaxTurns {
-			return w.incomplete(fmt.Sprintf("reached the %d-turn cap before a final answer", w.deps.Caps.MaxTurns))
-		}
-		if w.deps.Caps.MaxTokens > 0 && totalTokens(w.usage) >= w.deps.Caps.MaxTokens {
-			return w.incomplete(fmt.Sprintf("reached the %d-token cap before a final answer", w.deps.Caps.MaxTokens))
-		}
-		if w.deps.Caps.CeilingGBP > 0 && w.usage.EstimatedCostGBP >= w.deps.Caps.CeilingGBP {
-			return w.incomplete(fmt.Sprintf("reached the £%.2f cost ceiling before a final answer", w.deps.Caps.CeilingGBP))
+		if c := w.reachedCap(); c != "" {
+			return w.incomplete(w.capDetail(c))
 		}
 
-		done, finding := w.turn(ctx)
+		done, finding := w.turn(ctx, w.lastTurnCap())
 		if done {
 			return finding
 		}
 	}
 }
 
+// reachedCap names the first cap the run has already reached, or "".
+func (w *workerRun) reachedCap() capKind {
+	c := w.deps.Caps
+	switch {
+	case w.turns >= c.MaxTurns:
+		return capTurns
+	case c.MaxTokens > 0 && totalTokens(w.usage) >= c.MaxTokens:
+		return capTokens
+	case c.CeilingGBP > 0 && w.usage.EstimatedCostGBP >= c.CeilingGBP:
+		return capCost
+	}
+	return ""
+}
+
+// lastTurnCap names the cap that makes the coming turn the last, or "". The
+// token and cost caps predict the coming turn's spend as the previous turn's,
+// so the turn that would take the usage to the cap is the last.
+func (w *workerRun) lastTurnCap() capKind {
+	c := w.deps.Caps
+	prev := w.prevTurnUsage
+	switch {
+	case w.turns+1 >= c.MaxTurns:
+		return capTurns
+	case c.MaxTokens > 0 && totalTokens(w.usage)+prev.InputTokens+prev.OutputTokens >= c.MaxTokens:
+		return capTokens
+	case c.CeilingGBP > 0 && w.usage.EstimatedCostGBP+costGBP(prev.InputTokens, prev.OutputTokens, c.InputGBPPerMTok, c.OutputGBPPerMTok) >= c.CeilingGBP:
+		return capCost
+	}
+	return ""
+}
+
+// capDetail is the Finding detail for a run a cap ended without a final
+// answer.
+func (w *workerRun) capDetail(c capKind) string {
+	switch c {
+	case capTokens:
+		return fmt.Sprintf("reached the %d-token cap before a final answer", w.deps.Caps.MaxTokens)
+	case capCost:
+		return fmt.Sprintf("reached the £%.2f cost ceiling before a final answer", w.deps.Caps.CeilingGBP)
+	default:
+		return fmt.Sprintf("reached the %d-turn cap before a final answer", w.deps.Caps.MaxTurns)
+	}
+}
+
 // turn runs one iteration: one model call, then dispatch of the returned
-// action. It returns done=true with the terminal Finding when the loop should
-// stop; done=false to continue.
-func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
+// action. A non-empty last names the cap that makes this turn the last: the
+// model is told so and offered only the final action, and any other action
+// it returns ends the run on that cap without being dispatched. It returns
+// done=true with the terminal Finding when the loop should stop; done=false
+// to continue.
+func (w *workerRun) turn(ctx context.Context, last capKind) (bool, Finding) {
 	w.turns++
+	finalOnly := last != ""
+	w.noteTurn(turnNote(w.turns, w.deps.Caps.MaxTurns, finalOnly))
+	schema := actionSchemaFor(w.recallEnabled())
+	if finalOnly {
+		w.finalOnlyCap = last
+		schema = finalOnlySchemaFor(w.recallEnabled())
+	}
 
 	resp, err := w.deps.Model.Generate(ctx, model.Request{
 		Messages:   w.transcript,
 		MaxTokens:  w.turnCompletionCap(),
-		JSONSchema: actionSchemaFor(w.recallEnabled()),
+		JSONSchema: schema,
 		SchemaName: actionSchemaName,
 	})
 	if err != nil {
@@ -360,6 +431,9 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 		// guarantee.
 		return true, w.failed("invalid model action: " + w.scrub(err.Error()))
 	}
+	if finalOnly && act.Kind != actionFinal {
+		return true, w.incomplete(w.capDetail(last))
+	}
 	w.reportProgress(ctx, act)
 
 	switch act.Kind {
@@ -374,6 +448,20 @@ func (w *workerRun) turn(ctx context.Context) (bool, Finding) {
 	default:
 		return true, w.failed(fmt.Sprintf("unhandled action %q", act.Kind))
 	}
+}
+
+// noteTurn appends the coming turn's budget note to the trailing user
+// message rather than adding a message, so the transcript keeps alternating
+// roles for providers whose chat templates require it.
+func (w *workerRun) noteTurn(note string) {
+	if note == "" {
+		return
+	}
+	if n := len(w.transcript); n > 0 && w.transcript[n-1].Role == model.RoleUser {
+		w.transcript[n-1].Content += "\n\n" + note
+		return
+	}
+	w.transcript = append(w.transcript, model.Message{Role: model.RoleUser, Content: note})
 }
 
 // doSearch runs a search action, appends the results to the transcript, and
@@ -702,6 +790,7 @@ func citationTitle(s string) string {
 // accumulateModelUsage folds one model turn's usage into the running totals
 // and, when a price is configured, into the cost estimate.
 func (w *workerRun) accumulateModelUsage(u model.Usage) {
+	w.prevTurnUsage = u
 	w.usage.InputTokens += u.InputTokens
 	w.usage.OutputTokens += u.OutputTokens
 	w.usage.EstimatedCostGBP += costGBP(u.InputTokens, u.OutputTokens, w.deps.Caps.InputGBPPerMTok, w.deps.Caps.OutputGBPPerMTok)
