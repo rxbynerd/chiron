@@ -56,6 +56,11 @@ func TestAttrWords_ClassifiesBoilerplateAndContent(t *testing.T) {
 		{"main-nav", true, true},
 		{"related-content", true, true},
 		{"post comments", true, true},
+		{"pt-[calc(10rem+var(--banner-height,2.5rem))]", false, false},
+		{"[[data-banner-state=visible]_&]:top-[12rem]", false, false},
+		{"max-w-[calc(var(--content-width,100vw))]", false, false},
+		{"top-[var(--nav-height)] sidebar", true, false},
+		{"h-[var(--banner-height) footer", true, false},
 	} {
 		t.Run(tt.value, func(t *testing.T) {
 			must := require.New(t)
@@ -282,6 +287,24 @@ func TestParsePage_NestedLinkTextCountsAsLinkText(t *testing.T) {
 			must.Equal(want.text, got.text, "text bytes")
 		})
 	}
+}
+
+// TestExtract_BracketedClassValuesDoNotDropContent: a utility-CSS class whose
+// bracketed value names a banner height does not drop the wrapper holding a
+// page's main content.
+func TestExtract_BracketedClassValuesDoNotDropContent(t *testing.T) {
+	must := require.New(t)
+	src := `<body><div><p>Documentation index: fetch the complete index from the docs root.</p></div>` +
+		`<main id="content-container"><div class="flex gap-12 pt-[calc(10rem+var(--banner-height,2.5rem))]">` +
+		`<div id="toc" class="xl:flex [[data-banner-state=visible]_&]:top-[12rem]"><nav>On this page</nav></div>` +
+		`<div id="content-area"><h1>Run headless</h1><p>` + para + `</p><p>` + para + `</p></div>` +
+		`</div></main></body>`
+	must.Equal("main", rootNames(parsePage(src)), "content roots")
+	got := extract(src)
+	must.True(strings.HasPrefix(got, "Run headless"), "extracted text starts %q", got[:min(len(got), 40)])
+	must.Contains(got, para)
+	must.NotContains(got, "On this page")
+	must.NotContains(got, "Documentation index")
 }
 
 // TestExtract_CommaCreditIsCapped: a comma-stuffed paragraph earns at most ten

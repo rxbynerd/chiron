@@ -773,7 +773,9 @@ func tagAttrs(inner string) (id, class, role string) {
 // attrWords reports whether an id or class value has a boilerplate token and
 // whether it has a content token. The tokens are its runs of ASCII letters
 // and digits and, for a camelCase run, also the run's parts, so "SideBar",
-// "siteFooter" and "mainContent" all match.
+// "siteFooter" and "mainContent" all match. A bracketed part of a class name
+// is a CSS value or selector, not a name (see skipBracketed), and yields no
+// tokens.
 func attrWords(v string) (boilerplate, content bool) {
 	check := func(tok string) {
 		switch {
@@ -785,6 +787,10 @@ func attrWords(v string) (boilerplate, content bool) {
 	}
 	for i := 0; i < len(v); {
 		for i < len(v) && !isASCIIAlnum(v[i]) {
+			if v[i] == '[' {
+				i = skipBracketed(v, i)
+				continue
+			}
 			i++
 		}
 		start := i
@@ -808,6 +814,25 @@ func attrWords(v string) (boilerplate, content bool) {
 		}
 	}
 	return boilerplate, content
+}
+
+// skipBracketed returns the index just past the ']' that closes the '[' at
+// v[i], or of the first space when the class name ends first. Brackets nest,
+// as in the utility-CSS classes "pt-[calc(var(--banner-height))]" and
+// "[[data-state=open]_&]:hidden".
+func skipBracketed(v string, i int) int {
+	depth := 0
+	for ; i < len(v) && !isHTMLSpace(v[i]); i++ {
+		switch v[i] {
+		case '[':
+			depth++
+		case ']':
+			if depth--; depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return i
 }
 
 // hasFoldPrefix reports whether tok starts with any of words, ignoring ASCII

@@ -2934,3 +2934,22 @@ of nanoseconds (the "Durations serialise as strings" decision applies to
 `ResearchConfig` only), and `report.markdown` is a base64 string, because the
 field is a byte slice. Whether `report.markdown` should become a plain string
 is a separate decision; the golden files make that change a visible diff.
+
+## 2026-11-14 — Page extraction keeps content its classes misdescribe
+
+Two refinements to the 2026-09-25 entry "Fetched-page main-content
+extraction", which otherwise stands.
+
+**A bracketed part of a class name is not a word.** Utility-CSS frameworks
+such as Tailwind write arbitrary values and variants in square brackets:
+`pt-[calc(10rem+var(--banner-height,2.5rem))]`,
+`[[data-banner-state=visible]_&]:top-[12rem]`. The brackets hold CSS values
+and selectors, often naming another element's height or state, not the
+element's own role. `attrWords` therefore skips from a `[` to its matching
+`]` (brackets nest, and the end of the class name ends the skip) and takes
+tokens only from the rest, so `top-[var(--nav-height)] sidebar` still
+matches on `sidebar`. On a Tailwind-styled documentation page the wrapper
+inside `<main>` that held the whole article carried the first class above;
+its `banner` token dropped the wrapper, `<main>` was left with no text and
+failed the quarter-share test, and scoring chose a 147-byte notice over a
+30 KB article.
