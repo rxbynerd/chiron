@@ -2934,3 +2934,28 @@ of nanoseconds (the "Durations serialise as strings" decision applies to
 `ResearchConfig` only), and `report.markdown` is a base64 string, because the
 field is a byte slice. Whether `report.markdown` should become a plain string
 is a separate decision; the golden files make that change a visible diff.
+
+## 2026-11-14 — Strict schemas stay inside the subset every provider accepts
+
+The first live fleet run, against Anthropic's OpenAI-compatible endpoint,
+failed at the decompose call with HTTP 400: `For 'array' type, 'minItems'
+values other than 0 or 1 are not supported`. Anthropic's structured outputs
+(https://platform.claude.com/docs/en/build-with-claude/structured-outputs,
+"JSON Schema limitations", read 2026-11-14) accept `minItems` of 0 or 1 only
+and reject `maxItems`, string length bounds and numeric bounds. The
+2026-09-25 decomposition entry anticipated this for OpenAI fine-tuned models
+and named the fix.
+
+The decomposition schema no longer carries `minItems` or `maxItems`. The
+range of three to five briefs is stated in the lead's prompt and enforced by
+`parseDecomposition`, as it always was, so a reply outside the range still
+fails the run as an invalid plan.
+
+`model.ValidateStrictSchema` now also rejects `maxItems`, `uniqueItems`,
+`minLength`, `maxLength`, `minimum`, `maximum`, `exclusiveMinimum`,
+`exclusiveMaximum`, `multipleOf`, and `minItems` above 1, at any depth.
+`modeltest.FakeServer` applies the same function, so a schema one supported
+provider would refuse now fails in the unit tests rather than on a paid call.
+A bound a schema cannot state is enforced in Go after decoding. The list is
+the intersection of what OpenAI and Anthropic document; extend it when a
+live run against another provider finds a further rejected keyword.

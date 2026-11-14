@@ -163,8 +163,7 @@ func onlySpan(t *testing.T, out, name string) spanRecord {
 
 // TestDecompose_Schema_IsStrictAndPinned: the schema passes the provider's
 // strict rules, matches its snapshot byte for byte, carries exactly the four
-// brief fields plus target, states the brief range, and enumerates exactly
-// the live targets.
+// brief fields plus target, and enumerates exactly the live targets.
 func TestDecompose_Schema_IsStrictAndPinned(t *testing.T) {
 	must := require.New(t)
 	check := assert.New(t)
@@ -175,9 +174,7 @@ func TestDecompose_Schema_IsStrictAndPinned(t *testing.T) {
 	var schema struct {
 		Properties struct {
 			Briefs struct {
-				MinItems int `json:"minItems"`
-				MaxItems int `json:"maxItems"`
-				Items    struct {
+				Items struct {
 					Properties map[string]struct {
 						Enum []Target `json:"enum"`
 					} `json:"properties"`
@@ -188,8 +185,6 @@ func TestDecompose_Schema_IsStrictAndPinned(t *testing.T) {
 	}
 	must.NoError(json.Unmarshal(decomposeSchema, &schema), "decode schema")
 	briefs := schema.Properties.Briefs
-	check.Equal(minBriefs, briefs.MinItems, "schema minItems")
-	check.Equal(maxBriefs, briefs.MaxItems, "schema maxItems")
 	want := []string{"boundaries", "objective", "output_format", "source_guidance", "target"}
 	check.Equal(want, slices.Sorted(maps.Keys(briefs.Items.Properties)), "brief properties")
 	check.Equal(want, slices.Sorted(slices.Values(briefs.Items.Required)), "brief required fields")

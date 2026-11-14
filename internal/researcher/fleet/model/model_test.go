@@ -140,6 +140,34 @@ func TestValidateStrictSchema_AcceptsAndRejects(t *testing.T) {
 			wantErr: `at /$defs/a~1b: property "k" must be listed in required`,
 		},
 		{
+			name:   "minItems of one",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"xs":{"type":"array","minItems":1,"items":{"type":"string"}}},"required":["xs"]}`,
+		},
+		{
+			name:    "minItems above one",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"xs":{"type":"array","minItems":3,"items":{"type":"string"}}},"required":["xs"]}`,
+			wantErr: "strict schema at /properties/xs: minItems must be 0 or 1",
+		},
+		{
+			name:    "maxItems on an array",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"xs":{"type":"array","maxItems":5,"items":{"type":"string"}}},"required":["xs"]}`,
+			wantErr: "strict schema at /properties/xs: maxItems is not supported by every provider",
+		},
+		{
+			name:    "string length bound inside array items",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"xs":{"type":"array","items":{"type":"string","maxLength":8}}},"required":["xs"]}`,
+			wantErr: "strict schema at /properties/xs/items: maxLength is not supported by every provider",
+		},
+		{
+			name:    "numeric bound",
+			schema:  `{"type":"object","additionalProperties":false,"properties":{"n":{"type":"integer","minimum":1}},"required":["n"]}`,
+			wantErr: "strict schema at /properties/n: minimum is not supported by every provider",
+		},
+		{
+			name:   "property named like a constraint keyword",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"maxItems":{"type":"integer"}},"required":["maxItems"]}`,
+		},
+		{
 			name:    "not JSON",
 			schema:  `{"type":`,
 			wantErr: "not valid JSON",

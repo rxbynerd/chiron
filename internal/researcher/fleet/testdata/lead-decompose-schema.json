@@ -5,8 +5,6 @@
     "briefs": {
       "type": "array",
       "description": "Three to five worker briefs that together cover the research question without overlapping.",
-      "minItems": 3,
-      "maxItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
