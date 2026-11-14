@@ -357,13 +357,13 @@ func (w *Worker) rememberFinding(ctx context.Context, id, objective string, f Fi
 
 // rememberedFinding is the Memory saved for a finding: the objective on one
 // line, a provenance line, the objective in full when it does not fit on that
-// line, the answer, and the cited locators, scrubbed and bounded to
-// maxRememberBytes. The header leads the text because a store may keep only
+// line, the answer, and the cited locators, scrubbed by credential shape and
+// bounded to maxRememberBytes. The header leads the text because a store may keep only
 // the text, dropping the labels, and name a memory from its first line: the
 // first line must be the objective and the second must say that the memory
 // is an unreviewed worker finding and which run produced it.
 func rememberedFinding(id, objective string, f Finding, saved time.Time) memory.Memory {
-	objective = secret.Scrub(objective)
+	objective = secret.ScrubShapes(objective)
 	name := boundRunes(oneLine(objective), maxRememberName)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n(Chiron worker finding; interaction %s; saved %s)\n\n", name, id, saved.UTC().Format(time.RFC3339))
@@ -380,7 +380,7 @@ func rememberedFinding(id, objective string, f Finding, saved time.Time) memory.
 		}
 	}
 	return memory.Memory{
-		Text: boundBytes(secret.Scrub(b.String()), maxRememberBytes),
+		Text: boundBytes(secret.ScrubShapes(b.String()), maxRememberBytes),
 		Meta: memory.ArtifactMeta{
 			Name: name,
 			Labels: map[string]string{

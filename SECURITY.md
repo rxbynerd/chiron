@@ -23,6 +23,16 @@ machinery.
   tracer that tests use, the CLI's stderr error line, and streamed
   thought-summary deltas, which can quote credentials found in `--input`
   documents back out.
+- Model-written report text, and the findings saved to the knowledge store,
+  pass through `secret.ScrubShapes` instead. It redacts credential shapes
+  only (header forms, bearer values, Basic credentials, JSON Web Tokens,
+  PEM private keys, and the Google, Langfuse, `sk-`, GitHub, Slack, Stripe,
+  AWS, Google OAuth and Hugging Face key shapes) and applies no high-entropy
+  backstop, which would redact commit hashes, checksums and URL paths. The
+  run's own credentials never reach the model, but a fetched page, a search
+  snippet or a knowledge-store recall can quote a third party's. A credential
+  in a format that is not listed therefore reaches the report and, with
+  `fleet.knowledge_remember`, persists in the shared knowledge store.
 
 ## Network
 

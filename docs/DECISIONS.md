@@ -2934,3 +2934,66 @@ of nanoseconds (the "Durations serialise as strings" decision applies to
 `ResearchConfig` only), and `report.markdown` is a base64 string, because the
 field is a byte slice. Whether `report.markdown` should become a plain string
 is a separate decision; the golden files make that change a visible diff.
+
+## 2026-11-14 — Report text is scrubbed by credential shape only
+
+Model-written report text, and the findings saved to the knowledge store,
+were passed through `secret.Scrub`. Its high-entropy backstop redacts a
+hexadecimal run of 40 or more characters containing four digits and a
+mixed-case run with digits and high entropy, and its bearer pattern redacts
+the word after "bearer" whatever it is. In live runs that produced
+`Application bearer [REDACTED:bearer-token] with scopes, expiry, revocation`
+and a Markdown link to a GitHub source file whose whole URL path was
+replaced by `[REDACTED:high-entropy]`. Commit hashes, checksums and image
+digests would be lost the same way, and the saved copy cannot be repaired.
+
+`secret.ScrubShapes` now serves report text. It applies no entropy
+backstop and redacts these shapes, and only these:
+
+- `x-goog-api-key` and `x-api-key` header or assignment values.
+- The value of an `Authorization` header or assignment with the Bearer
+  scheme, whatever its length or content (so `Authorization: Bearer token`
+  in documentation is redacted too).
+- A value after a bare "bearer" in prose, only when it is at least 16
+  characters with a digit. The scheme word may be followed by whitespace, a
+  colon, `%20` or a non-breaking space, and the value may be wrapped in
+  backticks, bold, quotes or a parenthesis.
+- Basic credentials that decode from base64 to something containing `:`,
+  including one followed by a full stop.
+- Google API keys, Langfuse keys, JSON Web Tokens, PEM private-key blocks
+  (to the END line, or to the end of the text when unterminated), Slack
+  tokens, Stripe secret and restricted keys, AWS access key ids, Google
+  OAuth access tokens, Hugging Face tokens, GitHub tokens, and the value of
+  `X-Amz-Signature=`.
+- `sk-` keys (OpenAI, Anthropic `sk-ant-` and compatible providers): `sk-`
+  followed by at least 32 key characters that are not a plain slug. A slug
+  is made only of segments separated by `-` or `_`, each a lower-case word
+  of at most 16 letters, a number of at most 4 digits, or a code of at most
+  3 lower-case letters and digits such as `v2`. Anything else (an upper-case
+  letter, a longer or mixed segment, as in `sk-proj-` and `sk-ant-api03-`)
+  is a key, so URL slugs such as `sk-telecom-annual-report-2024-results`
+  survive.
+
+`sanitiseAnswer` (and so the worker report and the fleet synthesis) and both
+scrubs in `rememberedFinding` use it. Its output is a fixed point, so a text
+scrubbed twice, as the stitched fallback does, is unchanged.
+
+`Scrub` still covers logs, spans, errors, stderr, progress text and gap
+details. The new shapes and the report-text bearer rules are not added to
+it, so its output for a given input is as before, with one exception that
+applies to both scrubbers: a Basic credential followed by a full stop is now
+redacted, where the full stop previously made the base64 decode fail. `Scrub`
+still rewrites a marker it wrote in an `x-api-key` value on a second pass;
+that is tracked separately.
+
+Residual risk. The run's own credentials never reach the model, so they
+cannot appear in report text. A third party's credentials can: the in-process
+agents refuse `--input`, so the sources are fetched pages, search snippets and
+knowledge-store recalls, any of which may quote a key. Report text and saved
+findings are scrubbed by shape only, so a credential in a format not listed
+above reaches the report and, with `fleet.knowledge_remember`, persists in
+the shared knowledge store. A bearer value in prose shorter than 16
+characters or without a digit is also kept. This is accepted because the
+alternative, the entropy backstop, corrupts the identifiers a research report
+exists to carry. Exact-match redaction of the run's own resolved secrets at
+the output sinks is a separate change and does not change this risk.

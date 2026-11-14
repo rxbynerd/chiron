@@ -571,3 +571,36 @@ func TestRememberedFinding_Bounds(t *testing.T) {
 	short := rememberedFinding("wkr_x", "q", Finding{Text: "leaks " + key, Status: types.StatusCompleted}, saved)
 	check.NotContains(short.Text, key, "saved text carries the credential")
 }
+
+// The saved text keeps identifiers a reader must be able to verify, such as a
+// commit hash in the answer or the objective, while still redacting a key.
+func TestRememberedFinding_KeepsCommitHash(t *testing.T) {
+	must := require.New(t)
+	const commit = "9fceb02d0ae598e95dc970b74767f19372d61af8"
+	saved := time.Date(2026, 9, 23, 10, 4, 5, 0, time.UTC)
+
+	f := Finding{
+		Text:      "The fix landed in " + commit + ".",
+		Citations: []types.Citation{{URI: "https://github.com/example/repo/commit/" + commit}},
+		Status:    types.StatusCompleted,
+	}
+	m := rememberedFinding("wkr_x", "what changed in "+commit+"?", f, saved)
+
+	must.Contains(m.Text, "The fix landed in "+commit+".")
+	must.Contains(m.Text, "https://github.com/example/repo/commit/"+commit)
+	must.Contains(m.Meta.Name, commit)
+}
+
+// A credential a fetched page quoted into the finding is redacted from the
+// saved text by shape, wherever it appears.
+func TestRememberedFinding_RedactsQuotedCredentialShapes(t *testing.T) {
+	must := require.New(t)
+	awsKey := joined("AK", "IA", "IOSFODNN7EXAMPLE")
+	saved := time.Date(2026, 9, 23, 10, 4, 5, 0, time.UTC)
+
+	f := Finding{Text: "The page shows " + awsKey + " in its example.", Status: types.StatusCompleted}
+	m := rememberedFinding("wkr_x", "what does the page show?", f, saved)
+
+	must.NotContains(m.Text, awsKey)
+	must.Contains(m.Text, "[REDACTED:aws-access-key-id]")
+}
