@@ -93,9 +93,11 @@ type Progress struct {
 
 // Caps bound one worker run deterministically. A turn that the turn, token
 // or cost cap makes the last is offered only the final action, so a capped
-// run still returns an answer from the sources it gathered. A run that ends
-// on a cap without one is StatusIncomplete rather than an error, because a
-// bounded, partial finding is a legitimate outcome, not a fault.
+// run returns an answer when the model delivers one on that turn. A run that
+// ends on a cap without one (the answer cut off, another action returned, or
+// a turn that outran the prediction) is StatusIncomplete rather than an
+// error, because a bounded, partial finding is a legitimate outcome, not a
+// fault.
 type Caps struct {
 	// MaxTurns caps the number of model turns. It must be positive; it is the
 	// primary runaway guard.
@@ -302,9 +304,11 @@ type workerRun struct {
 	turns            int
 	toolFailures     int
 	droppedCitations int
-	// prevTurnUsage is the most recent model turn's own usage, from which
-	// the token and cost caps predict the next turn.
+	// prevTurnUsage is the most recent model turn's own usage and
+	// prevCallBytes the transcript's size when that call was sent; the token
+	// and cost caps predict the coming turn from them.
 	prevTurnUsage model.Usage
+	prevCallBytes int
 	// finalOnlyCap names the cap that made the run's last turn final-only;
 	// empty when no turn was.
 	finalOnlyCap capKind
@@ -358,21 +362,52 @@ func (w *workerRun) reachedCap() capKind {
 	return ""
 }
 
-// lastTurnCap names the cap that makes the coming turn the last, or "". The
-// token and cost caps predict the coming turn's spend as the previous turn's,
-// so the turn that would take the usage to the cap is the last.
+// lastTurnCap names the cap that makes the coming turn the last, or "": the
+// turn cap on turn MaxTurns, or the token or cost cap when the usage so far
+// plus the coming turn's predicted usage would reach it.
 func (w *workerRun) lastTurnCap() capKind {
 	c := w.deps.Caps
-	prev := w.prevTurnUsage
+	next := w.predictedTurnUsage()
 	switch {
 	case w.turns+1 >= c.MaxTurns:
 		return capTurns
-	case c.MaxTokens > 0 && totalTokens(w.usage)+prev.InputTokens+prev.OutputTokens >= c.MaxTokens:
+	case c.MaxTokens > 0 && totalTokens(w.usage)+next.InputTokens+next.OutputTokens >= c.MaxTokens:
 		return capTokens
-	case c.CeilingGBP > 0 && w.usage.EstimatedCostGBP+costGBP(prev.InputTokens, prev.OutputTokens, c.InputGBPPerMTok, c.OutputGBPPerMTok) >= c.CeilingGBP:
+	case c.CeilingGBP > 0 && w.usage.EstimatedCostGBP+costGBP(next.InputTokens, next.OutputTokens, c.InputGBPPerMTok, c.OutputGBPPerMTok) >= c.CeilingGBP:
 		return capCost
 	}
 	return ""
+}
+
+// bytesPerTokenEstimate converts transcript bytes to tokens for the
+// coming-turn prediction. It errs towards more tokens than most tokenisers
+// produce for English text, so the prediction errs towards an early last
+// turn.
+const bytesPerTokenEstimate = 3
+
+// predictedTurnUsage estimates the coming turn's usage as the previous
+// turn's, with the bytes appended to the transcript since that call (the
+// reply and the tool result) added to the input at bytesPerTokenEstimate,
+// rounded up. It is a heuristic: a turn can still outrun it. Before the first
+// turn there is nothing to predict from, so it is zero.
+func (w *workerRun) predictedTurnUsage() model.Usage {
+	if w.turns == 0 {
+		return model.Usage{}
+	}
+	appended := max(transcriptBytes(w.transcript)-w.prevCallBytes, 0)
+	return model.Usage{
+		InputTokens:  w.prevTurnUsage.InputTokens + (appended+bytesPerTokenEstimate-1)/bytesPerTokenEstimate,
+		OutputTokens: w.prevTurnUsage.OutputTokens,
+	}
+}
+
+// transcriptBytes is the total size of the transcript's message contents.
+func transcriptBytes(msgs []model.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n
 }
 
 // capDetail is the Finding detail for a run a cap ended without a final
@@ -390,23 +425,26 @@ func (w *workerRun) capDetail(c capKind) string {
 
 // turn runs one iteration: one model call, then dispatch of the returned
 // action. A non-empty last names the cap that makes this turn the last: the
-// model is told so and offered only the final action, and any other action
-// it returns ends the run on that cap without being dispatched. It returns
+// model is told so and offered only the final action, and any other reply,
+// a non-final action or one that does not parse, ends the run Incomplete on
+// that cap without being dispatched. It returns
 // done=true with the terminal Finding when the loop should stop; done=false
 // to continue.
 func (w *workerRun) turn(ctx context.Context, last capKind) (bool, Finding) {
 	w.turns++
 	finalOnly := last != ""
-	w.noteTurn(turnNote(w.turns, w.deps.Caps.MaxTurns, finalOnly))
+	w.noteTurn(turnNote(w.turns, w.deps.Caps.MaxTurns, finalOnly), finalOnly)
 	schema := actionSchemaFor(w.recallEnabled())
 	if finalOnly {
 		w.finalOnlyCap = last
 		schema = finalOnlySchemaFor(w.recallEnabled())
 	}
+	completionCap := w.turnCompletionCap(finalOnly)
+	w.prevCallBytes = transcriptBytes(w.transcript)
 
 	resp, err := w.deps.Model.Generate(ctx, model.Request{
 		Messages:   w.transcript,
-		MaxTokens:  w.turnCompletionCap(),
+		MaxTokens:  completionCap,
 		JSONSchema: schema,
 		SchemaName: actionSchemaName,
 	})
@@ -422,17 +460,17 @@ func (w *workerRun) turn(ctx context.Context, last capKind) (bool, Finding) {
 	w.transcript = append(w.transcript, assistantEcho(resp.Content))
 
 	if resp.FinishReason == "length" {
-		return true, w.incomplete(fmt.Sprintf("the model's reply was cut off at the %d-token completion cap", w.turnCompletionCap()))
+		return true, w.incomplete(fmt.Sprintf("the model's reply was cut off at the %d-token completion cap", completionCap))
 	}
 
 	act, err := parseAction(resp.Content, w.recallEnabled())
+	if finalOnly && (err != nil || act.Kind != actionFinal) {
+		return true, w.refuseOnFinalOnly(last, err)
+	}
 	if err != nil {
 		// Refusing here, with no side effect, is the closed-vocabulary
 		// guarantee.
 		return true, w.failed("invalid model action: " + w.scrub(err.Error()))
-	}
-	if finalOnly && act.Kind != actionFinal {
-		return true, w.incomplete(w.capDetail(last))
 	}
 	w.reportProgress(ctx, act)
 
@@ -450,18 +488,28 @@ func (w *workerRun) turn(ctx context.Context, last capKind) (bool, Finding) {
 	}
 }
 
+// refuseOnFinalOnly ends a run whose final-only turn, imposed by cap c,
+// returned something other than a final action; parseErr is the reason when
+// the reply did not parse. Nothing is dispatched.
+func (w *workerRun) refuseOnFinalOnly(c capKind, parseErr error) Finding {
+	detail := w.capDetail(c)
+	if parseErr != nil {
+		detail += "; the reply to the final-only turn was not a valid action: " + w.scrub(parseErr.Error())
+	}
+	return w.incomplete(detail)
+}
+
 // noteTurn appends the coming turn's budget note to the trailing user
 // message rather than adding a message, so the transcript keeps alternating
 // roles for providers whose chat templates require it.
-func (w *workerRun) noteTurn(note string) {
-	if note == "" {
-		return
-	}
+func (w *workerRun) noteTurn(note string, last bool) {
 	if n := len(w.transcript); n > 0 && w.transcript[n-1].Role == model.RoleUser {
-		w.transcript[n-1].Content += "\n\n" + note
+		w.transcript[n-1].Content = withTurnNote(w.transcript[n-1].Content, note, last)
 		return
 	}
-	w.transcript = append(w.transcript, model.Message{Role: model.RoleUser, Content: note})
+	if note != "" {
+		w.transcript = append(w.transcript, model.Message{Role: model.RoleUser, Content: note})
+	}
 }
 
 // doSearch runs a search action, appends the results to the transcript, and
@@ -803,11 +851,13 @@ func costGBP(inputTokens, outputTokens int, inputGBPPerMTok, outputGBPPerMTok fl
 }
 
 // turnCompletionCap is the completion cap for one model turn: the fixed
-// per-turn cap, narrowed to whatever remains under the token cap so no turn
-// overshoots the accumulated cap by a full completion.
-func (w *workerRun) turnCompletionCap() int {
+// per-turn cap, narrowed on an ordinary turn to whatever remains under the
+// token cap so that turn cannot overshoot the cap by a full completion. A
+// final-only turn keeps the full cap: it is the run's last, and narrowing it
+// could only cut the answer off.
+func (w *workerRun) turnCompletionCap(finalOnly bool) int {
 	capTokens := turnCompletionTokens
-	if w.deps.Caps.MaxTokens > 0 {
+	if w.deps.Caps.MaxTokens > 0 && !finalOnly {
 		remaining := w.deps.Caps.MaxTokens - totalTokens(w.usage)
 		if remaining < 1 {
 			remaining = 1

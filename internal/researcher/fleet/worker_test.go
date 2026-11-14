@@ -226,8 +226,11 @@ func TestRunWorkerCapsStopDeterministically(t *testing.T) {
 
 			c := caps()
 			c.MaxTurns = tt.maxTurns
-			m := &cappedModel{t: t, usage: model.Usage{InputTokens: 10, OutputTokens: 2}, ignoreFinalOnly: tt.ignore}
-			finding, searches := runCapped(t, m, c, nil)
+			m := &cappedModel{t: t, usage: model.Usage{InputTokens: 10, OutputTokens: 2}}
+			if tt.ignore {
+				m.finalOnlyReply = cappedSearch
+			}
+			finding, searches := runCapped(t, m, c)
 
 			must.Equal(tt.wantStatus, finding.Status, "detail: %s", finding.Detail)
 			check.Equal(tt.wantText, finding.Text)
@@ -237,8 +240,14 @@ func TestRunWorkerCapsStopDeterministically(t *testing.T) {
 			check.Equal(tt.maxTurns-1, searches, "searches, none on the final-only turn")
 			check.Equal(tt.maxTurns-1, finding.Usage.SearchCount)
 			must.Len(lastMsgs, tt.maxTurns)
-			check.True(strings.HasSuffix(lastMsgs[tt.maxTurns-1], turnNote(tt.maxTurns, tt.maxTurns, true)),
-				"the final-only turn's message does not end with the last-turn note:\n%s", lastMsgs[tt.maxTurns-1])
+			last := lastMsgs[tt.maxTurns-1]
+			wantEnd := "\n\n" + turnNote(tt.maxTurns, tt.maxTurns, true)
+			if tt.maxTurns > 1 {
+				// The search result's invitation to search or fetch again is dropped.
+				wantEnd = toolResultClose + wantEnd
+			}
+			check.True(strings.HasSuffix(last, wantEnd), "the final-only turn's message does not end with the last-turn note:\n%s", last)
+			check.NotContains(last, "Choose", "the final-only turn's message still invites another action")
 			// A citation counts only once a search has returned its URL.
 			check.Equal(tt.wantCites, finding.Citations)
 			if tt.ignore {

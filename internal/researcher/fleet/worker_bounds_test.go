@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/rxbynerd/chiron/internal/memory"
 	"github.com/rxbynerd/chiron/internal/researcher"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model"
 	"github.com/rxbynerd/chiron/internal/researcher/fleet/model/modeltest"
@@ -25,28 +26,33 @@ import (
 	"github.com/rxbynerd/chiron/internal/types"
 )
 
-// cappedModel stands in for a provider whose model searches on every turn
-// unless strict structured output restricts the action to final, as the
-// final-only schema does. With ignoreFinalOnly set it searches even then,
-// standing in for a provider that does not enforce the schema; with
-// answerAtOnce set it answers on every turn. Every reply reports usage. It
-// records each request's action enum and last message.
+// cappedModel stands in for a provider whose model never chooses final on
+// its own: on an ordinary turn it replies with script[i] for call i, or a
+// search once the script runs out; on a final-only turn strict structured
+// output forces a final answer citing cappedSourceURL. finalOnlyReply, when
+// set, replaces that answer, standing in for a provider that does not
+// enforce the schema; answerAtOnce answers on every turn. Every reply
+// reports usage. It records each request's action enum, last message and
+// completion cap.
 type cappedModel struct {
-	t               *testing.T
-	usage           model.Usage
-	ignoreFinalOnly bool
-	answerAtOnce    bool
+	t              *testing.T
+	usage          model.Usage
+	script         []string
+	finalOnlyReply string
+	answerAtOnce   bool
 
-	mu       sync.Mutex
-	enums    [][]string
-	lastMsgs []string
+	mu        sync.Mutex
+	enums     [][]string
+	lastMsgs  []string
+	maxTokens []int
 }
 
 // cappedAnswer is the answer cappedModel gives on a final-only turn, citing
-// cappedSourceURL.
+// cappedSourceURL; cappedSearch is its search action.
 const (
 	cappedAnswer    = "The answer from the sources gathered so far."
 	cappedSourceURL = "https://example.org/a"
+	cappedSearch    = `{"action":"search","query":"again","url":null,"answer":null,"citations":null}`
 )
 
 func (m *cappedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,15 +60,10 @@ func (m *cappedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Messages []struct {
 			Content string `json:"content"`
 		} `json:"messages"`
-		ResponseFormat struct {
+		MaxCompletionTokens int `json:"max_completion_tokens"`
+		ResponseFormat      struct {
 			JSONSchema struct {
-				Schema struct {
-					Properties struct {
-						Action struct {
-							Enum []string `json:"enum"`
-						} `json:"action"`
-					} `json:"properties"`
-				} `json:"schema"`
+				Schema json.RawMessage `json:"schema"`
 			} `json:"json_schema"`
 		} `json:"response_format"`
 	}
@@ -71,16 +72,23 @@ func (m *cappedModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	enum := body.ResponseFormat.JSONSchema.Schema.Properties.Action.Enum
+	enum := actionEnumOf(m.t, body.ResponseFormat.JSONSchema.Schema)
 	m.mu.Lock()
+	call := len(m.enums)
 	m.enums = append(m.enums, enum)
 	m.lastMsgs = append(m.lastMsgs, body.Messages[len(body.Messages)-1].Content)
+	m.maxTokens = append(m.maxTokens, body.MaxCompletionTokens)
 	m.mu.Unlock()
 
-	content := `{"action":"search","query":"again","url":null,"answer":null,"citations":null}`
-	if m.answerAtOnce || (slices.Equal(enum, []string{"final"}) && !m.ignoreFinalOnly) {
+	content := cappedSearch
+	switch finalOnly := slices.Equal(enum, finalOnlyEnum); {
+	case finalOnly && m.finalOnlyReply != "":
+		content = m.finalOnlyReply
+	case finalOnly || m.answerAtOnce:
 		content = `{"action":"final","query":null,"url":null,"answer":` + jsonString(cappedAnswer) +
 			`,"citations":[{"url":"` + cappedSourceURL + `","title":"A"}]}`
+	case call < len(m.script):
+		content = m.script[call]
 	}
 	writeChatReply(w, modeltest.FakeReply{Content: content, Usage: m.usage})
 }
@@ -93,10 +101,33 @@ func (m *cappedModel) requests() (enums [][]string, lastMsgs []string) {
 	return slices.Clone(m.enums), slices.Clone(m.lastMsgs)
 }
 
-// runCapped runs one worker against a cappedModel under c, tracing to tracer
-// when it is non-nil, with a search server returning cappedSourceURL, and
-// returns the finding and the number of searches the search server ran.
-func runCapped(t *testing.T, m *cappedModel, c Caps, tracer trace.Tracer) (Finding, int) {
+// completionCaps returns every request's completion cap, in arrival order.
+func (m *cappedModel) completionCaps() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.maxTokens)
+}
+
+// actionEnumOf decodes the action enum of a request's schema.
+func actionEnumOf(t *testing.T, schema json.RawMessage) []string {
+	var s struct {
+		Properties struct {
+			Action struct {
+				Enum []string `json:"enum"`
+			} `json:"action"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &s); err != nil {
+		t.Errorf("decode request schema: %v", err)
+	}
+	return s.Properties.Action.Enum
+}
+
+// runCapped runs one worker against a cappedModel under c, with a search
+// server returning cappedSourceURL, after applying opts to the worker's
+// deps, and returns the finding and the number of searches the search
+// server ran.
+func runCapped(t *testing.T, m *cappedModel, c Caps, opts ...func(*WorkerDeps)) (Finding, int) {
 	t.Helper()
 	modelSrv := httptest.NewServer(m)
 	defer modelSrv.Close()
@@ -104,13 +135,16 @@ func runCapped(t *testing.T, m *cappedModel, c Caps, tracer trace.Tracer) (Findi
 	defer searchSrv.Close()
 	mc, err := model.New(model.Options{Endpoint: modelSrv.URL, Model: "m", APIKey: "k"})
 	require.New(t).NoError(err, "model.New")
-	finding := RunWorker(context.Background(), WorkerDeps{
+	deps := WorkerDeps{
 		Model:  mc,
 		Search: newSearchClient(t, searchSrv),
 		Fetch:  newFetchClient(t),
-		Tracer: tracer,
 		Caps:   c,
-	}, Brief{Objective: "q"})
+	}
+	for _, opt := range opts {
+		opt(&deps)
+	}
+	finding := RunWorker(context.Background(), deps, Brief{Objective: "q"})
 	return finding, searchSrv.ToolCallCount()
 }
 
@@ -121,11 +155,13 @@ var (
 	finalOnlyEnum   = []string{"final"}
 )
 
-// TestRunWorkerTokenCapStops: when the tokens so far plus the previous
-// turn's would reach MaxTokens, the coming turn is final-only. A model that
-// answers it completes with text; one that searches instead ends Incomplete
-// on the token cap with no search run. When a turn outgrows that prediction,
-// the cap still stops the loop before the next paid turn.
+// TestRunWorkerTokenCapStops: when the tokens so far plus the coming turn's
+// predicted tokens would reach MaxTokens, the coming turn is final-only with
+// the full completion cap. A model that answers it completes with text; one
+// that searches instead ends Incomplete on the token cap with no search run.
+// The prediction counts a large tool result appended since the last call.
+// When a turn outruns the prediction, the cap still stops the loop before
+// the next paid turn.
 func TestRunWorkerTokenCapStops(t *testing.T) {
 	t.Run("final-only turn answered", func(t *testing.T) {
 		must := require.New(t)
@@ -133,7 +169,7 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		c := caps()
 		c.MaxTokens = 100
 		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 40, OutputTokens: 20}}
-		finding, searches := runCapped(t, m, c, nil)
+		finding, searches := runCapped(t, m, c)
 
 		must.Equal(types.StatusCompleted, finding.Status, "detail: %s", finding.Detail)
 		check.Equal(cappedAnswer, finding.Text)
@@ -141,6 +177,8 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		// 60 tokens after turn 1, plus turn 1's 60, reaches the cap, so turn 2 is final-only.
 		check.Equal([][]string{everyActionEnum, finalOnlyEnum}, enums, "action enum per request")
 		check.Contains(lastMsgs[1], turnNote(2, c.MaxTurns, true))
+		check.Equal([]int{100, turnCompletionTokens}, m.completionCaps(),
+			"completion cap per request: narrowed to the tokens left, then full on the final-only turn")
 		check.Equal(1, searches)
 		check.Equal(120, totalTokens(finding.Usage))
 	})
@@ -149,8 +187,8 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		check := assert.New(t)
 		c := caps()
 		c.MaxTokens = 100
-		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 40, OutputTokens: 20}, ignoreFinalOnly: true}
-		finding, searches := runCapped(t, m, c, nil)
+		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 40, OutputTokens: 20}, finalOnlyReply: cappedSearch}
+		finding, searches := runCapped(t, m, c)
 
 		must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
 		check.Contains(finding.Detail, "100-token cap")
@@ -159,7 +197,32 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		check.Equal([][]string{everyActionEnum, finalOnlyEnum}, enums, "action enum per request")
 		check.Equal(1, searches, "the search returned on the final-only turn must not run")
 	})
-	t.Run("cap stops a turn that outgrew the prediction", func(t *testing.T) {
+	t.Run("final-only turn after a large tool result", func(t *testing.T) {
+		must := require.New(t)
+		check := assert.New(t)
+		page := httptest.NewServer(plainTextPage(strings.Repeat("Long page text. ", 60_000/16)))
+		defer page.Close()
+		searchSrv := searchtest.NewFakeServer([]search.Result{{Title: "A", URL: page.URL}})
+		defer searchSrv.Close()
+		c := caps()
+		c.MaxTokens = 20_000
+		m := &cappedModel{
+			t:      t,
+			usage:  model.Usage{InputTokens: 2_000, OutputTokens: 100},
+			script: []string{cappedSearch, `{"action":"fetch","query":null,"url":"` + page.URL + `","answer":null,"citations":null}`},
+		}
+		finding, _ := runCapped(t, m, c, func(d *WorkerDeps) { d.Search = newSearchClient(t, searchSrv) })
+
+		must.Equal(types.StatusCompleted, finding.Status, "detail: %s", finding.Detail)
+		check.Equal(cappedAnswer, finding.Text)
+		enums, _ := m.requests()
+		// After turn 2, 4,200 tokens plus turn 2's 2,100 is far under the cap,
+		// but the 60 KB page appended since adds about 20,000 more, so turn 3
+		// is final-only.
+		check.Equal([][]string{everyActionEnum, everyActionEnum, finalOnlyEnum}, enums, "action enum per request")
+		check.Equal(turnCompletionTokens, m.completionCaps()[2], "the final-only turn's completion cap")
+	})
+	t.Run("cap stops a turn that outran the prediction", func(t *testing.T) {
 		must := require.New(t)
 		check := assert.New(t)
 		searchSrv := searchtest.NewFakeServer(nil)
@@ -167,10 +230,10 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		searchTurn := func(in, out int) modeltest.FakeReply {
 			return modeltest.FakeReply{Content: `{"action":"search","query":"again"}`, FinishReason: "stop", Usage: model.Usage{InputTokens: in, OutputTokens: out}}
 		}
-		modelSrv := modeltest.NewFakeServer(searchTurn(8, 2), searchTurn(80, 15), searchTurn(1, 1))
+		modelSrv := modeltest.NewFakeServer(searchTurn(8, 2), searchTurn(900, 100), searchTurn(1, 1))
 		defer modelSrv.Close()
 		c := caps()
-		c.MaxTokens = 100
+		c.MaxTokens = 1_000
 		finding := RunWorker(context.Background(), WorkerDeps{
 			Model:  newModelClient(t, modelSrv),
 			Search: newSearchClient(t, searchSrv),
@@ -179,21 +242,22 @@ func TestRunWorkerTokenCapStops(t *testing.T) {
 		}, Brief{Objective: "q"})
 
 		must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
-		check.Contains(finding.Detail, "100-token cap")
-		// 10 tokens plus turn 1's 10 is under the cap, so turn 2 is ordinary;
-		// its 95 take the total to 105, which stops the loop before turn 3.
+		check.Contains(finding.Detail, "1000-token cap")
+		// 10 tokens, plus turn 1's 10 and its short search result, is well
+		// under the cap, so turn 2 is ordinary; its 1,000 take the total to
+		// 1,010, which stops the loop before turn 3.
 		check.Equal(2, modelSrv.CallCount())
-		check.Equal(105, totalTokens(finding.Usage))
+		check.Equal(1_010, totalTokens(finding.Usage))
 		for i, req := range modelSrv.Requests() {
-			check.NotContains(string(req.Schema), `"enum":["final"]`, "request %d was final-only", i)
+			check.Equal(everyActionEnum, actionEnumOf(t, req.Schema), "request %d action enum", i)
 		}
 	})
 }
 
 // TestRunWorker_CostCeilingStops: with a price configured, the estimated
-// cost so far plus the previous turn's reaching the GBP ceiling makes the
-// coming turn final-only, and the ceiling still stops the loop when a turn
-// outgrows that prediction.
+// cost so far plus the coming turn's predicted cost reaching the GBP ceiling
+// makes the coming turn final-only, and the ceiling still stops the loop
+// when a turn outruns that prediction.
 func TestRunWorker_CostCeilingStops(t *testing.T) {
 	priced := func() Caps {
 		c := caps()
@@ -207,7 +271,7 @@ func TestRunWorker_CostCeilingStops(t *testing.T) {
 		check := assert.New(t)
 		c := priced()
 		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 1_000_000}}
-		finding, searches := runCapped(t, m, c, nil)
+		finding, searches := runCapped(t, m, c)
 
 		must.Equal(types.StatusCompleted, finding.Status, "detail: %s", finding.Detail)
 		check.Equal(cappedAnswer, finding.Text)
@@ -222,8 +286,8 @@ func TestRunWorker_CostCeilingStops(t *testing.T) {
 	t.Run("final-only turn ignored", func(t *testing.T) {
 		must := require.New(t)
 		check := assert.New(t)
-		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 1_000_000}, ignoreFinalOnly: true}
-		finding, searches := runCapped(t, m, priced(), nil)
+		m := &cappedModel{t: t, usage: model.Usage{InputTokens: 1_000_000}, finalOnlyReply: cappedSearch}
+		finding, searches := runCapped(t, m, priced())
 
 		must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
 		check.Contains(finding.Detail, "£3.00 cost ceiling")
@@ -231,7 +295,7 @@ func TestRunWorker_CostCeilingStops(t *testing.T) {
 		check.Equal([][]string{everyActionEnum, finalOnlyEnum}, enums, "action enum per request")
 		check.Equal(1, searches, "the search returned on the final-only turn must not run")
 	})
-	t.Run("ceiling stops a turn that outgrew the prediction", func(t *testing.T) {
+	t.Run("ceiling stops a turn that outran the prediction", func(t *testing.T) {
 		must := require.New(t)
 		check := assert.New(t)
 		searchSrv := searchtest.NewFakeServer(nil)
@@ -250,14 +314,50 @@ func TestRunWorker_CostCeilingStops(t *testing.T) {
 
 		must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
 		check.Contains(finding.Detail, "£3.00 cost ceiling")
-		// £1 plus turn 1's £1 is under the ceiling, so turn 2 is ordinary;
-		// its £3 take the total to £4, which stops the loop before turn 3.
+		// £1, plus turn 1's £1 and its short search result, is under the
+		// ceiling, so turn 2 is ordinary; its £3 take the total to £4, which
+		// stops the loop before turn 3.
 		check.Equal(2, modelSrv.CallCount())
 		check.InDelta(4.0, finding.Usage.EstimatedCostGBP, 0)
 		for i, req := range modelSrv.Requests() {
-			check.NotContains(string(req.Schema), `"enum":["final"]`, "request %d was final-only", i)
+			check.Equal(everyActionEnum, actionEnumOf(t, req.Schema), "request %d action enum", i)
 		}
 	})
+}
+
+// TestRunWorker_FinalOnlyTurnRefusesOtherReplies: on a final-only turn a
+// recall, an unknown action, or a reply that does not parse is not
+// dispatched and ends the run Incomplete on the cap that imposed the turn,
+// without contacting the knowledge store.
+func TestRunWorker_FinalOnlyTurnRefusesOtherReplies(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		reply      string
+		wantDetail []string
+	}{
+		{"recall", `{"action":"recall","query":"q","url":null,"answer":null,"citations":null}`, []string{"2-turn cap"}},
+		{"unknown action", `{"action":"shell","query":"rm -rf /"}`, []string{"2-turn cap", "not a valid action", "unknown action"}},
+		{"unparsable", `not json`, []string{"2-turn cap", "not a valid action"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
+			store := &staticRecall{hits: []memory.Recalled{billetHit("m1", "note", "text")}}
+			c := caps()
+			c.MaxTurns = 2
+			m := &cappedModel{t: t, finalOnlyReply: tt.reply}
+			finding, searches := runCapped(t, m, c, func(d *WorkerDeps) { d.Knowledge = store })
+
+			must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
+			for _, want := range tt.wantDetail {
+				check.Contains(finding.Detail, want)
+			}
+			enums, _ := m.requests()
+			check.Equal([][]string{{"search", "fetch", "recall", "final"}, finalOnlyEnum}, enums, "action enum per request")
+			check.Empty(store.calls, "knowledge store calls")
+			check.Equal(1, searches, "searches, none on the final-only turn")
+		})
+	}
 }
 
 // TestRunWorker_TimeoutMidTurnIsIncomplete: the per-worker timeout firing while
@@ -428,7 +528,7 @@ func TestRunWorker_Trace_RecordsFinalOnlyTurn(t *testing.T) {
 			check := assert.New(t)
 			var out bytes.Buffer
 			m := &cappedModel{t: t, usage: model.Usage{InputTokens: 40, OutputTokens: 20}, answerAtOnce: tt.answerAtOnce}
-			runCapped(t, m, tt.caps, trace.NewJSONL(&out))
+			runCapped(t, m, tt.caps, func(d *WorkerDeps) { d.Tracer = trace.NewJSONL(&out) })
 
 			spanLine := lineContaining(out.String(), `"`+trace.SpanWorker+`"`)
 			for _, attr := range tt.want {

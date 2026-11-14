@@ -281,3 +281,31 @@ func TestRunWorker_StatesTurnBudgetOnTheWire(t *testing.T) {
 		}
 	}
 }
+
+// TestWithTurnNote_FinalOnlyDropsNextActionInvitation: on an ordinary turn
+// the note follows each tool-result message whole; on the last turn every
+// message's invitation to choose another action is dropped, so the message
+// ends with the last-turn instruction alone.
+func TestWithTurnNote_FinalOnlyDropsNextActionInvitation(t *testing.T) {
+	const url = "https://example.org/page"
+	ordinary, last := turnNote(3, 8, false), turnNote(3, 8, true)
+	for _, tt := range []struct {
+		name    string
+		content string
+		end     string
+	}{
+		{"search results", searchResultsMessage("q", []search.Result{{Title: "t", URL: url}}, nil).Content, toolResultClose},
+		{"fetched page", fetchedPageMessage(url, "text/plain", "body", false).Content, toolResultClose},
+		{"recall results", recallResultsMessage("q", nil, DefaultMaxPageBytes).Content, toolResultClose},
+		{"error feedback", errorFeedbackMessage("the URL was not seen.").Content, "the URL was not seen."},
+		{"tool failure", toolFailureMessage("backend down").Content, toolResultClose},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.content+"\n\n"+ordinary, withTurnNote(tt.content, ordinary, false))
+			got := withTurnNote(tt.content, last, true)
+			must.True(strings.HasSuffix(got, tt.end+"\n\n"+last), "last-turn message:\n%s", got)
+			must.NotContains(got, "Choose")
+		})
+	}
+}

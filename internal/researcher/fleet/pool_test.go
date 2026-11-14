@@ -1059,20 +1059,21 @@ func TestReadFinding_AcceptsValidAndRejectsInvalid(t *testing.T) {
 }
 
 // TestPool_Run_AppliesPerWorkerCaps: every worker runs under the shared caps
-// unchanged: a one-turn cap stops each worker Incomplete after its single
-// turn, and the token cap bounds each turn's completion.
+// unchanged: a two-turn cap stops each worker Incomplete after its second,
+// final-only turn, and the token cap bounds each ordinary turn's completion
+// while the final-only turn keeps the full one.
 func TestPool_Run_AppliesPerWorkerCaps(t *testing.T) {
 	must := require.New(t)
 	searchTurn := modeltest.FakeReply{Content: `{"action":"search","query":"again"}`, FinishReason: "stop"}
-	modelSrv := modeltest.NewFakeServer(searchTurn, searchTurn, searchTurn)
+	modelSrv := modeltest.NewFakeServer(searchTurn, searchTurn, searchTurn, searchTurn, searchTurn, searchTurn)
 	defer modelSrv.Close()
 	searchSrv := searchtest.NewFakeServer(nil)
 	defer searchSrv.Close()
 	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
 
 	deps := poolWorkerDeps(t, newModelClient(t, modelSrv), searchSrv)
-	deps.Caps.MaxTurns = 1
-	deps.Caps.MaxTokens = 100
+	deps.Caps.MaxTurns = 2
+	deps.Caps.MaxTokens = 1_000
 	p := mustPool(t, poolDeps{Worker: deps, Store: store, Namespace: ns, MaxWorkers: 3, Concurrency: 2})
 	res := p.run(context.Background(), poolBriefs(3), nil)
 
@@ -1080,15 +1081,22 @@ func TestPool_Run_AppliesPerWorkerCaps(t *testing.T) {
 		t.Run(fmt.Sprintf("brief %d", i+1), func(t *testing.T) {
 			must := require.New(t)
 			must.Equal(types.StatusIncomplete, r.Status, "result = %+v", r)
-			must.Equal(1, r.Turns, "result = %+v", r)
-			must.Contains(r.Detail, "1-turn cap")
+			must.Equal(2, r.Turns, "result = %+v", r)
+			must.Contains(r.Detail, "2-turn cap")
 		})
 	}
 	reqs := modelSrv.Requests()
-	must.Len(reqs, 3, "model requests, want one per worker")
+	must.Len(reqs, 6, "model requests, want two per worker")
+	finalOnlyTurns := 0
 	for i, req := range reqs {
-		must.Equal(100, req.MaxTokens, "request %d completion cap", i)
+		want := 1_000
+		if slices.Equal(actionEnumOf(t, req.Schema), finalOnlyEnum) {
+			finalOnlyTurns++
+			want = turnCompletionTokens
+		}
+		must.Equal(want, req.MaxTokens, "request %d completion cap", i)
 	}
+	must.Equal(3, finalOnlyTurns, "final-only turns, want one per worker")
 }
 
 // TestPool_Run_ProgressIdentifiesWorkerAndHonoursGate: each worker's progress
