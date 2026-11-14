@@ -73,7 +73,7 @@ Three commands write to the working tree: `golangci-lint fmt` without
 | `internal/sink` | `ReportSink` seam: stdout-markdown, file (0600, writes assets), stdout-json, multi. |
 | `internal/transport` | `Transport` seam: run events out of the core. `Stdio` NDJSON on stderr (v1); `grpc` stub for v2. Event kinds mirror `proto/chiron/v1` one-to-one. |
 | `internal/trace` | `Tracer` seam. The CLI binds OTel (OTLP/HTTP) when an endpoint is configured and Noop otherwise; the JSONL tracer (`NewJSONL`, `NewJSONLFile`) is used by tests and the CLI cannot enable it. `names.go` fixes the span/metric vocabulary, including the reserved fleet span names (`decompose`, `delegate`, `synthesise`, `cite`, `control_plane`) and attribute keys (`worker_id`, `brief_id` on a delegate span; `brief_count` on decompose), pinned by a vocabulary test; all payloads scrubbed. |
-| `internal/secret` | `secret://` resolver (env, file backends), the credential-pattern `Scrub` primitive, and the scrubbing slog handler. Literal keys never appear in config, logs, traces, or stderr. |
+| `internal/secret` | `secret://` resolver (env, file backends), the credential-pattern `Scrub` primitive for diagnostics, `ScrubShapes` (shapes only, no entropy backstop) for model-written report text, and the scrubbing slog handler. Literal keys never appear in config, logs, traces, or stderr. |
 | `internal/memory` | The agentic-memory seam, declared locally (never imported from any store's module; see DECISIONS.md). `Recaller`/`Rememberer` are long-term memory, bound to external knowledge stores by the subpackages below and consumed by the worker's recall action and save-back. `ContextStore` embeds both plus the session and artifact plane, bound to `Noop` or `InMemory`. `InMemory` is the in-process store the fleet passes its plan and findings through by reference (`fleet.memory: inmemory`, required for `--agent fleet`; the composition root binds one per fleet run and none for any other agent): SHA-256 content-addressed, immutable artifacts in session-scoped namespaces with an absolute TTL, a per-artifact size bound, and copies in and out. Its `Remember`/`Recall` return `ErrNotImplemented`. `Recaller`/`Rememberer` never gain a lifecycle method: an adapter that holds a connection exposes its own `Close() error`, which the composition root returns beside the two halves (as `buildKnowledge` does). That `Close` takes no context because its best-effort network cleanup runs on its own bounded background context, independent of run cancellation; the session plane's `Session.Close(ctx)` takes the caller's context because a session is short-lived and TTL'd. |
 | `internal/memory/billet` | Billet adapter over `internal/mcpclient`: `Recall` calls `search_memory` (no degrade-to-prose: a reply without `records` is an error; each record bounded on read), `Remember` calls `save_memory` (content over 256 KiB refused before any request). Locators are `billet://memory/<id>`; `Close` ends its MCP session. Ships the `CHIRON_BILLET_BIN` interop test. |
 | `internal/memory/billet/billettest` | `billet.Client`'s scripted `FakeServer`, exported for downstream tests. Separate from `billet` so `net/http/httptest` does not link into the `chiron` binary. |
@@ -94,6 +94,12 @@ Three commands write to the working tree: `golangci-lint fmt` without
   adding it.
 - Secrets are `secret://` references end to end; every output path
   (logs, traces, stderr, thought deltas) routes through `secret.Scrub`.
+  The one exception is model-written report text and the findings saved
+  to the knowledge store, which route through `secret.ScrubShapes`: it
+  redacts credential shapes only (no entropy backstop), so commit
+  hashes, checksums and URLs survive, and a credential of an unlisted
+  format quoted from a fetched page is not redacted. Do not use it for
+  diagnostics.
 - stdout belongs to the report; events, prompts, and diagnostics go to
   stderr.
 - `just lint` enforces the layering through `depguard` and `forbidigo` in
