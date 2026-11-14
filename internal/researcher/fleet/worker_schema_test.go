@@ -33,8 +33,8 @@ func TestActionSchemaIsStrictCompliant(t *testing.T) {
 
 // TestFinalOnlySchema_DiffersOnlyInFinalFields: the final-only schema for
 // each variant is its ordinary schema with the action enum narrowed to final
-// and answer and citations no longer nullable nor described as null, and
-// nothing else changed.
+// and answer and citations a required string and array described without
+// null, and is otherwise identical.
 func TestFinalOnlySchema_DiffersOnlyInFinalFields(t *testing.T) {
 	for _, tt := range []struct {
 		recall bool

@@ -110,9 +110,9 @@ func actionSchemaFor(recall bool) json.RawMessage {
 	return actionSchema
 }
 
-// finalOnlyEdits narrow an action schema to the final action for the last
-// permitted turn: the enum offers final alone, and answer and citations are
-// no longer nullable.
+// finalOnlyEdits derive the schema for the last permitted turn from an
+// action schema: the enum offers final alone, and answer and citations are a
+// required string and array.
 var finalOnlyEdits = strings.NewReplacer(
 	`"enum": ["search", "fetch", "final"]`, `"enum": ["final"]`,
 	`"enum": ["search", "fetch", "recall", "final"]`, `"enum": ["final"]`,
