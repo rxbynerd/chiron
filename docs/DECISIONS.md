@@ -2966,43 +2966,60 @@ In the first live runs against a real model, a worker that reached its turn
 cap ended `incomplete` with citations and usage but no text. A Sonnet 5.5
 single worker spent the eighth and last turn of the default cap on a fetch
 and produced the placeholder report, and one worker in a five-worker Haiku
-5.5 fleet did the same, leaving a gap for its brief. The model was never told its
-budget, so it could not plan to finish. No earlier entry decided to discard
-the work on a cap stop; the 2026-09-25 remediation entry says only that a cap
-stop is a bounded outcome, not a fault.
+5.5 fleet did the same, leaving a gap for its brief. The model was never
+told its budget, so it could not plan to finish. No earlier entry decided to
+discard the work on a cap stop; the 2026-09-25 remediation entry says only
+that a cap stop is a bounded outcome, not a fault.
 
-The worker now tells the model its budget and makes the last permitted turn
+The worker tells the model its budget and makes the last permitted turn
 final-only:
 
 - The kickoff message states the turn budget, and every later turn's user
   message ends with "Turn k of N.". The system prompt is unchanged.
-- The turn a cap makes the last is sent a final-only schema (the action enum
-  narrowed to `final`, `answer` and `citations` no longer nullable, for both
-  the recall and non-recall variants) and a note asking for the final answer
-  from the sources gathered so far. Under strict structured output the
-  provider itself constrains the reply.
+- The turn a cap makes the last is sent a final-only schema, for both the
+  recall and non-recall variants: the action enum offers `final` alone, and
+  `answer` and `citations` are a required string and array. Under strict
+  structured output the provider itself constrains the reply. The turn's
+  message drops its invitation to search, fetch or recall again and ends
+  with a note asking for the final answer from the sources gathered so far.
 - The turn cap makes turn `max_turns` the last, so a `max_turns` of 1 makes
   the single turn final-only. The token cap and the cost ceiling make the
-  coming turn the last when the usage so far plus the previous turn's own
-  usage would reach the cap.
+  coming turn the last when the usage so far plus the coming turn's
+  predicted usage would reach the cap.
+- The prediction is the previous turn's input and output tokens, plus the
+  bytes appended to the transcript since that call (the model's reply and
+  the tool result) at three bytes per token, rounded up, added to the input;
+  the cost ceiling prices those extra tokens at the input price. It is a
+  heuristic with no configuration. It can fire one turn early, because
+  reasoning tokens count in a turn's output but are not re-sent, and most
+  English text has fewer tokens than one per three bytes. A turn can still outrun
+  it, for example when a provider's tokeniser yields more than one token per
+  three bytes or the model's reply is far longer than the previous one.
+- The final-only turn keeps the full 8,192-token completion cap instead of
+  the tokens left under the token cap, because narrowing the last turn could
+  only cut its answer off. Ordinary turns are still narrowed.
 - The note is appended to the trailing user message, not sent as a message
   of its own, so the transcript keeps alternating roles for providers whose
   chat templates reject consecutive user messages.
-- A non-final action on the last turn is refused in Go before dispatch, so no
-  search or fetch is paid for, and the run ends `incomplete` with the cap's
-  existing detail.
+- Anything but a final action on the last turn, including a reply that does
+  not parse, is refused in Go before dispatch, so no search, fetch or recall
+  is paid for or sent. The run ends `incomplete` with the cap's detail, and
+  a parse error is appended to it.
 - The worker span records `final_only_turn` and, when it is true,
   `final_only_cap` (`turns`, `tokens` or `cost`).
 
-What each cap returns:
+What each case returns:
 
-- Turn cap: a final answer on the last turn is `completed` with its text;
-  any other action ends `incomplete` with no text. Either way the worker made
-  exactly `max_turns` model calls.
-- Token cap and cost ceiling: the same on the final-only turn. A turn that
-  outgrows the prediction can still reach the cap before any turn was
-  final-only; the check before the next turn then stops the run `incomplete`
-  with no text. Both caps still overshoot by at most one turn.
+- A final answer on the final-only turn: `completed` with its text. On the
+  turn cap the worker made exactly `max_turns` model calls.
+- Another action, or a reply that does not parse, on the final-only turn:
+  `incomplete` with no text and the cap's detail.
+- A final-only answer cut off at the completion cap: `incomplete` with no
+  text, as for any cut-off reply.
+- A turn that outruns the prediction and reaches the token cap or cost
+  ceiling before any turn was final-only: the check before the next turn
+  stops the run `incomplete` with no text. Both caps still overshoot by at
+  most one turn, the final-only turn included.
 - Timeout: unchanged, `incomplete` with no text.
 
 An `incomplete` finding keeps its citations and usage, and a fleet still
@@ -3013,7 +3030,5 @@ the meaning of the cap and the argument that the fan-out multiplied by the
 caps is the spend ceiling. Stitching search snippets into text without a
 model call would look like a synthesis and is not one.
 
-The final-only turn's completion is still narrowed to the tokens left under
-the token cap, so near the cap the answer can be cut off and the run ends
-`incomplete`. A model told its budget may also finish early and shallowly;
-the qualification suite should compare caps once this is measured.
+A model told its budget may finish early and shallowly; the qualification
+suite should compare caps once this is measured.

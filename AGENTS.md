@@ -157,13 +157,14 @@ implemented today:
   to one turn; the timeout also cancels a call in flight. The model is
   told its turn budget, and the turn a cap makes the last is final-only:
   the last of the `max_turns` turns, or the turn whose spend, predicted
-  as the previous turn's, would reach the token or GBP cap. A final
-  answer on that turn completes the worker with text; any other action
-  is not dispatched and ends the worker `incomplete`, after exactly
-  `max_turns` model calls on the turn cap. Reaching a cap with no final
-  answer, the timeout included, ends the worker `incomplete`
-  (`TestRunWorkerCapsStopDeterministically`, `TestRunWorkerTokenCapStops`,
-  `TestRunWorker_CostCeilingStops`,
+  from the previous turn plus the transcript added since, would reach
+  the token or GBP cap. A final answer on that turn completes the worker
+  with text; any other reply is not dispatched and ends the worker
+  `incomplete`, after exactly `max_turns` model calls on the turn cap.
+  Reaching a cap with no final answer, the timeout included, ends the
+  worker `incomplete` (`TestRunWorkerCapsStopDeterministically`,
+  `TestRunWorkerTokenCapStops`, `TestRunWorker_CostCeilingStops`,
+  `TestRunWorker_FinalOnlyTurnRefusesOtherReplies`,
   `TestRunWorker_TimeoutMidTurnIsIncomplete`,
   `TestFleet_CappedWorkerFindingReachesSynthesis`). The fleet's pool gives
   every worker the same caps (`TestPool_Run_AppliesPerWorkerCaps`).
