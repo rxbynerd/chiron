@@ -365,7 +365,7 @@ func TestWorker_Run_ToolFailureIsFencedAndBounded(t *testing.T) {
 			must.LessOrEqual(len(msg), maxDetailBytes+200, "feedback should stay near the %d-byte detail bound", maxDetailBytes)
 
 			wantPrefix := "That action could not be completed. Tool error:\n" + toolResultOpen + "\n"
-			wantSuffix := "\n" + toolResultClose + "\n\nChoose a different action."
+			wantSuffix := "\n" + toolResultClose + "\n\nChoose a different action.\n\n" + turnNote(tt.feedback+1, caps().MaxTurns, false)
 			must.True(strings.HasPrefix(msg, wantPrefix), "feedback is not framed by the opening fence:\n%.600s", msg)
 			must.True(strings.HasSuffix(msg, wantSuffix), "feedback is not framed by the closing fence:\n%.600s", msg)
 			must.Equal(1, strings.Count(msg, toolResultOpen), "the tool error added an opening fence")

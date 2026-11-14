@@ -209,7 +209,16 @@ For each worker run:
    content, with navigation, banners, sidebars and footers dropped, and the
    bound applies to that text (DECISIONS 2026-09-25).
 5. Stop when the model emits a final finding, or when turn/token/cost/time caps
-   stop the loop.
+   stop the loop. The model is told its turn budget. The turn a cap makes the
+   last offers only the final action: the last of `max_turns` turns, or the
+   turn whose spend, predicted from the previous turn plus the transcript
+   added since, would reach the token cap or the cost ceiling. A final answer
+   on that turn completes the worker with its text. Any other reply is not
+   dispatched and ends the worker `incomplete`, as does an answer cut off at
+   the completion cap or reaching a cap before any final-only turn (the
+   timeout, or a turn that outran the prediction); an `incomplete` finding
+   carries the citations and usage gathered but no text (DECISIONS
+   2026-11-14).
 6. Return a finding containing concise prose, cited URLs, usage, and status.
 
 The worker must not expose generic tools to the model. It dispatches only the two

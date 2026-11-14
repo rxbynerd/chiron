@@ -110,6 +110,36 @@ func actionSchemaFor(recall bool) json.RawMessage {
 	return actionSchema
 }
 
+// finalOnlyEdits derive the schema for the last permitted turn from an
+// action schema: the enum offers final alone, and answer and citations are a
+// required string and array.
+var finalOnlyEdits = strings.NewReplacer(
+	`"enum": ["search", "fetch", "final"]`, `"enum": ["final"]`,
+	`"enum": ["search", "fetch", "recall", "final"]`, `"enum": ["final"]`,
+	`"type": ["string", "null"],
+      "description": "For action=final: the finding, in the required output format. Null otherwise."`,
+	`"type": "string",
+      "description": "For action=final: the finding, in the required output format."`,
+	`"type": ["array", "null"],
+      "description": "For action=final: the sources relied on. Null otherwise."`,
+	`"type": "array",
+      "description": "For action=final: the sources relied on."`,
+)
+
+var (
+	actionSchemaFinal       = json.RawMessage(finalOnlyEdits.Replace(string(actionSchema)))
+	actionSchemaRecallFinal = json.RawMessage(finalOnlyEdits.Replace(string(actionSchemaRecall)))
+)
+
+// finalOnlySchemaFor returns the schema for the last permitted turn, which
+// admits only the final action, for a loop with or without recall.
+func finalOnlySchemaFor(recall bool) json.RawMessage {
+	if recall {
+		return actionSchemaRecallFinal
+	}
+	return actionSchemaFinal
+}
+
 // parseAction decodes and validates one model reply. An unrecognised action
 // kind, a known kind missing its required field, an unknown field, or
 // trailing content after the JSON object is an error; the loop treats a parse

@@ -200,46 +200,63 @@ func TestRunWorkerRefusesSideEffectingActions(t *testing.T) {
 	}
 }
 
-// TestRunWorkerCapsStopDeterministically: a model that always returns search
-// exhausts the turn cap, so the loop ends Incomplete with a diagnostic that
-// names the cap.
+// TestRunWorkerCapsStopDeterministically: the turn cap allows exactly
+// MaxTurns model calls, and the last of them is final-only and says so. A
+// model that never chooses final on its own still answers on that turn and
+// completes with text; one that returns a search instead ends Incomplete on
+// the turn cap without the search running. A one-turn cap makes the single
+// turn final-only.
 func TestRunWorkerCapsStopDeterministically(t *testing.T) {
-	must := require.New(t)
-	check := assert.New(t)
+	for _, tt := range []struct {
+		name       string
+		maxTurns   int
+		ignore     bool
+		wantStatus types.Status
+		wantText   string
+		wantEnums  [][]string
+		wantCites  []types.Citation
+	}{
+		{"final-only turn answered", 3, false, types.StatusCompleted, cappedAnswer, [][]string{everyActionEnum, everyActionEnum, finalOnlyEnum}, []types.Citation{{URI: cappedSourceURL, Title: "A"}}},
+		{"final-only turn ignored", 3, true, types.StatusIncomplete, "", [][]string{everyActionEnum, everyActionEnum, finalOnlyEnum}, nil},
+		{"one-turn cap", 1, false, types.StatusCompleted, cappedAnswer, [][]string{finalOnlyEnum}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			check := assert.New(t)
 
-	// Every turn searches, so the model never reaches a final answer.
-	searchSrv := searchtest.NewFakeServer([]search.Result{
-		{Title: "R", URL: "https://example.org/a", Snippet: "s"},
-	})
-	defer searchSrv.Close()
+			c := caps()
+			c.MaxTurns = tt.maxTurns
+			m := &cappedModel{t: t, usage: model.Usage{InputTokens: 10, OutputTokens: 2}}
+			if tt.ignore {
+				m.finalOnlyReply = cappedSearch
+			}
+			finding, searches := runCapped(t, m, c)
 
-	// Script more turns than the cap allows; the loop must stop at the cap.
-	var replies []modeltest.FakeReply
-	for range 10 {
-		replies = append(replies, modeltest.FakeReply{
-			Content:      `{"action":"search","query":"again"}`,
-			FinishReason: "stop",
-			Usage:        model.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+			must.Equal(tt.wantStatus, finding.Status, "detail: %s", finding.Detail)
+			check.Equal(tt.wantText, finding.Text)
+			check.Equal(tt.maxTurns, finding.Turns)
+			enums, lastMsgs := m.requests()
+			check.Equal(tt.wantEnums, enums, "action enum per request, one request per turn")
+			check.Equal(tt.maxTurns-1, searches, "searches, none on the final-only turn")
+			check.Equal(tt.maxTurns-1, finding.Usage.SearchCount)
+			must.Len(lastMsgs, tt.maxTurns)
+			last := lastMsgs[tt.maxTurns-1]
+			wantEnd := "\n\n" + turnNote(tt.maxTurns, tt.maxTurns, true)
+			if tt.maxTurns > 1 {
+				// The search result's invitation to search or fetch again is dropped.
+				wantEnd = toolResultClose + wantEnd
+			}
+			check.True(strings.HasSuffix(last, wantEnd), "the final-only turn's message does not end with the last-turn note:\n%s", last)
+			check.NotContains(last, "Choose", "the final-only turn's message still invites another action")
+			// A citation counts only once a search has returned its URL.
+			check.Equal(tt.wantCites, finding.Citations)
+			if tt.ignore {
+				check.Contains(finding.Detail, "3-turn cap")
+			} else {
+				check.Empty(finding.Detail)
+			}
 		})
 	}
-	modelSrv := modeltest.NewFakeServer(replies...)
-	defer modelSrv.Close()
-
-	c := caps()
-	c.MaxTurns = 3
-	deps := WorkerDeps{
-		Model:  newModelClient(t, modelSrv),
-		Search: newSearchClient(t, searchSrv),
-		Fetch:  newFetchClient(t),
-		Caps:   c,
-	}
-	finding := RunWorker(context.Background(), deps, Brief{Objective: "q"})
-
-	must.Equal(types.StatusIncomplete, finding.Status, "detail: %s", finding.Detail)
-	check.Contains(finding.Detail, "3-turn cap")
-	// Exactly MaxTurns model turns were taken — no more.
-	check.Equal(3, modelSrv.CallCount(), "exactly the 3-turn cap")
-	check.Equal(3, finding.Usage.SearchCount)
 }
 
 // TestRunWorker_FailurePreservesUsage: a run that fails on its second turn (a

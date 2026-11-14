@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,7 +44,10 @@ type fleetModel struct {
 	decompose modeltest.FakeReply
 	// worker returns brief n's action for a transcript of the given length;
 	// every worker turn reports 10 input and 5 output tokens.
-	worker    func(brief, messages int) string
+	worker func(brief, messages int) string
+	// finalOnly, when set, answers brief n's final-only turns in place of
+	// worker, as a provider's strict structured output would force.
+	finalOnly func(brief int) string
 	synthesis modeltest.FakeReply
 	cite      modeltest.FakeReply
 
@@ -59,7 +63,14 @@ func (m *fleetModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} `json:"messages"`
 		ResponseFormat *struct {
 			JSONSchema struct {
-				Name string `json:"name"`
+				Name   string `json:"name"`
+				Schema struct {
+					Properties struct {
+						Action struct {
+							Enum []string `json:"enum"`
+						} `json:"action"`
+					} `json:"properties"`
+				} `json:"schema"`
 			} `json:"json_schema"`
 		} `json:"response_format"`
 	}
@@ -103,6 +114,10 @@ func (m *fleetModel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n, _ := strconv.Atoi(match[1])
+		if m.finalOnly != nil && slices.Equal(body.ResponseFormat.JSONSchema.Schema.Properties.Action.Enum, []string{"final"}) {
+			writeWorkerReply(w, m.finalOnly(n))
+			return
+		}
 		writeWorkerReply(w, m.worker(n, len(msgs)))
 	case kindSynthesise:
 		writeChatReply(w, m.synthesis)

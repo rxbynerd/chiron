@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/rxbynerd/chiron/internal/formatter"
@@ -135,6 +136,63 @@ func syntheticFleet(t *testing.T, modelURL string, searchSrv *searchtest.FakeSer
 	})
 	p := mustPool(t, poolDeps{Worker: wd, Store: store, Namespace: ns, MaxWorkers: 2, Concurrency: 2})
 	return l, p, wd
+}
+
+// TestFleet_CappedWorkerFindingReachesSynthesis: workers whose model never
+// chooses final on its own answer on their final-only last turn, so each
+// finding reaches synthesis and the run completes with no gap, every worker
+// making exactly its two-turn cap of model calls.
+func TestFleet_CappedWorkerFindingReachesSynthesis(t *testing.T) {
+	must := require.New(t)
+	check := assert.New(t)
+
+	answers := map[int]string{
+		1: "A heat pump delivers around three units of heat per unit of electricity.",
+		2: "A condensing gas boiler converts around nine-tenths of its fuel into heat.",
+		3: "Grants cover part of a heat pump's installation.",
+	}
+	finals := map[int]string{}
+	for n, answer := range answers {
+		finals[n] = workerFinal(t, answer, heatPumpURL, "Heat pump running costs")
+	}
+	fm := &fleetModel{
+		t:         t,
+		decompose: decomposeReply(decompositionJSON(t, testBriefs(3))),
+		worker: func(brief, _ int) string {
+			return fmt.Sprintf(`{"action":"search","query":"topic %d","url":null,"answer":null,"citations":null}`, brief)
+		},
+		finalOnly: func(brief int) string { return finals[brief] },
+		synthesis: synthesisReply(syntheticReport),
+		cite: citeReplyOf(citedClaims{
+			{Claim: "A heat pump delivers around three units of heat for each unit of electricity.", URLs: []string{heatPumpURL}},
+		}.json(t)),
+	}
+	modelSrv := httptest.NewServer(fm)
+	defer modelSrv.Close()
+	searchSrv := searchtest.NewFakeServer(syntheticSearchResults)
+	defer searchSrv.Close()
+	store, ns := newRecordingStore(t, memory.InMemoryOptions{})
+	mc := newModelClientAt(t, modelSrv.URL)
+	wd := poolWorkerDeps(t, mc, searchSrv)
+	wd.Caps.MaxTurns = 2
+	l := mustLead(t, leadDeps{Model: mc, Store: store, Namespace: ns})
+	p := mustPool(t, poolDeps{Worker: wd, Store: store, Namespace: ns, MaxWorkers: 3, Concurrency: 3})
+
+	run := runFleet(context.Background(), t, l, p, testQuery)
+
+	must.Equal(types.StatusCompleted, run.outcome.Status, "detail: %s", run.outcome.Detail)
+	for i, r := range run.pooled.Briefs {
+		check.Equal(types.StatusCompleted, r.Status, "brief %d (%s)", i+1, r.Detail)
+		check.Equal(2, r.Turns, "brief %d turns", i+1)
+	}
+	check.Len(fm.requestsOf(kindWorker), 6, "worker model calls, two per brief")
+	synthesis := fm.requestsOf(kindSynthesise)
+	must.Len(synthesis, 1, "one synthesis request")
+	prompt := synthesis[0][1].Content
+	for n, answer := range answers {
+		check.Contains(prompt, answer, "brief %d's finding is missing from synthesis", n)
+	}
+	check.NotContains(prompt, "Gaps:", "a capped worker was listed as a gap")
 }
 
 // TestConclude_Status_CompletedOnlyWhenEveryBriefYields: a run is Completed only when every brief yields a

@@ -177,16 +177,71 @@ const (
 		"insufficient, say so in the answer."
 )
 
-// kickoffMessage is the first user turn; the model's reply is its first
-// action.
-const kickoffMessage = "Begin. Return your first action as a JSON object matching the schema."
+// kickoffMessage is the first user turn, stating the turn budget; the
+// model's reply is its first action.
+func kickoffMessage(maxTurns int) string {
+	unit := "turns"
+	if maxTurns == 1 {
+		unit = "turn"
+	}
+	return fmt.Sprintf("Begin. You have at most %d %s, and the last accepts only a final answer. "+
+		"Return your first action as a JSON object matching the schema.", maxTurns, unit)
+}
 
 // initialTranscript is the transcript before the first model turn.
-func initialTranscript(brief Brief, recall bool) []model.Message {
+func initialTranscript(brief Brief, recall bool, maxTurns int) []model.Message {
 	return []model.Message{
 		{Role: model.RoleSystem, Content: buildSystemPrompt(brief, recall)},
-		{Role: model.RoleUser, Content: kickoffMessage},
+		{Role: model.RoleUser, Content: kickoffMessage(maxTurns)},
 	}
+}
+
+// The sentences that end each tool-result message by inviting the next
+// action. withTurnNote drops them on a final-only turn, where the only
+// action left is final.
+const (
+	searchNextAction = "\n\nChoose your next action: fetch one of these URLs to read it, " +
+		"search again, or deliver a final answer."
+	fetchNextAction = "\n\nChoose your next action: fetch another URL, search again, " +
+		"or deliver a final answer citing your sources."
+	recallNextAction = "\n\nChoose your next action: recall again, search the web to confirm, " +
+		"or deliver a final answer citing the Refs you relied on."
+	errorNextAction       = " Choose a different action."
+	toolFailureNextAction = "\n\nChoose a different action."
+)
+
+var nextActionPrompts = []string{searchNextAction, fetchNextAction, recallNextAction, toolFailureNextAction, errorNextAction}
+
+// withTurnNote appends a turn's note to the user message the turn answers.
+// On the last turn the message's next-action invitation is dropped first, so
+// the message ends with the last-turn instruction alone.
+func withTurnNote(content, note string, last bool) string {
+	if last {
+		for _, p := range nextActionPrompts {
+			if trimmed, ok := strings.CutSuffix(content, p); ok {
+				content = trimmed
+				break
+			}
+		}
+	}
+	if note == "" {
+		return content
+	}
+	return content + "\n\n" + note
+}
+
+// turnNote is the budget line appended to the user message a turn answers.
+// The first turn's note is empty unless it is also the last, because the
+// kickoff already states the budget.
+func turnNote(turn, maxTurns int, last bool) string {
+	if !last {
+		if turn == 1 {
+			return ""
+		}
+		return fmt.Sprintf("Turn %d of %d.", turn, maxTurns)
+	}
+	return fmt.Sprintf("Turn %d of %d. This is your last turn, so only the final action is accepted: "+
+		"deliver your final answer now from the sources gathered so far, citing them.", turn, maxTurns)
 }
 
 // Tool results are wrapped in explicit delimiters so the model can tell
@@ -265,8 +320,7 @@ func searchResultsMessage(query string, results []web.Result, notes []string) mo
 		}
 	}
 	b.WriteString(toolResultClose)
-	b.WriteString("\n\nChoose your next action: fetch one of these URLs to read it, " +
-		"search again, or deliver a final answer.")
+	b.WriteString(searchNextAction)
 	return model.Message{Role: model.RoleUser, Content: b.String()}
 }
 
@@ -286,8 +340,7 @@ func fetchedPageMessage(url, contentType, text string, truncated bool) model.Mes
 	b.WriteString(defang(text))
 	b.WriteString("\n")
 	b.WriteString(toolResultClose)
-	b.WriteString("\n\nChoose your next action: fetch another URL, search again, " +
-		"or deliver a final answer citing your sources.")
+	b.WriteString(fetchNextAction)
 	return model.Message{Role: model.RoleUser, Content: b.String()}
 }
 
@@ -346,8 +399,7 @@ func recallResultsMessage(query string, hits []memory.Recalled, maxBytes int) mo
 	}
 	b.WriteString(body)
 	b.WriteString(toolResultClose)
-	b.WriteString("\n\nChoose your next action: recall again, search the web to confirm, " +
-		"or deliver a final answer citing the Refs you relied on.")
+	b.WriteString(recallNextAction)
 	return model.Message{Role: model.RoleUser, Content: b.String()}
 }
 
@@ -378,7 +430,7 @@ func boundBytes(s string, maxBytes int) string {
 func errorFeedbackMessage(detail string) model.Message {
 	return model.Message{
 		Role:    model.RoleUser,
-		Content: "That action could not be completed: " + detail + " Choose a different action.",
+		Content: "That action could not be completed: " + detail + errorNextAction,
 	}
 }
 
@@ -393,7 +445,7 @@ func toolFailureMessage(detail string) model.Message {
 	b.WriteString(boundDetail(defang(detail)))
 	b.WriteString("\n")
 	b.WriteString(toolResultClose)
-	b.WriteString("\n\nChoose a different action.")
+	b.WriteString(toolFailureNextAction)
 	return model.Message{Role: model.RoleUser, Content: b.String()}
 }
 
