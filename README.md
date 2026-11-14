@@ -200,14 +200,18 @@ chiron research --agent worker \
 
 The worker keeps the v1 money rules: the paid model call is never
 auto-retried, the interaction id (a local `wkr_` handle) is emitted before
-the first call, and hitting any cap ends the run `incomplete` (exit 2)
-with the citations gathered so far. Tool failures (a 404, a refused
-destination, a binary page) are fed back to the model so it can choose
-another source; three consecutive failures end the run `failed`. The
-`wkr_` handle is not a resume token: `chiron get` and `chiron follow-up`
-refuse it. The Gemini-only levers (`--budget`, `--plan`, `--accept-plan`,
-`--model`, `--visualise`, `--tools`, `--mcp`, `--file-search`, `--input`) are
-rejected for the worker rather than silently ignored.
+the first call, and the caps add no wrap-up turn of their own. The model is
+told its turn budget, and the turn that the turn, token or cost cap makes
+the last accepts only a final answer, so a capped run still returns a
+report from the sources gathered so far. A run that reaches a cap without a
+final answer ends `incomplete` (exit 2) with the citations gathered so far.
+Tool failures (a 404, a refused destination, a binary page) are fed back to
+the model so it can choose another source; three consecutive failures end
+the run `failed`. The `wkr_` handle is not a resume token: `chiron get` and
+`chiron follow-up` refuse it. The Gemini-only levers (`--budget`, `--plan`,
+`--accept-plan`, `--model`, `--visualise`, `--tools`, `--mcp`,
+`--file-search`, `--input`) are rejected for the worker rather than silently
+ignored.
 `examples/researchconfig/worker.yaml` is a complete base config.
 
 `--template <path>` is honoured by the worker, but it replaces only the
