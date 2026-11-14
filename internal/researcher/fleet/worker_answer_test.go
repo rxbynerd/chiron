@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -77,6 +78,68 @@ var unescapedHTMLOpener = regexp.MustCompile(`(^|[^\\])<[A-Za-z/!?]`)
 // TestSanitiseAnswer_LeavesNoRawHTMLOpener: whatever tag removal misses, no
 // "<" that could open raw HTML survives unescaped, alone or appended to
 // ordinary Markdown.
+func TestSanitiseAnswer_KeepsIdentifiersAndProse(t *testing.T) {
+	const (
+		commit = "9fceb02d0ae598e95dc970b74767f19372d61af8"
+		sha256 = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	)
+	for _, tt := range []struct{ name, in string }{
+		{"commit hash", "fixed in " + commit + "."},
+		{"sha-256 digest", "checksum " + sha256},
+		{"image digest", "pull ghcr.io/example/app@sha256:" + sha256},
+		{"mixed-case identifier", "request id 9fK2mQ8vL4xR7tB1nZ5cW3jY6uH0eP8s"},
+		{"github commit url", "see https://github.com/example/repo/commit/" + commit},
+		{"github blob link with commit hash", "([license header](https://github.com/example/repo/blob/" + commit + "/Sources/Example/Example.swift))."},
+		{"github blob link with mixed-case path", "([source](https://github.com/example/repo/blob/main/Sources/ExampleKit/Networking/RequestRetryPolicy2Tests.swift))"},
+		{"bearer token in a table cell", "| AllMemoryMCP | Application bearer token with scopes, expiry, revocation | yes |"},
+		{"bearer token in prose", "The API uses a Bearer token in the Authorization header"},
+		{"sk slug in a link", "[report](https://example.com/sk-telecom-annual-report-2024-financial-results)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.in, sanitiseAnswer(tt.in))
+		})
+	}
+}
+
+// joined concatenates its parts. The fake credentials in these tests are
+// built from parts at run time so that no literal in the source has the shape
+// of a real credential and trips a secret scanner.
+func joined(parts ...string) string { return strings.Join(parts, "") }
+
+func TestSanitiseAnswer_RedactsCredentialShapes(t *testing.T) {
+	var (
+		googleKey   = joined("AI", "za", "Ab1-x9QzAb1-x9QzAb1-x9QzAb1-x9QzAb1")
+		langfuseKey = joined("s", "k-lf-", "9f8e7d6c-5b4a-4321-8fed-cba987654321")
+		skKey       = joined("s", "k-proj-", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0")
+		githubToken = joined("gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+		awsKeyID    = joined("AK", "IA", "IOSFODNN7EXAMPLE")
+		slackToken  = joined("xo", "xb-", "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx")
+		pemHeader   = joined("-----BEGIN ", "PRIVATE KEY-----")
+		pemBody     = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+		oauthSuffix = "9fK2mQ8vL4xR7tB1nZ5cW3jY6uH0eP8s"
+	)
+	for _, tt := range []struct{ name, in, leaked string }{
+		{"google key", "the key " + googleKey + " failed", googleKey},
+		{"langfuse key", "the key " + langfuseKey + " failed", langfuseKey},
+		{"authorization bearer header", "Authorization: Bearer " + joined("ya", "29.") + oauthSuffix, oauthSuffix},
+		{"sk key", "OPENAI_API_KEY=" + skKey, skKey},
+		{"github token", "clone with " + githubToken, githubToken},
+		{"aws access key id", "the page lists AWS_ACCESS_KEY_ID=" + awsKeyID, awsKeyID},
+		{"slack token", "posted with " + slackToken, slackToken},
+		{"short authorization bearer value", "Authorization: Bearer abc123", "abc123"},
+		{"basic credentials before a full stop", "Authorization: Basic dXNlcjpodW50ZXIy.", "dXNlcjpodW50ZXIy"},
+		{"private key", "key:\n" + pemHeader + "\n" + pemBody, pemBody},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got := sanitiseAnswer(tt.in)
+			must.NotContains(got, tt.leaked)
+			must.Contains(got, "[REDACTED")
+		})
+	}
+}
+
 func TestSanitiseAnswer_LeavesNoRawHTMLOpener(t *testing.T) {
 	for i, probe := range rawHTMLProbes {
 		for _, variant := range []struct{ name, in string }{

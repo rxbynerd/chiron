@@ -20,8 +20,9 @@ var (
 // scripted or embedded survives and no unclosed comment or tag can swallow
 // the text after it. Every image opener "![" becomes a plain "[" so no image
 // form (inline, reference, shortcut, nested or escaped brackets) can fire a
-// remote beacon on open, and credential-shaped material is scrubbed. Text
-// content is otherwise kept verbatim.
+// remote beacon on open, and credential-shaped material is scrubbed by shape
+// alone (secret.ScrubShapes), so identifiers such as commit hashes and
+// checksums survive. Text content is otherwise kept verbatim.
 func sanitiseAnswer(s string) string {
 	// Removing one tag can join the text around it into another, so repeat
 	// until nothing changes.
@@ -37,7 +38,7 @@ func sanitiseAnswer(s string) string {
 	for strings.Contains(s, "![") {
 		s = strings.ReplaceAll(s, "![", "[")
 	}
-	return escapeHTMLOpeners(secret.Scrub(s))
+	return escapeHTMLOpeners(secret.ScrubShapes(s))
 }
 
 // escapeHTMLOpeners backslash-escapes every "<" that could open CommonMark
