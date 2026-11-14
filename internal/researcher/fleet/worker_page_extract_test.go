@@ -3,6 +3,7 @@ package fleet
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -305,6 +306,85 @@ func TestExtract_BracketedClassValuesDoNotDropContent(t *testing.T) {
 	must.Contains(got, para)
 	must.NotContains(got, "On this page")
 	must.NotContains(got, "Documentation index")
+}
+
+// TestExtract_ReselectsWhenClassMatchesRemoveTheContent: when id and class
+// matches leave the content under minContentBytes while removing more text
+// than it holds, the content is selected without them; otherwise they stand.
+func TestExtract_ReselectsWhenClassMatchesRemoveTheContent(t *testing.T) {
+	const (
+		body    = "The issue body asks for a shared memory that every engineer on the team can read."
+		reply   = "A first reply describes how the team works around the missing feature today."
+		another = "A second reply, nested in a shared wrapper, links a related proposal instead."
+	)
+	for _, tt := range []struct {
+		name   string
+		src    string
+		want   []string
+		absent []string
+	}{
+		{
+			name: "thread marked up as comments",
+			src: `<body><header><a href="/">Site name</a></header><main><h1>Feature request</h1>` +
+				`<div class="commentBorder"><div class="IssueBody"><p>` + body + `</p></div></div>` +
+				`<div class="comments-container"><div class="react-issue-comment"><p>` + reply + `</p></div>` +
+				`<div class="shared major"><div class="react-issue-comment"><p>` + another + `</p></div></div></div>` +
+				`<nav>Pagination</nav></main><footer>Terms</footer></body>`,
+			want:   []string{"Feature request", body, reply, another},
+			absent: []string{"Site name", "Pagination", "Terms"},
+		},
+		{
+			name: "long article keeps its comments dropped",
+			src: `<main><article>` + strings.Repeat(`<p>`+para+`</p>`, 10) + `</article>` +
+				`<div class="comments">` + strings.Repeat(`<p>`+reply+`</p>`, 20) + `</div></main>`,
+			want:   []string{para},
+			absent: []string{reply},
+		},
+		{
+			name:   "short article keeps less class-matched text dropped",
+			src:    `<main><p>` + para + `</p><div class="share-tools"><a href="/s">Share this page</a></div></main>`,
+			want:   []string{para},
+			absent: []string{"Share this page"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got := extract(tt.src)
+			for _, w := range tt.want {
+				must.Contains(got, w)
+			}
+			for _, a := range tt.absent {
+				must.NotContains(got, a)
+			}
+		})
+	}
+}
+
+// TestPageParser_ReparseIgnoringAttrsReusesItsSlices: the second parse fills the
+// slices the first one sized for the page and yields the same token stream.
+func TestPageParser_ReparseIgnoringAttrsReusesItsSlices(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"class-dropped thread", `<main><div class="comments"><p>` + para + `</p></div></main>`},
+	}
+	for _, p := range adversarialPages() {
+		cases = append(cases, struct{ name, src string }{p.name, p.src})
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			p := newPageParser(tt.src)
+			p.parse()
+			tokens := slices.Clone(p.tokens)
+			elems := len(p.elems)
+			tokenCap, elemCap := cap(p.tokens), cap(p.elems)
+			p.reparseIgnoringAttrs()
+			must.Equal(tokenCap, cap(p.tokens), "reparse grew the token slice")
+			must.Equal(elemCap, cap(p.elems), "reparse grew the element slice")
+			must.Equal(tokens, p.tokens, "token stream")
+			must.Len(p.elems, elems, "element count")
+			must.Zero(p.attrDropped, "text dropped by id or class")
+		})
+	}
 }
 
 // TestExtract_CommaCreditIsCapped: a comma-stuffed paragraph earns at most ten

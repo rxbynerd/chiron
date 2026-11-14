@@ -2953,3 +2953,24 @@ inside `<main>` that held the whole article carried the first class above;
 its `banner` token dropped the wrapper, `<main>` was left with no text and
 failed the quarter-share test, and scoring chose a 147-byte notice over a
 30 KB article.
+
+**Re-selection without id and class drops.** The vocabulary drops comment
+sections on purpose, but on an issue tracker or forum thread the comments
+are the content. GitHub wraps an issue's body in `commentBorder…`, its
+thread in `react-comments-container`, and each reply in
+`react-issue-comment` inside `shared…`, so an issue page reduced to its
+title and labels. Now, when the chosen content holds under 500 bytes of
+non-space text and elements dropped by their id or class alone held more
+than it, the page is parsed again with those drops off, and the new
+selection is used when it holds more text. Dropped elements enclosing the
+chosen content, such as a `page-with-sidebar` wrapper around `<main>`, do
+not count, because the content renders their text anyway. Tag and role
+drops still apply. Readability retries in the same way when its article
+falls under its 500-character threshold. The floor keeps an ordinary
+article's comment section dropped however long it is, and the comparison
+keeps a short page's class-matched share links and pagers dropped. The
+second parse reuses the slices the first one sized, so the memory bound is
+unchanged; on the pages it applies to it costs one more parse and render
+(about 1 ms for a 538 KB issue page). Accepted risk: a page whose real
+content is under 500 bytes and whose class-matched furniture holds more
+now keeps that furniture.

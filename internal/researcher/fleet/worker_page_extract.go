@@ -28,6 +28,10 @@ const (
 	siblingScoreShare     = 0.2
 	siblingParagraphBytes = 80
 	siblingMaxLinkDensity = 0.25
+	// Content holding fewer bytes than this, while id and class matches
+	// dropped more text than it holds, is selected again without those
+	// matches (see htmlToText).
+	minContentBytes = 500
 )
 
 type tagTrait uint32
@@ -162,6 +166,7 @@ const (
 	flagContentAttr                       // id or class carries a content word
 	flagBlockChild                        // has a block-level child element
 	flagScored                            // received paragraph credit
+	flagAttrDrop                          // dropped by its id or class alone
 )
 
 // pageElement is one element of a parsed page. Its subtree is the token
@@ -201,6 +206,9 @@ type pageDoc struct {
 	src    string
 	elems  []pageElement
 	tokens []pageToken
+	// attrDropped counts the non-space text bytes of elements dropped by
+	// their id or class alone.
+	attrDropped int
 }
 
 type pageParser struct {
@@ -217,6 +225,8 @@ type pageParser struct {
 	// overflow. From then on a close tag whose name is not counted may
 	// belong to such a tag, so it is ignored rather than popping.
 	overflowFull bool
+	// ignoreAttrs turns off dropping by id and class.
+	ignoreAttrs bool
 }
 
 func newPageParser(src string) *pageParser {
@@ -242,6 +252,21 @@ func parsePage(src string) *pageDoc {
 	p := newPageParser(src)
 	p.parse()
 	return &p.pageDoc
+}
+
+// reparseIgnoringAttrs parses the page again into the same slices, which
+// the first parse sized for this source, with dropping by id and class off.
+func (p *pageParser) reparseIgnoringAttrs() {
+	p.ignoreAttrs = true
+	p.elems = p.elems[:1]
+	p.elems[0] = pageElement{parent: -1}
+	p.tokens = p.tokens[:0]
+	p.stack = p.stack[:1]
+	p.attrDropped = 0
+	clear(p.open)
+	clear(p.overflow)
+	p.overflowFull = false
+	p.parse()
 }
 
 // countMarkup counts the '<' that open markup and, of those, the ones that
@@ -427,7 +452,7 @@ func (p *pageParser) push(name, inner string, info tagInfo) {
 	if parent.info.traits&traitCode != 0 {
 		e.flags |= flagInCode
 	}
-	e.flags |= classify(info, e.flags, inner)
+	e.flags |= classify(info, e.flags, inner, !p.ignoreAttrs)
 
 	idx := int32(len(p.elems))
 	p.elems = append(p.elems, e)
@@ -437,8 +462,9 @@ func (p *pageParser) push(name, inner string, info tagInfo) {
 }
 
 // classify returns an element's own landmark, content and drop flags from
-// its tag and its id, class and role attributes.
-func classify(info tagInfo, inherited elemFlag, inner string) elemFlag {
+// its tag and its id, class and role attributes. With attrDrops false, an id
+// or class never drops the element.
+func classify(info tagInfo, inherited elemFlag, inner string, attrDrops bool) elemFlag {
 	var f elemFlag
 	id, class, role := tagAttrs(inner)
 	role = firstField(role)
@@ -461,8 +487,8 @@ func classify(info tagInfo, inherited elemFlag, inner string) elemFlag {
 	case info.traits&(traitProtected|traitCode) != 0, f&flagLandmarkMain != 0, inherited&flagInCode != 0:
 	case containsFold(boilerplateRoles, role):
 		f |= flagDrop
-	case (boilerID || boilerClass) && !contentID && !contentClass:
-		f |= flagDrop
+	case attrDrops && (boilerID || boilerClass) && !contentID && !contentClass:
+		f |= flagDrop | flagAttrDrop
 	}
 	return f
 }
@@ -503,6 +529,9 @@ func (p *pageParser) pop() {
 		delete(p.open, e.name)
 	}
 	p.credit(idx)
+	if e.flags&flagAttrDrop != 0 {
+		p.attrDropped += int(e.text)
+	}
 	if e.flags&flagDrop == 0 {
 		parent := &p.elems[e.parent]
 		parent.text += e.text
@@ -660,6 +689,30 @@ func (d *pageDoc) joinsSibling(c int32, threshold float64) bool {
 		return true
 	}
 	return e.name == "p" && d.nonLink(c) >= siblingParagraphBytes && d.linkDensity(c) < siblingMaxLinkDensity
+}
+
+// contentText returns the non-space text bytes the roots render in content
+// mode.
+func (d *pageDoc) contentText(roots []int32) int {
+	n := 0
+	for _, r := range roots {
+		n += int(d.elems[r].text)
+	}
+	return n
+}
+
+// attrRemoved returns the non-space text bytes of elements dropped by id or
+// class alone, leaving out those enclosing the roots, whose text the roots
+// render anyway. It relies on the roots sharing one parent, as contentRoots'
+// do.
+func (d *pageDoc) attrRemoved(roots []int32) int {
+	n := d.attrDropped
+	for a := d.elems[roots[0]].parent; a > 0; a = d.elems[a].parent {
+		if d.elems[a].flags&flagAttrDrop != 0 {
+			n -= int(d.elems[a].text)
+		}
+	}
+	return n
 }
 
 func (d *pageDoc) nonLink(i int32) int32 {
