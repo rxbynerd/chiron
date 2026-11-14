@@ -20,12 +20,13 @@ import (
 const synthesiseMaxTokens = 16384
 
 // maxSynthesisFindingBytes bounds each finding's text in the synthesis and
-// citation prompts, measured after defang, so five findings stay near 60 KiB.
-const maxSynthesisFindingBytes = 12 << 10
+// citation prompts, measured after defang. An answer written under
+// turnCompletionTokens is typically well below it.
+const maxSynthesisFindingBytes = 48 << 10
 
 // maxFindingSourcesBytes bounds each finding's rendered source list in a lead
 // prompt.
-const maxFindingSourcesBytes = 4 << 10
+const maxFindingSourcesBytes = 16 << 10
 
 // maxGapDetailBytes bounds one brief's reason for yielding no finding, or a
 // partial one, in a lead prompt and in the run's detail.
