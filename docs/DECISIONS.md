@@ -3032,3 +3032,36 @@ model call would look like a synthesis and is not one.
 
 A model told its budget may finish early and shallowly; the qualification
 suite should compare caps once this is measured.
+
+The final-only turn's completion is still narrowed to the tokens left under
+the token cap, so near the cap the answer can be cut off and the run ends
+`incomplete`. A model told its budget may also finish early and shallowly;
+the qualification suite should compare caps once this is measured.
+
+## 2026-11-14 — A finding reaches synthesis whole
+
+The 2026-09-25 synthesis entry cut each finding to 12 KiB in the synthesis
+and citation prompts, and each source list to 4 KiB. The first live fleet
+runs showed the cut discarding paid-for research: `claude-sonnet-5-5` and
+`claude-opus-5-5` workers wrote final answers of 4,000 to 8,000 completion
+tokens, roughly 16 to 33 KiB, and both reports said so in their own words
+("the framework finding was truncated after Ink"). `claude-haiku-5-5`
+workers stayed under the bound, which is why the smaller model's runs did
+not show it.
+
+The bounds are now 48 KiB for a finding's text and 16 KiB for its source
+list. A worker turn is capped at 8,192 completion tokens
+(`turnCompletionTokens`), reasoning included, which is about 33 KiB of
+English prose, so an ordinary answer fits whole. Token-dense text such as a
+wide Markdown table or a non-Latin script can exceed 48 KiB under the same
+cap; the cut and its `[truncated]` marker remain for that case. Five findings
+at the bound are about 320 KiB. The citation prompt adds the report body (up
+to 64 KiB) and both lead prompts add the question (up to 32 KiB), so the
+largest lead request is near 100,000 tokens, which every model the fleet has
+run against accepts. A model that rejects it fails the citation pass, which
+falls back to every worker citation. The cost is input tokens on the two
+lead calls that read the findings, which is small beside the workers' own
+transcripts.
+
+The count of cut findings stays on the synthesise span as
+`findings_truncated`.
