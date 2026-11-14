@@ -9,10 +9,12 @@ import (
 	"strings"
 )
 
-// ValidateStrictSchema checks the two strict-mode rules providers enforce when
-// strict: true is set, as Generate does: every object, at any depth, sets
-// additionalProperties to false and lists all its properties in required. The
-// error names the first offending object's JSON Pointer.
+// ValidateStrictSchema checks that a schema stays inside the strict-mode
+// subset every supported provider accepts when strict: true is set, as
+// Generate does. Every object, at any depth, sets additionalProperties to
+// false and lists all its properties in required, and no schema carries a
+// length or numeric constraint other than minItems of 0 or 1. The error names
+// the first offending schema's JSON Pointer.
 func ValidateStrictSchema(schema json.RawMessage) error {
 	if err := checkStrictSchema(schema); err != nil {
 		return fmt.Errorf("model: %w", err)
@@ -42,7 +44,18 @@ var (
 	subschemaListKeywords  = []string{"prefixItems", "anyOf", "oneOf", "allOf"}
 )
 
+// Constraint keywords at least one supported provider rejects under strict
+// mode. minItems is handled separately: 0 and 1 are accepted everywhere.
+var unsupportedConstraintKeywords = []string{
+	"maxItems", "uniqueItems",
+	"minLength", "maxLength",
+	"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+}
+
 func checkStrictNode(node map[string]any, pointer string) error {
+	if err := checkStrictConstraints(node, pointer); err != nil {
+		return err
+	}
 	if isObjectSchema(node) {
 		if err := checkStrictObject(node, pointer); err != nil {
 			return err
@@ -84,6 +97,20 @@ func checkSubschema(v any, pointer string) error {
 			if err := checkSubschema(elem, fmt.Sprintf("%s/%d", pointer, i)); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func checkStrictConstraints(node map[string]any, pointer string) error {
+	for _, kw := range unsupportedConstraintKeywords {
+		if _, ok := node[kw]; ok {
+			return fmt.Errorf("strict schema at %s: %s is not supported by every provider; enforce it after decoding", describePointer(pointer), kw)
+		}
+	}
+	if v, ok := node["minItems"]; ok {
+		if n, isNumber := v.(float64); !isNumber || (n != 0 && n != 1) {
+			return fmt.Errorf("strict schema at %s: minItems must be 0 or 1; enforce a larger bound after decoding", describePointer(pointer))
 		}
 	}
 	return nil

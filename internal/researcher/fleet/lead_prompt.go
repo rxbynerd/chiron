@@ -29,8 +29,9 @@ const (
 
 // decomposeSchema is the lead's provider-native structured-output schema,
 // strict-mode compliant like the worker's action schema. Its target enum
-// lists exactly the live routes, and minItems/maxItems state the brief range
-// that parseDecomposition enforces regardless. A brief has no field that
+// lists exactly the live routes. It carries no array length keywords, which
+// not every provider accepts: the prompt states the brief range and
+// parseDecomposition enforces it. A brief has no field that
 // names tools or actions: a worker's capabilities are fixed by its own action
 // schema, never by the lead.
 var decomposeSchema = json.RawMessage(`{
@@ -40,8 +41,6 @@ var decomposeSchema = json.RawMessage(`{
     "briefs": {
       "type": "array",
       "description": "Three to five worker briefs that together cover the research question without overlapping.",
-      "minItems": 3,
-      "maxItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
