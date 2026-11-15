@@ -2948,11 +2948,12 @@ and selectors, often naming another element's height or state, not the
 element's own role. `attrWords` therefore skips from a `[` to its matching
 `]` (brackets nest, and the end of the class name ends the skip) and takes
 tokens only from the rest, so `top-[var(--nav-height)] sidebar` still
-matches on `sidebar`. On a Tailwind-styled documentation page the wrapper
-inside `<main>` that held the whole article carried the first class above;
-its `banner` token dropped the wrapper, `<main>` was left with no text and
-failed the quarter-share test, and scoring chose a 147-byte notice over a
-30 KB article.
+matches on `sidebar`. `attrWords` reads `id` values too, so brackets in an
+id are skipped in the same way. On a Tailwind-styled documentation page the
+wrapper inside `<main>` that held the whole article carried the first class
+above; its `banner` token dropped the wrapper, `<main>` was left with no
+text and failed the quarter-share test, and scoring chose a 147-byte notice
+over a 30 KB article.
 
 **Parsing again without id and class drops.** The vocabulary drops comment
 sections on purpose, but on an issue tracker or forum thread the comments
