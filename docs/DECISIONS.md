@@ -2954,23 +2954,42 @@ its `banner` token dropped the wrapper, `<main>` was left with no text and
 failed the quarter-share test, and scoring chose a 147-byte notice over a
 30 KB article.
 
-**Re-selection without id and class drops.** The vocabulary drops comment
+**Parsing again without id and class drops.** The vocabulary drops comment
 sections on purpose, but on an issue tracker or forum thread the comments
 are the content. GitHub wraps an issue's body in `commentBorder…`, its
 thread in `react-comments-container`, and each reply in
-`react-issue-comment` inside `shared…`, so an issue page reduced to its
-title and labels. Now, when the chosen content holds under 500 bytes of
-non-space text and elements dropped by their id or class alone held more
-than it, the page is parsed again with those drops off, and the new
-selection is used when it holds more text. Dropped elements enclosing the
-chosen content, such as a `page-with-sidebar` wrapper around `<main>`, do
-not count, because the content renders their text anyway. Tag and role
-drops still apply. Readability retries in the same way when its article
-falls under its 500-character threshold. The floor keeps an ordinary
-article's comment section dropped however long it is, and the comparison
-keeps a short page's class-matched share links and pagers dropped. The
-second parse reuses the slices the first one sized, so the memory bound is
-unchanged; on the pages it applies to it costs one more parse and render
-(about 1 ms for a 538 KB issue page). Accepted risk: a page whose real
-content is under 500 bytes and whose class-matched furniture holds more
-now keeps that furniture.
+`react-issue-comment` inside `shared…`, so the extractor reduced an issue
+page to its title and labels.
+
+The trigger counts restorable text: the non-space text of elements dropped
+by their id or class, leaving out any inside an element dropped by its tag
+or role (`head`, `nav`, `footer`, `aside`, a page `header`,
+`role=navigation` and the other listed roles), which a parse without id and
+class drops still drops. A `form` does not stop the count, since it does not
+disqualify its descendants from selection either. Each dropped element
+counts only its own text, which excludes its dropped descendants, so nested
+drops are counted once.
+
+When the content is a landmark (rule 1 or 2) holding under 500 bytes of
+non-space text and the restorable text inside it exceeds that, the page is
+parsed again with id and class drops off and the same landmark is rendered,
+which then holds everything it held before plus the restored text. A
+dropped wrapper around the landmark, such as a `page-with-sidebar` around
+`<main>`, lies outside it and does not count. When the content is a scored
+block, the body or the whole document, the count covers the whole page,
+because the drops may have emptied a landmark and so moved the selection:
+selection runs again on the second parse, and its result is used only when
+it holds more text; otherwise a third parse with the drops back on restores
+the first. Readability likewise retries without its unlikely-candidate
+removal when its article falls under its 500-character threshold.
+
+The floor keeps an ordinary article's comment section dropped however long
+it is, and the comparison keeps a short page's share links and pagers
+dropped. Every parse refills the element and token slices the first one
+sized, and only the chosen parse is rendered, so peak memory is that of one
+parse and render, as before. On a page that triggers, the extra cost is one
+parse, or two when the second selection loses: on a 538 KB GitHub issue
+page extraction takes about 1.8 ms against 0.9 ms for one parse and render,
+and allocates about 100 KB more, which is the entity decoding of the larger
+output. Accepted risk: a page whose real content is under 500 bytes and
+whose restorable class-matched text holds more keeps that text.

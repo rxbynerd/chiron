@@ -28,9 +28,9 @@ const (
 	siblingScoreShare     = 0.2
 	siblingParagraphBytes = 80
 	siblingMaxLinkDensity = 0.25
-	// Content holding fewer bytes than this, while id and class matches
-	// dropped more text than it holds, is selected again without those
-	// matches (see htmlToText).
+	// Content holding fewer bytes than this, while id and class drops hid
+	// more text than it holds, is parsed again without those drops (see
+	// pageParser.content).
 	minContentBytes = 500
 )
 
@@ -155,18 +155,19 @@ var (
 type elemFlag uint32
 
 const (
-	flagDrop         elemFlag = 1 << iota // skipped when rendering content
-	flagHidden                            // skipped in every rendering
-	flagInFurniture                       // inside page furniture: never an article or scored content root
-	flagTagFurniture                      // nav, footer, aside or a page header, or inside one: never a content root
-	flagInLandmark                        // inside main, article or role=main
-	flagInLink                            // inside a link
-	flagInCode                            // inside pre or code
-	flagLandmarkMain                      // a main element or role=main
-	flagContentAttr                       // id or class carries a content word
-	flagBlockChild                        // has a block-level child element
-	flagScored                            // received paragraph credit
-	flagAttrDrop                          // dropped by its id or class alone
+	flagDrop            elemFlag = 1 << iota // skipped when rendering content
+	flagHidden                               // skipped in every rendering
+	flagInFurniture                          // inside page furniture: never an article or scored content root
+	flagTagFurniture                         // nav, footer, aside or a page header, or inside one: never a content root
+	flagInLandmark                           // inside main, article or role=main
+	flagInLink                               // inside a link
+	flagInCode                               // inside pre or code
+	flagLandmarkMain                         // a main element or role=main
+	flagContentAttr                          // id or class carries a content word
+	flagBlockChild                           // has a block-level child element
+	flagScored                               // received paragraph credit
+	flagAttrDrop                             // dropped by its id or class, outside any tag or role drop
+	flagInTagOrRoleDrop                      // inside an element dropped by its role or a tag other than form
 )
 
 // pageElement is one element of a parsed page. Its subtree is the token
@@ -206,8 +207,8 @@ type pageDoc struct {
 	src    string
 	elems  []pageElement
 	tokens []pageToken
-	// attrDropped counts the non-space text bytes of elements dropped by
-	// their id or class alone.
+	// attrDropped counts the non-space text bytes of flagAttrDrop elements:
+	// the text a parse without id and class drops could restore.
 	attrDropped int
 }
 
@@ -254,10 +255,11 @@ func parsePage(src string) *pageDoc {
 	return &p.pageDoc
 }
 
-// reparseIgnoringAttrs parses the page again into the same slices, which
-// the first parse sized for this source, with dropping by id and class off.
-func (p *pageParser) reparseIgnoringAttrs() {
-	p.ignoreAttrs = true
+// reparse parses the page again into the same slices, which the first parse
+// sized for this source, with dropping by id and class off or on. Element
+// indices are the same in every parse; only flags and counts differ.
+func (p *pageParser) reparse(ignoreAttrs bool) {
+	p.ignoreAttrs = ignoreAttrs
 	p.elems = p.elems[:1]
 	p.elems[0] = pageElement{parent: -1}
 	p.tokens = p.tokens[:0]
@@ -439,9 +441,12 @@ func (p *pageParser) push(name, inner string, info tagInfo) {
 	}
 
 	e := pageElement{name: name, info: info, parent: parentIdx, open: int32(len(p.tokens))}
-	e.flags = parent.flags & (flagInFurniture | flagTagFurniture | flagInLandmark | flagInLink | flagInCode)
+	e.flags = parent.flags & (flagInFurniture | flagTagFurniture | flagInLandmark | flagInLink | flagInCode | flagInTagOrRoleDrop)
 	if parent.flags&flagDrop != 0 && parent.info.traits&traitForm == 0 {
 		e.flags |= flagInFurniture
+		if parent.flags&flagAttrDrop == 0 {
+			e.flags |= flagInTagOrRoleDrop
+		}
 	}
 	if parent.flags&flagLandmarkMain != 0 || parent.info.traits&traitArticle != 0 {
 		e.flags |= flagInLandmark
@@ -488,7 +493,10 @@ func classify(info tagInfo, inherited elemFlag, inner string, attrDrops bool) el
 	case containsFold(boilerplateRoles, role):
 		f |= flagDrop
 	case attrDrops && (boilerID || boilerClass) && !contentID && !contentClass:
-		f |= flagDrop | flagAttrDrop
+		f |= flagDrop
+		if inherited&flagInTagOrRoleDrop == 0 {
+			f |= flagAttrDrop
+		}
 	}
 	return f
 }
@@ -582,6 +590,15 @@ func (p *pageParser) credit(idx int32) {
 // landmark holding under a quarter of the page's content text falls through
 // to the next rule.
 func (d *pageDoc) contentRoots() []int32 {
+	if l := d.landmark(); l > 0 {
+		return []int32{l}
+	}
+	return d.blockRoots()
+}
+
+// landmark returns the main landmark, else the largest article, when it
+// holds a plausible share of the page's content text, or -1.
+func (d *pageDoc) landmark() int32 {
 	total := d.nonLink(0)
 	plausible := func(e int32) bool {
 		return e > 0 && int(d.nonLink(e))*landmarkMinShare >= int(total)
@@ -590,14 +607,20 @@ func (d *pageDoc) contentRoots() []int32 {
 		return e.flags&flagLandmarkMain != 0 && e.flags&(flagDrop|flagTagFurniture) == 0
 	}
 	if m := d.largest(isMain); plausible(m) {
-		return []int32{m}
+		return m
 	}
 	isArticle := func(e *pageElement) bool {
 		return e.info.traits&traitArticle != 0 && e.flags&(flagDrop|flagInFurniture) == 0
 	}
 	if a := d.largest(isArticle); plausible(a) {
-		return []int32{a}
+		return a
 	}
+	return -1
+}
+
+// blockRoots returns the best-scoring block and its qualifying siblings,
+// else the body, else the whole document.
+func (d *pageDoc) blockRoots() []int32 {
 	if c := d.bestCandidate(); c > 0 {
 		return d.withSiblings(c)
 	}
@@ -701,18 +724,41 @@ func (d *pageDoc) contentText(roots []int32) int {
 	return n
 }
 
-// attrRemoved returns the non-space text bytes of elements dropped by id or
-// class alone, leaving out those enclosing the roots, whose text the roots
-// render anyway. It relies on the roots sharing one parent, as contentRoots'
-// do.
-func (d *pageDoc) attrRemoved(roots []int32) int {
-	n := d.attrDropped
-	for a := d.elems[roots[0]].parent; a > 0; a = d.elems[a].parent {
-		if d.elems[a].flags&flagAttrDrop != 0 {
-			n -= int(d.elems[a].text)
+// attrDroppedWithin returns the non-space text bytes of flagAttrDrop
+// elements inside root's subtree.
+func (d *pageDoc) attrDroppedWithin(root int32) int {
+	n := 0
+	for i := root + 1; i < d.elems[root].elemEnd; i++ {
+		if d.elems[i].flags&flagAttrDrop != 0 {
+			n += int(d.elems[i].text)
 		}
 	}
 	return n
+}
+
+// content returns the content roots and leaves the parser holding the parse
+// they belong to. When the content holds under minContentBytes and id and
+// class drops hid more text than it holds (inside a landmark root, else
+// anywhere), the page is parsed again without them: a landmark stays the
+// root, and any other selection is redone and kept only if it holds more.
+func (p *pageParser) content() []int32 {
+	if l := p.landmark(); l > 0 {
+		if kept := int(p.elems[l].text); kept < minContentBytes && p.attrDroppedWithin(l) > kept {
+			p.reparse(true)
+		}
+		return []int32{l}
+	}
+	roots := p.blockRoots()
+	kept := p.contentText(roots)
+	if kept >= minContentBytes || p.attrDropped <= kept {
+		return roots
+	}
+	p.reparse(true)
+	if r := p.contentRoots(); p.contentText(r) > kept {
+		return r
+	}
+	p.reparse(false)
+	return roots
 }
 
 func (d *pageDoc) nonLink(i int32) int32 {

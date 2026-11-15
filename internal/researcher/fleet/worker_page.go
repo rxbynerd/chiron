@@ -68,24 +68,15 @@ func isTextualMediaType(mediaType string) bool {
 }
 
 // htmlToText reduces an HTML document to the visible text of its main
-// content (see pageDoc.contentRoots), with block-element and table-cell
-// openings as newlines and tabs and entities decoded. Content under
-// minContentBytes is selected again without id and class drops when those
-// removed more text than it holds (pageDoc.attrRemoved); the larger selection
-// wins. Content with no letters or digits gives way to the whole document's
-// visible text when that has some. Malformed markup degrades to leftover
-// text, never an error.
+// content (see pageParser.content), with block-element and table-cell
+// openings as newlines and tabs and entities decoded. When that content has
+// no letters or digits but the whole document does, the whole document's
+// visible text is returned instead. It is a tolerant scanner, not a parser:
+// malformed markup degrades to leftover text rather than an error.
 func htmlToText(src string) string {
 	p := newPageParser(src)
 	p.parse()
-	roots := p.contentRoots()
-	text := p.render(roots, true)
-	if kept := p.contentText(roots); kept < minContentBytes && p.attrRemoved(roots) > kept {
-		p.reparseIgnoringAttrs()
-		if r := p.contentRoots(); p.contentText(r) > kept {
-			text = p.render(r, true)
-		}
-	}
+	text := p.render(p.content(), true)
 	if !hasLetterOrDigit(text) {
 		// Hiding never depends on id or class, so either parse renders the
 		// whole document alike.
