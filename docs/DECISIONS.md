@@ -2934,3 +2934,63 @@ of nanoseconds (the "Durations serialise as strings" decision applies to
 `ResearchConfig` only), and `report.markdown` is a base64 string, because the
 field is a byte slice. Whether `report.markdown` should become a plain string
 is a separate decision; the golden files make that change a visible diff.
+
+## 2026-11-14 — Page extraction keeps content its classes misdescribe
+
+Two refinements to the 2026-09-25 entry "Fetched-page main-content
+extraction", which otherwise stands.
+
+**A bracketed part of a class name is not a word.** Utility-CSS frameworks
+such as Tailwind write arbitrary values and variants in square brackets:
+`pt-[calc(10rem+var(--banner-height,2.5rem))]`,
+`[[data-banner-state=visible]_&]:top-[12rem]`. The brackets hold CSS values
+and selectors, often naming another element's height or state, not the
+element's own role. `attrWords` therefore skips from a `[` to its matching
+`]` (brackets nest, and the end of the class name ends the skip) and takes
+tokens only from the rest, so `top-[var(--nav-height)] sidebar` still
+matches on `sidebar`. `attrWords` reads `id` values too, so brackets in an
+id are skipped in the same way. On a Tailwind-styled documentation page the
+wrapper inside `<main>` that held the whole article carried the first class
+above; its `banner` token dropped the wrapper, `<main>` was left with no
+text and failed the quarter-share test, and scoring chose a 147-byte notice
+over a 30 KB article.
+
+**Parsing again without id and class drops.** The vocabulary drops comment
+sections on purpose, but on an issue tracker or forum thread the comments
+are the content. GitHub wraps an issue's body in `commentBorder…`, its
+thread in `react-comments-container`, and each reply in
+`react-issue-comment` inside `shared…`, so the extractor reduced an issue
+page to its title and labels.
+
+The trigger counts restorable text: the non-space text of elements dropped
+by their id or class, leaving out any inside an element dropped by its tag
+or role (`head`, `nav`, `footer`, `aside`, a page `header`,
+`role=navigation` and the other listed roles), which a parse without id and
+class drops still drops. A `form` does not stop the count, since it does not
+disqualify its descendants from selection either. Each dropped element
+counts only its own text, which excludes its dropped descendants, so nested
+drops are counted once.
+
+When the content is a landmark (rule 1 or 2) holding under 500 bytes of
+non-space text and the restorable text inside it exceeds that, the page is
+parsed again with id and class drops off and the same landmark is rendered,
+which then holds everything it held before plus the restored text. A
+dropped wrapper around the landmark, such as a `page-with-sidebar` around
+`<main>`, lies outside it and does not count. When the content is a scored
+block, the body or the whole document, the count covers the whole page,
+because the drops may have emptied a landmark and so moved the selection:
+selection runs again on the second parse, and its result is used only when
+it holds more text; otherwise a third parse with the drops back on restores
+the first. Readability likewise retries without its unlikely-candidate
+removal when its article falls under its 500-character threshold.
+
+The floor keeps an ordinary article's comment section dropped however long
+it is, and the comparison keeps a short page's share links and pagers
+dropped. Every parse refills the element and token slices the first one
+sized, and only the chosen parse is rendered, so peak memory is that of one
+parse and render, as before. On a page that triggers, the extra cost is one
+parse, or two when the second selection loses: on a 538 KB GitHub issue
+page extraction takes about 1.8 ms against 0.9 ms for one parse and render,
+and allocates about 100 KB more, which is the entity decoding of the larger
+output. Accepted risk: a page whose real content is under 500 bytes and
+whose restorable class-matched text holds more keeps that text.

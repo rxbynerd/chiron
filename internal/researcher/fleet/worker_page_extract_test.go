@@ -3,6 +3,7 @@ package fleet
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,6 +57,11 @@ func TestAttrWords_ClassifiesBoilerplateAndContent(t *testing.T) {
 		{"main-nav", true, true},
 		{"related-content", true, true},
 		{"post comments", true, true},
+		{"pt-[calc(10rem+var(--banner-height,2.5rem))]", false, false},
+		{"[[data-banner-state=visible]_&]:top-[12rem]", false, false},
+		{"max-w-[calc(var(--content-width,100vw))]", false, false},
+		{"top-[var(--nav-height)] sidebar", true, false},
+		{"h-[var(--banner-height) footer", true, false},
 	} {
 		t.Run(tt.value, func(t *testing.T) {
 			must := require.New(t)
@@ -280,6 +286,214 @@ func TestParsePage_NestedLinkTextCountsAsLinkText(t *testing.T) {
 			got := parsePage(tt.src).elems[1]
 			must.Equal(want.link, got.link, "link bytes")
 			must.Equal(want.text, got.text, "text bytes")
+		})
+	}
+}
+
+// TestExtract_BracketedClassValuesDoNotDropContent: a utility-CSS class whose
+// bracketed value names a banner height does not drop the wrapper holding a
+// page's main content.
+func TestExtract_BracketedClassValuesDoNotDropContent(t *testing.T) {
+	must := require.New(t)
+	src := `<body><div><p>Documentation index: fetch the complete index from the docs root.</p></div>` +
+		`<main id="content-container"><div class="flex gap-12 pt-[calc(10rem+var(--banner-height,2.5rem))]">` +
+		`<div id="toc" class="xl:flex [[data-banner-state=visible]_&]:top-[12rem]"><nav>On this page</nav></div>` +
+		`<div id="content-area"><h1>Run headless</h1><p>` + para + `</p><p>` + para + `</p></div>` +
+		`</div></main></body>`
+	must.Equal("main", rootNames(parsePage(src)), "content roots")
+	got := extract(src)
+	must.Truef(strings.HasPrefix(got, "Run headless"), "extracted text starts %q", got[:min(len(got), 40)])
+	must.Contains(got, para)
+	must.NotContains(got, "On this page")
+	must.NotContains(got, "Documentation index")
+}
+
+// sized returns marker, a space and filler: n non-space bytes in all.
+func sized(marker string, n int) string {
+	return marker + " " + strings.Repeat("x", n-len(marker))
+}
+
+// TestExtract_ReselectsWhenClassMatchesRemoveTheContent: content under
+// minContentBytes is parsed again without id and class drops only when they
+// hid more text than it holds, counting only text such a parse can restore.
+func TestExtract_ReselectsWhenClassMatchesRemoveTheContent(t *testing.T) {
+	const (
+		body    = "The issue body asks for a shared memory that every engineer on the team can read."
+		reply   = "A first reply describes how the team works around the missing feature today."
+		another = "A second reply, nested in a shared wrapper, links a related proposal instead."
+		note    = "<p>Short note of forty bytes.</p>"
+		shareX  = `<div class="share-bar"><a href="/x">Share on X</a></div>`
+	)
+	// hidden builds a main landmark holding kept bytes of text and a comment
+	// section of hidden bytes.
+	hidden := func(kept, hidden int) string {
+		return `<main><p>` + sized("KEPTTEXT", kept) + `</p><div class="comments"><p>` +
+			sized("HIDDENTEXT", hidden) + `</p></div></main>`
+	}
+	for _, tt := range []struct {
+		name   string
+		src    string
+		want   []string
+		absent []string
+	}{
+		{
+			name: "thread marked up as comments",
+			src: `<body><header><a href="/">Site name</a></header><main><h1>Feature request</h1>` +
+				`<div class="commentBorder"><div class="IssueBody"><p>` + body + `</p></div></div>` +
+				`<div class="comments-container"><div class="react-issue-comment"><p>` + reply + `</p></div>` +
+				`<div class="shared major"><div class="react-issue-comment"><p>` + another + `</p></div></div></div>` +
+				`<nav>Pagination</nav></main><footer>Terms</footer></body>`,
+			want:   []string{"Feature request", body, reply, another},
+			absent: []string{"Site name", "Pagination", "Terms"},
+		},
+		{
+			name: "content of 499 bytes is parsed again",
+			src:  hidden(499, 600),
+			want: []string{"KEPTTEXT", "HIDDENTEXT"},
+		},
+		{
+			name:   "content of 500 bytes is not",
+			src:    hidden(500, 600),
+			want:   []string{"KEPTTEXT"},
+			absent: []string{"HIDDENTEXT"},
+		},
+		{
+			name:   "hidden text equal to the content is not restored",
+			src:    hidden(300, 300),
+			want:   []string{"KEPTTEXT"},
+			absent: []string{"HIDDENTEXT"},
+		},
+		{
+			name: "hidden text one byte over the content is restored",
+			src:  hidden(300, 301),
+			want: []string{"KEPTTEXT", "HIDDENTEXT"},
+		},
+		{
+			name:   "class matches inside a footer do not count",
+			src:    `<main>` + note + shareX + `</main><footer><div class="footer-links">` + sized("FOOTERTEXT", 600) + `</div></footer>`,
+			want:   []string{"Short note"},
+			absent: []string{"Share on X", "FOOTERTEXT"},
+		},
+		{
+			name: "class matches inside a footer do not count without a landmark",
+			src: `<div>` + note + shareX + `</div><footer><div class="footer-links">` + sized("FOOTERTEXT", 600) +
+				`</div></footer>`,
+			want:   []string{"Short note"},
+			absent: []string{"Share on X", "FOOTERTEXT"},
+		},
+		{
+			name:   "class matches outside a landmark root do not count",
+			src:    `<div class="cookie-banner"><p>` + sized("COOKIETEXT", 600) + `</p></div><main>` + note + shareX + `</main>`,
+			want:   []string{"Short note"},
+			absent: []string{"Share on X", "COOKIETEXT"},
+		},
+		{
+			// The first parse picks the block, hiding the share bar inside it
+			// and the comments that leave main implausible. The second picks
+			// main with less text, so the first parse is restored.
+			name: "a smaller second selection keeps the first",
+			src: `<body><div><p>` + sized("FIRSTTEXT", 450) + `</p>` + shareX + `</div>` +
+				`<main><div class="comments"><p>` + sized("SECONDTEXT", 300) + `</p></div></main>` +
+				`<div class="sidebar"><p>` + sized("SIDETEXT", 200) + `</p></div></body>`,
+			want:   []string{"FIRSTTEXT"},
+			absent: []string{"Share on X", "SECONDTEXT", "SIDETEXT"},
+		},
+		{
+			name: "article just over the floor keeps its comments dropped",
+			src: `<main><article>` + strings.Repeat(`<p>`+para+`</p>`, 9) + `</article>` +
+				`<div class="comments">` + strings.Repeat(`<p>`+reply+`</p>`, 20) + `</div></main>`,
+			want:   []string{para},
+			absent: []string{reply},
+		},
+		{
+			name:   "short article keeps less class-matched text dropped",
+			src:    `<main><p>` + para + `</p><div class="share-tools"><a href="/s">Share this page</a></div></main>`,
+			want:   []string{para},
+			absent: []string{"Share this page"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			got := extract(tt.src)
+			for _, w := range tt.want {
+				must.Contains(got, w)
+			}
+			for _, a := range tt.absent {
+				must.NotContains(got, a)
+			}
+		})
+	}
+
+	t.Run("both parses empty", func(t *testing.T) {
+		must := require.New(t)
+		must.Empty(extract(`<div class="comments"></div>`))
+		must.Empty(extract(`<main><div class="comments"> </div></main>`))
+	})
+}
+
+// TestParsePage_CountsRestorableClassDropsOnce: the text of elements dropped
+// by id or class is counted once however they nest, and not at all under an
+// element dropped by its tag or role.
+func TestParsePage_CountsRestorableClassDropsOnce(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		src  string
+		want int
+	}{
+		{
+			name: "nested drops",
+			src: `<main><div class="comments"><div class="comment"><p>` + sized("A", 100) + `</p></div>` +
+				`<div class="comment"><p>` + sized("B", 100) + `</p></div><p>` + sized("C", 50) + `</p></div></main>`,
+			want: 250,
+		},
+		{"under a footer", `<footer><div class="footer-links">` + sized("F", 600) + `</div></footer>`, 0},
+		{"under a navigation role", `<div role="navigation"><div class="menu">` + sized("M", 600) + `</div></div>`, 0},
+		{"under a form", `<form><div class="comments"><p>` + sized("F", 100) + `</p></div></form>`, 100},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			must.Equal(tt.want, parsePage(tt.src).attrDropped)
+		})
+	}
+}
+
+// TestPageParser_ReparseReusesItsSlicesAndElements: a second parse fills the
+// slices the first one sized, yields the same token stream and element tree,
+// and a parse with id and class drops back on reproduces the first exactly.
+func TestPageParser_ReparseReusesItsSlicesAndElements(t *testing.T) {
+	type shape struct {
+		name                       string
+		parent, open, end, elemEnd int32
+	}
+	shapes := func(elems []pageElement) []shape {
+		out := make([]shape, len(elems))
+		for i, e := range elems {
+			out[i] = shape{e.name, e.parent, e.open, e.end, e.elemEnd}
+		}
+		return out
+	}
+	cases := []struct{ name, src string }{
+		{"class-dropped thread", `<main><div class="comments"><p>` + para + `</p></div></main>`},
+	}
+	for _, p := range adversarialPages() {
+		cases = append(cases, struct{ name, src string }{p.name, p.src})
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			must := require.New(t)
+			p := newPageParser(tt.src)
+			p.parse()
+			first, tokens, dropped := slices.Clone(p.elems), slices.Clone(p.tokens), p.attrDropped
+			tokenCap, elemCap := cap(p.tokens), cap(p.elems)
+			p.reparse(true)
+			must.Equal(tokenCap, cap(p.tokens), "reparse grew the token slice")
+			must.Equal(elemCap, cap(p.elems), "reparse grew the element slice")
+			must.Equal(tokens, p.tokens, "token stream")
+			must.Equal(shapes(first), shapes(p.elems), "element tree")
+			must.Zero(p.attrDropped, "text dropped by id or class")
+			p.reparse(false)
+			must.Equal(first, p.elems, "elements after id and class drops are back on")
+			must.Equal(dropped, p.attrDropped, "text dropped by id or class")
 		})
 	}
 }
